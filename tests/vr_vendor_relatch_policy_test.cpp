@@ -22,4 +22,13 @@ int main()
 
 	// Active non-vendor methods do not acquire a vendor runtime.
 	assert(!RequiresVendorRuntime(true, false));
+
+	// The relatch transaction exclusively owns resource teardown and creation.
+	// Ordinary frame/resource checks must not re-enter the vendor backend while
+	// either queued mutation or synchronous target recreation is active.
+	assert(ShouldDeferOrdinaryResourceRefresh(true, true, false));
+	assert(ShouldDeferOrdinaryResourceRefresh(true, false, true));
+	assert(ShouldDeferOrdinaryResourceRefresh(true, true, true));
+	assert(!ShouldDeferOrdinaryResourceRefresh(true, false, false));
+	assert(!ShouldDeferOrdinaryResourceRefresh(false, true, true));
 }

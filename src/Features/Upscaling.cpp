@@ -25512,6 +25512,13 @@ bool Upscaling::ApplyPendingPostLoadRuntimeReset(UpscaleMethod a_upscaleMethod)
 
 bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 {
+	if (VRVendorRelatchPolicy::ShouldDeferOrdinaryResourceRefresh(
+			globals::game::isVR,
+			pendingPerfModeRenderTargetRecreate.load(std::memory_order_acquire),
+			perfModeRenderTargetRecreateInProgress.load(std::memory_order_acquire))) {
+		return false;
+	}
+
 	resourceCheckLastCompletedFrame = std::numeric_limits<uint32_t>::max();
 	resourceCheckLastCompletedMethod = UpscaleMethod::kNONE;
 	resourceCheckStable = false;
@@ -26042,6 +26049,13 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 
 bool Upscaling::EnsureResourcesCurrent(UpscaleMethod a_upscalemethod)
 {
+	if (VRVendorRelatchPolicy::ShouldDeferOrdinaryResourceRefresh(
+			globals::game::isVR,
+			pendingPerfModeRenderTargetRecreate.load(std::memory_order_acquire),
+			perfModeRenderTargetRecreateInProgress.load(std::memory_order_acquire))) {
+		return false;
+	}
+
 	const uint32_t currentFrame = GetFrameScopedUpscalingWorkFrame();
 	if (currentFrame != std::numeric_limits<uint32_t>::max() &&
 		resourceCheckLastCompletedFrame == currentFrame &&

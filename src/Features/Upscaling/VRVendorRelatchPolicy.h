@@ -23,4 +23,12 @@ namespace VRVendorRelatchPolicy
 		       !a_preservedResources &&
 		       !a_recreatedResources;
 	}
+
+	constexpr bool ShouldDeferOrdinaryResourceRefresh(
+		bool a_isVR,
+		bool a_relatchPending,
+		bool a_relatchInProgress)
+	{
+		return a_isVR && (a_relatchPending || a_relatchInProgress);
+	}
 }
