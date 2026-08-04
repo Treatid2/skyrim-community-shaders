@@ -1325,6 +1325,19 @@ if(BUILD_CONTROLLER_TESTS)
         NAME PerfModeRestartState
         COMMAND perf_mode_restart_state_test
     )
+    add_executable(
+        vr_vendor_relatch_policy_test
+        tests/vr_vendor_relatch_policy_test.cpp
+    )
+    target_compile_features(vr_vendor_relatch_policy_test PRIVATE cxx_std_23)
+    target_include_directories(
+        vr_vendor_relatch_policy_test
+        PRIVATE "${CMAKE_SOURCE_DIR}/src"
+    )
+    add_test(
+        NAME VRVendorRelatchPolicy
+        COMMAND vr_vendor_relatch_policy_test
+    )
 endif()
 
 message("*************************************************************")

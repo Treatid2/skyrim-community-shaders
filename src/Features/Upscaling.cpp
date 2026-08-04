@@ -20,6 +20,7 @@
 #include "Upscaling/FidelityFX.h"
 #include "Upscaling/Streamline.h"
 #include "Upscaling/VRRenderScaleDevBenchBridge.h"
+#include "Upscaling/VRVendorRelatchPolicy.h"
 #include "Utils/FileSystem.h"
 #include "Utils/Game.h"
 #include "Utils/OpenCompositeInterop.h"
@@ -20684,7 +20685,12 @@ bool Upscaling::ApplyPendingPerfModeRenderTargetRecreate(const char* a_caller)
 			vrIntermediateTextureGeneration = relatchContractGeneration;
 		if (relatchPlan.recreateFSRResources)
 			RefreshRuntimeResolutionState();
+		const bool targetRequiresVendorRuntime =
+			VRVendorRelatchPolicy::RequiresVendorRuntime(
+				relatchTargetRenderScaleActive,
+				IsVendorUpscalingMethod(relatchUpscaleMethod));
 		const bool warmTargetRuntimeReadyForRebind =
+			targetRequiresVendorRuntime &&
 			relatchPlan.reuseWarmTargetRuntime &&
 			relatchPlan.reuseSharedSubmitResources &&
 			AreCommonVendorTexturesReady(relatchUpscaleMethod);
@@ -20694,17 +20700,21 @@ bool Upscaling::ApplyPendingPerfModeRenderTargetRecreate(const char* a_caller)
 				vendorRecreateResult = VRVendorResourceResetResult::Failed;
 			else
 				MarkVendorRuntimeResourcesReady(relatchUpscaleMethod, relatchContractGeneration);
-		} else {
+		} else if (targetRequiresVendorRuntime) {
 			vendorRecreateResult = RecreateVendorRuntimeResources(
 				relatchUpscaleMethod,
 				relatchUpscaleMethod != UpscaleMethod::kFSR || relatchPlan.recreateFSRResources);
 		}
-		if (relatchUpscaleMethod == UpscaleMethod::kFSR &&
+		const bool targetRequiresFSRCompatibility =
+			VRVendorRelatchPolicy::RequiresFSRCompatibility(
+				relatchTargetRenderScaleActive,
+				relatchUpscaleMethod == UpscaleMethod::kFSR);
+		if (targetRequiresFSRCompatibility &&
 			vendorRecreateResult == VRVendorResourceResetResult::Ready &&
 			!areFSRResourcesCompatibleForRelatch()) {
 			vendorRecreateResult = VRVendorResourceResetResult::Failed;
 		}
-		if (relatchUpscaleMethod == UpscaleMethod::kFSR &&
+		if (targetRequiresFSRCompatibility &&
 			vendorRecreateResult != VRVendorResourceResetResult::Ready) {
 			if (vendorRecreateResult == VRVendorResourceResetResult::Pending)
 				MarkVendorRuntimeResourcesDirty(UpscaleMethod::kFSR, relatchContractGeneration);
@@ -20724,9 +20734,11 @@ bool Upscaling::ApplyPendingPerfModeRenderTargetRecreate(const char* a_caller)
 			vendorRecreateResult == VRVendorResourceResetResult::Ready &&
 			areFSRResourcesCompatibleForRelatch();
 		const bool fsrRelatchNeedsDeferredReset =
-			relatchUpscaleMethod == UpscaleMethod::kFSR &&
-			!relatchPlan.preserveFSRResources &&
-			!fsrResourcesRecreatedDuringRelatch;
+			VRVendorRelatchPolicy::NeedsDeferredFSRReset(
+				relatchTargetRenderScaleActive,
+				relatchUpscaleMethod == UpscaleMethod::kFSR,
+				relatchPlan.preserveFSRResources,
+				fsrResourcesRecreatedDuringRelatch);
 		if (relatchPlan.recreateFSRResources && !fsrResourcesRecreatedDuringRelatch) {
 			logger::warn("[VRRenderScale] Render-target relatch could not recreate FSR resources immediately; scheduling deferred rebuild.");
 			if (missingCompatibleFSRResourcesForActiveRelatch) {
@@ -20752,7 +20764,15 @@ bool Upscaling::ApplyPendingPerfModeRenderTargetRecreate(const char* a_caller)
 				ClampPositiveDimension(relatchTargetDisplaySize.y));
 		}
 
-		if (relatchUpscaleMethod == UpscaleMethod::kDLSS) {
+		if (!relatchTargetRenderScaleActive) {
+			// The inactive physical contract has no vendor backend. Teardown above
+			// already retired any previous runtime; do not publish a new generation
+			// or leave a deferred rebuild armed for native presentation.
+			ClearVendorRuntimeResourcesDirty(UpscaleMethod::kDLSS, true);
+			ClearVendorRuntimeResourcesDirty(UpscaleMethod::kFSR, true);
+			pendingDLSSHistoryReset.store(false, std::memory_order_release);
+			vrDLSSSettingsRelatched.store(false, std::memory_order_release);
+		} else if (relatchUpscaleMethod == UpscaleMethod::kDLSS) {
 			pendingDLSSHistoryReset.store(true, std::memory_order_release);
 			MarkVendorRuntimeResourcesReady(UpscaleMethod::kDLSS, relatchContractGeneration);
 			ClearVendorRuntimeResourcesDirty(UpscaleMethod::kFSR);
@@ -37466,13 +37486,14 @@ void Upscaling::ApplyPendingVRUpscalingTransition()
 					transitionOrigin,
 					false,
 					request.transitionEpoch)) {
+				const float2 nativeSize = perfMode.GetDisplayScreenSize();
 				CompleteVRRenderScaleInfoTransition(
 					request.transitionEpoch,
 					"request already applied",
 					false,
 					targetMethod,
-					perfMode.GetDisplayScreenSize(),
-					perfMode.GetRenderScreenSize());
+					nativeSize,
+					nativeSize);
 			}
 		}
 		return;
@@ -37529,13 +37550,17 @@ void Upscaling::ApplyPendingVRUpscalingTransition()
 				transitionOrigin,
 				false,
 				request.transitionEpoch)) {
+			const float2 displaySize = perfMode.GetDisplayScreenSize();
+			const float2 renderSize = targetPerfMode ?
+			                              perfMode.GetRenderScreenSize() :
+			                              displaySize;
 			CompleteVRRenderScaleInfoTransition(
 				request.transitionEpoch,
 				"request already applied",
 				targetPerfMode,
 				targetMethod,
-				perfMode.GetDisplayScreenSize(),
-				perfMode.GetRenderScreenSize());
+				displaySize,
+				renderSize);
 		}
 	}
 }

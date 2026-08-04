@@ -1,0 +1,25 @@
+#include "Features/Upscaling/VRVendorRelatchPolicy.h"
+
+#include <cassert>
+
+int main()
+{
+	using namespace VRVendorRelatchPolicy;
+
+	// Native/RS-off retains the selected FSR method as a setting, but its
+	// physical resource contract has no submit-stage vendor backend.
+	assert(!RequiresVendorRuntime(false, true));
+	assert(!RequiresFSRCompatibility(false, true));
+	assert(!NeedsDeferredFSRReset(false, true, false, false));
+
+	// An active FSR contract still requires creation, compatibility proof, and
+	// a deferred rebuild when neither preserved nor recreated resources exist.
+	assert(RequiresVendorRuntime(true, true));
+	assert(RequiresFSRCompatibility(true, true));
+	assert(NeedsDeferredFSRReset(true, true, false, false));
+	assert(!NeedsDeferredFSRReset(true, true, true, false));
+	assert(!NeedsDeferredFSRReset(true, true, false, true));
+
+	// Active non-vendor methods do not acquire a vendor runtime.
+	assert(!RequiresVendorRuntime(true, false));
+}
