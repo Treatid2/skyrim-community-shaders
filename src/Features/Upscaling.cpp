@@ -19148,6 +19148,12 @@ bool Upscaling::ApplyPendingPerfModeRenderTargetRecreate(const char* a_caller)
 		*this,
 		state,
 		authoritativeRelatchActivationTarget);
+	// A superseded relatch can leave restartRequired describing the abandoned
+	// settings tuple. Recompute it from this immutable target before no-op
+	// admission so returning to the still-active boot contract does not force a
+	// destructive target recreation. RecordTrueHMDSize keeps displaySizeChanged
+	// sticky, so an actual HMD-size change cannot be hidden by this refresh.
+	perfMode.UpdateRestartRequiredState(relatchSettings, relatchUpscaleMethod);
 	if (authoritativeStartupActivationProtection && !CanStartVRRenderScaleRuntime(*this)) {
 		requeueRelatch(kVRRenderScalePostLoadSettleRetryFrames);
 		if (!loggedRelatchRuntimeActivationDefer) {
