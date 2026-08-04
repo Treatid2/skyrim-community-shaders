@@ -56,6 +56,11 @@ option(
     ON
 )
 option(
+    BUILD_CONTROLLER_TESTS
+    "Build dependency-free controller state regression tests"
+    OFF
+)
+option(
     AIO_EXCLUDE_HIDDEN_FEATURE_PACKAGES
     "Exclude feature packages hidden from user-facing feature lists from AIO and package outputs."
     OFF
@@ -71,6 +76,7 @@ message("\tZip to dist: ${ZIP_TO_DIST}")
 message("\tAIO Zip to dist: ${AIO_ZIP_TO_DIST}")
 message("\tTracy profiler: ${TRACY_SUPPORT}")
 message("\tShader tests: ${BUILD_SHADER_TESTS}")
+message("\tController tests: ${BUILD_CONTROLLER_TESTS}")
 message(
     "\tExclude hidden AIO feature packages: ${AIO_EXCLUDE_HIDDEN_FEATURE_PACKAGES}"
 )
@@ -1301,6 +1307,23 @@ if(BUILD_SHADER_TESTS)
     message(
         STATUS
         "Package and shader deployment targets will automatically run shader tests before deploying"
+    )
+endif()
+
+if(BUILD_CONTROLLER_TESTS)
+    enable_testing()
+    add_executable(
+        perf_mode_restart_state_test
+        tests/perf_mode_restart_state_test.cpp
+    )
+    target_compile_features(perf_mode_restart_state_test PRIVATE cxx_std_23)
+    target_include_directories(
+        perf_mode_restart_state_test
+        PRIVATE "${CMAKE_SOURCE_DIR}/src"
+    )
+    add_test(
+        NAME PerfModeRestartState
+        COMMAND perf_mode_restart_state_test
     )
 endif()
 
