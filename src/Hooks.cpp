@@ -40,6 +40,506 @@ std::unordered_map<void*, std::pair<std::unique_ptr<uint8_t[]>, size_t>> ShaderB
 namespace
 {
 	std::shared_mutex g_renderTargetRecreationMutex;
+
+	struct VRRenderPassShaderVtable
+	{
+		std::uintptr_t vtable = 0;
+	};
+
+	constexpr std::size_t kVRRenderPassShaderVtableCount = 10;
+	std::array<VRRenderPassShaderVtable, kVRRenderPassShaderVtableCount> g_vrRenderPassShaderVtables{};
+	bool g_vrRenderPassShaderGuardReady = false;
+
+	using VRCompressedMeshMaterialResolver = const std::uint8_t* (*)(RE::hkpCompressedMeshShape*,
+		RE::hkpShapeKey);
+	VRCompressedMeshMaterialResolver g_vrCompressedMeshMaterialResolver = nullptr;
+	std::atomic<std::uint32_t> g_vrCompressedMeshMaterialRecoveries = 0;
+	std::atomic<std::uint32_t> g_vrRenderPassShaderRecoveries = 0;
+	std::atomic<std::uint32_t> g_vrBatchCacheRetireRecoveries = 0;
+	std::atomic<std::uint32_t> g_vrBatchCacheInsertRecoveries = 0;
+
+	constexpr bool IsVRCompressedMeshMaterialEntryInBounds(
+		std::uintptr_t a_materialBase,
+		std::uintptr_t a_materialAddress,
+		std::uintptr_t a_materialStride,
+		std::uintptr_t a_materialCount) noexcept
+	{
+		if (a_materialBase == 0 || a_materialStride < sizeof(RE::bhkMeshMaterial) || a_materialCount == 0 ||
+			a_materialCount > (std::numeric_limits<std::uintptr_t>::max)() / a_materialStride ||
+			a_materialAddress < a_materialBase) {
+			return false;
+		}
+
+		const auto materialBytes = a_materialStride * a_materialCount;
+		const auto materialOffset = a_materialAddress - a_materialBase;
+		return materialOffset % a_materialStride == 0 &&
+		       materialOffset <= materialBytes - sizeof(RE::bhkMeshMaterial);
+	}
+
+	static_assert(IsVRCompressedMeshMaterialEntryInBounds(0x1000, 0x1000, 8, 1));
+	static_assert(IsVRCompressedMeshMaterialEntryInBounds(0x1000, 0x1008, 8, 2));
+	static_assert(!IsVRCompressedMeshMaterialEntryInBounds(0x1000, 0x1004, 8, 2));
+	static_assert(!IsVRCompressedMeshMaterialEntryInBounds(0x1000, 0x1000 + 0xFFFF * 8, 8, 0xFFFF));
+
+	void RecordVRCompressedMeshMaterialRecovery() noexcept
+	{
+		// This can run on a Havok worker while the main thread waits for the
+		// physics step. Keep recovery lock-free: logging here could invert a lock
+		// held by a thread waiting on that worker. The counter remains available
+		// for debugger/telemetry inspection without changing the recovery path.
+		g_vrCompressedMeshMaterialRecoveries.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	void FlushVRLifetimeGuardRecoveryTelemetry()
+	{
+		if (!REL::Module::IsVR()) {
+			return;
+		}
+
+		const auto material = g_vrCompressedMeshMaterialRecoveries.load(std::memory_order_relaxed);
+		const auto renderPass = g_vrRenderPassShaderRecoveries.load(std::memory_order_relaxed);
+		const auto cacheRetire = g_vrBatchCacheRetireRecoveries.load(std::memory_order_relaxed);
+		const auto cacheInsert = g_vrBatchCacheInsertRecoveries.load(std::memory_order_relaxed);
+		const auto total = static_cast<std::uint64_t>(material) + renderPass + cacheRetire + cacheInsert;
+
+		// Report the first recovery and then power-of-two aggregate milestones.
+		// The counters are updated lock-free at their native worker/render sites;
+		// formatting and logger locks stay on this normal render-thread checkpoint.
+		static std::uint64_t nextReportTotal = 1;
+		if (total < nextReportTotal) {
+			return;
+		}
+
+		logger::warn(
+			"[VRLifetimeGuard] recoveries: compressedMeshMaterial={} renderPass={} cacheRetire={} cacheInsert={}",
+			material,
+			renderPass,
+			cacheRetire,
+			cacheInsert);
+		while (nextReportTotal <= total && nextReportTotal <= (std::numeric_limits<std::uint64_t>::max)() / 2) {
+			nextReportTotal *= 2;
+		}
+	}
+
+	std::uint32_t GuardedVRCompressedMeshMaterialLookup(
+		const void* a_shapeWrapper,
+		RE::hkpShapeKey a_shapeKey) noexcept
+	{
+		if (!a_shapeWrapper || a_shapeKey == RE::HK_INVALID_SHAPE_KEY || !g_vrCompressedMeshMaterialResolver) {
+			return 0;
+		}
+
+		RE::hkpCompressedMeshShape* shape = nullptr;
+#if defined(_MSC_VER)
+		__try
+#endif
+		{
+			shape = *reinterpret_cast<RE::hkpCompressedMeshShape* const*>(
+				reinterpret_cast<const std::uint8_t*>(a_shapeWrapper) + 0x10);
+		}
+#if defined(_MSC_VER)
+		__except (EXCEPTION_EXECUTE_HANDLER) {
+			RecordVRCompressedMeshMaterialRecovery();
+			return 0;
+		}
+#endif
+
+		if (!shape) {
+			return 0;
+		}
+
+		// Keep the resolver outside the exception guard. Compatibility plugins may
+		// detour this decoder; faults inside their implementation are not safe to
+		// unwind through here. The observed engine failure occurs after the resolver
+		// returns a non-null material entry whose backing allocation has already been
+		// retired. In that dump,
+		// the decoder used material index 0xFFFF with stride 8 and returned exactly
+		// base + 0xFFFF * 8; a uint16 material count can never contain that entry.
+		const auto* material = g_vrCompressedMeshMaterialResolver(shape, a_shapeKey);
+		if (!material) {
+			return 0;
+		}
+
+		std::uint32_t materialID = 0;
+		bool validMaterialEntry = false;
+#if defined(_MSC_VER)
+		__try
+#endif
+		{
+			const auto materialBase = reinterpret_cast<std::uintptr_t>(shape->meshMaterials);
+			const auto materialAddress = reinterpret_cast<std::uintptr_t>(material);
+			const auto materialStride = static_cast<std::uintptr_t>(shape->materialStriding);
+			const auto materialCount = static_cast<std::uintptr_t>(shape->numMaterials);
+
+			// Skyrim stores bhkMeshMaterial here (filterInfo + materialID). Verify
+			// that the decoder result is one complete, aligned entry in the shape's
+			// live material table before reading materialID at +0x04.
+			if (IsVRCompressedMeshMaterialEntryInBounds(
+					materialBase,
+					materialAddress,
+					materialStride,
+					materialCount)) {
+				materialID = *reinterpret_cast<const std::uint32_t*>(material + 0x04);
+				validMaterialEntry = true;
+			}
+		}
+#if defined(_MSC_VER)
+		__except (EXCEPTION_EXECUTE_HANDLER) {
+			validMaterialEntry = false;
+		}
+#endif
+
+		if (!validMaterialEntry) {
+			RecordVRCompressedMeshMaterialRecovery();
+			return 0;
+		}
+
+		return materialID;
+	}
+
+	void InstallVRCompressedMeshMaterialLifetimeGuard()
+	{
+		if (!REL::Module::IsVR()) {
+			return;
+		}
+
+		if (REL::Module::get().version() != SKSE::RUNTIME_VR_1_4_15) {
+			logger::error(
+				"VR compressed-mesh material lifetime guard not installed: unsupported Skyrim VR runtime {}",
+				REL::Module::get().version().string());
+			return;
+		}
+
+		// bhkCompressedMeshShape's material virtual calls the native compressed-
+		// mesh decoder and then blindly reads bhkMeshMaterial::materialID. During
+		// cell/physics retirement the decoder can still return an entry from an
+		// already-freed material table (observed at SkyrimVR.exe+E564EC). Returning
+		// zero is this same function's existing null/invalid-key fallback and makes
+		// the contact non-hurtful without altering coherent collision geometry.
+		constexpr std::uintptr_t materialLookupRVA = 0xE564D0;
+		constexpr std::uintptr_t materialResolverRVA = 0xE97490;
+		constexpr std::uint8_t expectedLookupEntry[] = {
+			0x48, 0x83, 0xEC, 0x28,  // sub rsp, 28h
+			0x48, 0x8B, 0x49, 0x10,  // mov rcx, [rcx + 10h]
+			0x48, 0x85, 0xC9,        // test rcx, rcx
+			0x74, 0x17,              // je native neutral return
+			0x83, 0xFA, 0xFF         // cmp edx, -1
+		};
+
+		const auto moduleBase = REL::Module::get().base();
+		const auto materialLookup = moduleBase + materialLookupRVA;
+		if (!std::equal(
+				std::begin(expectedLookupEntry),
+				std::end(expectedLookupEntry),
+				reinterpret_cast<const std::uint8_t*>(materialLookup))) {
+			logger::error(
+				"VR compressed-mesh material lifetime guard not installed: unexpected SkyrimVR.exe instructions");
+			return;
+		}
+
+		g_vrCompressedMeshMaterialResolver =
+			reinterpret_cast<VRCompressedMeshMaterialResolver>(moduleBase + materialResolverRVA);
+		SKSE::GetTrampoline().write_branch<5>(materialLookup, GuardedVRCompressedMeshMaterialLookup);
+
+		logger::info("Installed VR compressed-mesh material lifetime guard");
+	}
+
+	class VRBatchRendererCacheRetireGuard : public Xbyak::CodeGenerator
+	{
+	public:
+		VRBatchRendererCacheRetireGuard(
+			std::uintptr_t a_continuation,
+			std::uintptr_t a_noCacheRecovery)
+		{
+			Xbyak::Label noCache;
+
+			// Capture the backing pointer once, then use that exact value to compute
+			// the entry. This prevents the active flag and two independent pointer
+			// loads from observing different cache generations during teardown.
+			mov(rdx, qword[rsi + 0x08]);
+			test(rdx, rdx);
+			jz(noCache, T_NEAR);
+			mov(ecx, dword[r15]);
+			lea(r11, ptr[r14 + r14 * 2]);
+			shl(r11, 4);
+			add(rdx, r11);
+			mov(r11, a_continuation);
+			jmp(r11);
+
+			L(noCache);
+			mov(r11, reinterpret_cast<std::uintptr_t>(&g_vrBatchCacheRetireRecoveries));
+			lock();
+			inc(dword[r11]);
+			mov(r11, a_noCacheRecovery);
+			jmp(r11);
+		}
+	};
+
+	class VRBatchRendererCacheInsertGuard : public Xbyak::CodeGenerator
+	{
+	public:
+		VRBatchRendererCacheInsertGuard(
+			std::uintptr_t a_continuation,
+			std::uintptr_t a_noCacheRecovery)
+		{
+			Xbyak::Label noCache;
+
+			mov(rcx, qword[r10 + 0x08]);
+			test(rcx, rcx);
+			jz(noCache, T_NEAR);
+			mov(eax, ebx);
+			lea(r11, ptr[rax + rax * 2]);
+			shl(r11, 4);
+			add(rcx, r11);
+			mov(r11, a_continuation);
+			jmp(r11);
+
+			L(noCache);
+			mov(r11, reinterpret_cast<std::uintptr_t>(&g_vrBatchCacheInsertRecoveries));
+			lock();
+			inc(dword[r11]);
+			mov(r11, a_noCacheRecovery);
+			jmp(r11);
+		}
+	};
+
+	bool TryResolveVRRenderPassSetupTechnique(
+		RE::BSShader* a_shader,
+		std::uintptr_t& a_setupTechnique) noexcept
+	{
+		a_setupTechnique = 0;
+		if (!g_vrRenderPassShaderGuardReady || !a_shader) {
+			return false;
+		}
+
+#if defined(_MSC_VER)
+		__try
+#endif
+		{
+			const auto vtable = *reinterpret_cast<const std::uintptr_t*>(a_shader);
+			for (const auto& known : g_vrRenderPassShaderVtables) {
+				if (vtable == known.vtable) {
+					// Read the live slot after proving exact shader class identity. A
+					// later-loading compatibility plugin may legitimately hook this
+					// virtual; pinning the startup target would reject every valid pass.
+					a_setupTechnique = *reinterpret_cast<const std::uintptr_t*>(vtable + 0x10);
+					if (!a_setupTechnique) {
+						return false;
+					}
+					return true;
+				}
+			}
+			return false;
+		}
+#if defined(_MSC_VER)
+		__except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+#endif
+	}
+
+	bool IsVRRenderPassShaderSafe(RE::BSRenderPass* a_pass) noexcept
+	{
+		if (!g_vrRenderPassShaderGuardReady) {
+			return true;
+		}
+
+		RE::BSShader* shader = nullptr;
+#if defined(_MSC_VER)
+		__try
+#endif
+		{
+			shader = a_pass ? a_pass->shader : nullptr;
+		}
+#if defined(_MSC_VER)
+		__except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+#endif
+
+		std::uintptr_t setupTechnique = 0;
+		return TryResolveVRRenderPassSetupTechnique(shader, setupTechnique);
+	}
+
+	bool GuardedVRRenderPassSetupTechnique(RE::BSShader* a_shader, std::uint32_t a_technique) noexcept
+	{
+		std::uintptr_t setupTechnique = 0;
+		if (!TryResolveVRRenderPassSetupTechnique(a_shader, setupTechnique)) {
+			// SetupTechnique returning false is the native narrow recovery path: the
+			// current shader remains unpublished and this render pass is abandoned.
+			g_vrRenderPassShaderRecoveries.fetch_add(1, std::memory_order_relaxed);
+			return false;
+		}
+
+		using SetupTechnique = bool (*)(RE::BSShader*, std::uint32_t);
+		// Deliberately invoke outside the SEH read guard. Faults inside a valid
+		// shader implementation are real faults and must not be hidden here.
+		return reinterpret_cast<SetupTechnique>(setupTechnique)(a_shader, a_technique);
+	}
+
+	void InstallVRRenderPassShaderGuard()
+	{
+		if (!REL::Module::IsVR()) {
+			return;
+		}
+
+		if (REL::Module::get().version() != SKSE::RUNTIME_VR_1_4_15) {
+			logger::error(
+				"VR render-pass shader guard not installed: unsupported Skyrim VR runtime {}",
+				REL::Module::get().version().string());
+			return;
+		}
+
+		// BSBatchRenderer's shared setup helper trusts BSRenderPass::shader and
+		// immediately dispatches BSShader::SetupTechnique. Engine Fixes can retain
+		// an otherwise readable pass after cell teardown; in the observed
+		// BeamMeshDust05 failure its shader vtable had already become heap data.
+		// Guard the final native virtual-call boundary so all immediate-pass callers
+		// (including external wrappers) share the same fail-closed recovery.
+		constexpr std::uintptr_t setupTechniqueCallRVA = 0x1349962;
+		constexpr std::uint8_t expectedInstructions[] = {
+			0x48, 0x8B, 0x03,  // mov rax, [rbx]
+			0xFF, 0x50, 0x10   // call qword ptr [rax + 10h]
+		};
+		const auto callsite = REL::Module::get().base() + setupTechniqueCallRVA;
+		if (!std::equal(
+				expectedInstructions,
+				expectedInstructions + std::size(expectedInstructions),
+				reinterpret_cast<const std::uint8_t*>(callsite))) {
+			logger::error("VR render-pass shader guard not installed: unexpected SkyrimVR.exe instructions");
+			return;
+		}
+
+		const auto rdata = REL::Module::get().segment(REL::Segment::rdata);
+		if (!rdata.address() || rdata.size() < 0x18) {
+			logger::error("VR render-pass shader guard not installed: SkyrimVR.exe read-only bounds unavailable");
+			return;
+		}
+		const auto rdataEnd = rdata.address() + rdata.size();
+
+		const std::array<REL::VariantID, kVRRenderPassShaderVtableCount> renderShaderVtables{
+			RE::VTABLE_BSGrassShader[0],
+			RE::VTABLE_BSSkyShader[0],
+			RE::VTABLE_BSWaterShader[0],
+			RE::VTABLE_BSBloodSplatterShader[0],
+			RE::VTABLE_BSImagespaceShader[0],
+			RE::VTABLE_BSLightingShader[0],
+			RE::VTABLE_BSEffectShader[0],
+			RE::VTABLE_BSUtilityShader[0],
+			RE::VTABLE_BSDistantTreeShader[0],
+			RE::VTABLE_BSParticleShader[0]
+		};
+
+		for (std::size_t i = 0; i < renderShaderVtables.size(); ++i) {
+			const auto vtable = REL::Relocation<std::uintptr_t>{ renderShaderVtables[i] }.address();
+			if (vtable < rdata.address() || vtable > rdataEnd - 0x18) {
+				logger::error("VR render-pass shader guard not installed: shader vtable outside SkyrimVR.exe read-only bounds");
+				return;
+			}
+
+			const auto setupTechnique = *reinterpret_cast<const std::uintptr_t*>(vtable + 0x10);
+			MEMORY_BASIC_INFORMATION memoryInfo{};
+			if (!setupTechnique ||
+				VirtualQuery(reinterpret_cast<const void*>(setupTechnique), &memoryInfo, sizeof(memoryInfo)) == 0 ||
+				memoryInfo.State != MEM_COMMIT ||
+				(memoryInfo.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) == 0 ||
+				(memoryInfo.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+				logger::error("VR render-pass shader guard not installed: invalid BSShader::SetupTechnique target");
+				return;
+			}
+
+			g_vrRenderPassShaderVtables[i].vtable = vtable;
+		}
+
+		g_vrRenderPassShaderGuardReady = true;
+		auto& trampoline = SKSE::GetTrampoline();
+		trampoline.write_call<5>(callsite, GuardedVRRenderPassSetupTechnique);
+		REL::safe_fill(callsite + 5, REL::NOP, sizeof(expectedInstructions) - 5);
+
+		logger::info("Installed VR render-pass BSShader::SetupTechnique lifetime guard");
+	}
+
+	void InstallVRBatchRendererCacheLifetimeGuards()
+	{
+		if (!REL::Module::IsVR()) {
+			return;
+		}
+
+		if (REL::Module::get().version() != SKSE::RUNTIME_VR_1_4_15) {
+			logger::error(
+				"VR batch-renderer cache lifetime guards not installed: unsupported Skyrim VR runtime {}",
+				REL::Module::get().version().string());
+			return;
+		}
+
+		// A prior 20-COC failure reached SkyrimVR.exe+1349543 with RDX == 0.
+		// The cache-active byte was set while the backing storage pointer at +0x08
+		// had already been cleared. The same unchecked contract is duplicated in
+		// the cache insertion helper, so cover both use sites and recover through
+		// their existing no-cache tails.
+		constexpr std::uintptr_t retireUseRVA = 0x1349530;
+		constexpr std::uintptr_t retireContinuationRVA = 0x134953F;
+		constexpr std::uintptr_t retireNoCacheRVA = 0x134955C;
+		constexpr std::uintptr_t insertUseRVA = 0x1349639;
+		constexpr std::uintptr_t insertContinuationRVA = 0x1349647;
+		constexpr std::uintptr_t insertNoCacheRVA = 0x134965D;
+		constexpr std::uint8_t expectedRetireUse[] = {
+			0x41, 0x8B, 0x0F,        // mov ecx, [r15]
+			0x4B, 0x8D, 0x14, 0x76,  // lea rdx, [r14 + r14 * 2]
+			0x48, 0xC1, 0xE2, 0x04,  // shl rdx, 4
+			0x48, 0x03, 0x56, 0x08   // add rdx, [rsi + 8]
+		};
+		constexpr std::uint8_t expectedRetireRecovery[] = {
+			0x33, 0xDB,       // xor ebx, ebx
+			0x48, 0x8B, 0x0D  // start of current-shader load
+		};
+		constexpr std::uint8_t expectedInsertUse[] = {
+			0x8B, 0xC3,              // mov eax, ebx
+			0x48, 0x8D, 0x0C, 0x40,  // lea rcx, [rax + rax * 2]
+			0x48, 0xC1, 0xE1, 0x04,  // shl rcx, 4
+			0x49, 0x03, 0x4A, 0x08   // add rcx, [r10 + 8]
+		};
+		constexpr std::uint8_t expectedInsertRecovery[] = {
+			0x49, 0x8B, 0xCA,             // mov rcx, r10
+			0x48, 0x8B, 0x5C, 0x24, 0x10  // mov rbx, [rsp + 10h]
+		};
+
+		const auto moduleBase = REL::Module::get().base();
+		const auto retireUse = moduleBase + retireUseRVA;
+		const auto retireContinuation = moduleBase + retireContinuationRVA;
+		const auto retireNoCache = moduleBase + retireNoCacheRVA;
+		const auto insertUse = moduleBase + insertUseRVA;
+		const auto insertContinuation = moduleBase + insertContinuationRVA;
+		const auto insertNoCache = moduleBase + insertNoCacheRVA;
+		const auto matches = [](std::uintptr_t a_address, const auto& a_expected) {
+			return std::equal(
+				std::begin(a_expected),
+				std::end(a_expected),
+				reinterpret_cast<const std::uint8_t*>(a_address));
+		};
+		if (!matches(retireUse, expectedRetireUse) ||
+			!matches(retireNoCache, expectedRetireRecovery) ||
+			!matches(insertUse, expectedInsertUse) ||
+			!matches(insertNoCache, expectedInsertRecovery)) {
+			logger::error("VR batch-renderer cache lifetime guards not installed: unexpected SkyrimVR.exe instructions");
+			return;
+		}
+
+		VRBatchRendererCacheRetireGuard retireCode{ retireContinuation, retireNoCache };
+		retireCode.ready();
+		VRBatchRendererCacheInsertGuard insertCode{ insertContinuation, insertNoCache };
+		insertCode.ready();
+
+		auto& trampoline = SKSE::GetTrampoline();
+		const auto retireGuard = reinterpret_cast<std::uintptr_t>(trampoline.allocate(retireCode));
+		const auto insertGuard = reinterpret_cast<std::uintptr_t>(trampoline.allocate(insertCode));
+		trampoline.write_branch<5>(retireUse, retireGuard);
+		REL::safe_fill(retireUse + 5, REL::NOP, sizeof(expectedRetireUse) - 5);
+		trampoline.write_branch<5>(insertUse, insertGuard);
+		REL::safe_fill(insertUse + 5, REL::NOP, sizeof(expectedInsertUse) - 5);
+
+		logger::info("Installed VR batch-renderer cache lifetime guards");
+	}
 }
 
 void RegisterShaderBytecode(void* Shader, const void* Bytecode, size_t BytecodeLength)
@@ -944,6 +1444,8 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChain(
 
 void Hooks::BSGraphics_SetDirtyStates::thunk(bool isCompute)
 {
+	FlushVRLifetimeGuardRecoveryTelemetry();
+
 	const auto callerRva = static_cast<uint32_t>(reinterpret_cast<std::uintptr_t>(_ReturnAddress()) - REL::Module::get().base());
 	if (!ShouldRecordCSFramePhaseDiag()) {
 		func(isCompute);
@@ -1568,6 +2070,15 @@ namespace Hooks
 	};
 	bool ShouldSkipRenderPassForParticleLights(RE::BSRenderPass* a_pass, uint32_t a_technique)
 	{
+		// A stale pass must fail closed. CheckParticleLights does not otherwise read
+		// BSRenderPass::shader, and failing open here forwards the same invalid pass
+		// to Terrain Blending, Interior Sun, Engine Fixes, and finally Skyrim's
+		// unchecked SetupTechnique virtual call.
+		if (!a_pass || !IsVRRenderPassShaderSafe(a_pass)) {
+			g_vrRenderPassShaderRecoveries.fetch_add(1, std::memory_order_relaxed);
+			return true;
+		}
+
 #if defined(_MSC_VER)
 		__try
 #endif
@@ -1576,9 +2087,12 @@ namespace Hooks
 			       !globals::features::lightLimitFix.CheckParticleLights(a_pass, a_technique);
 		}
 #if defined(_MSC_VER)
-		__except (1) {
-			// Fail open on transient invalid render-pass data to avoid crashing render-thread hooks.
-			return false;
+		__except (EXCEPTION_EXECUTE_HANDLER) {
+			// An access fault while inspecting a render pass is evidence that the pass
+			// is no longer a coherent draw contract. Skip this pass instead of handing
+			// the stale pointers back to the engine.
+			g_vrRenderPassShaderRecoveries.fetch_add(1, std::memory_order_relaxed);
+			return true;
 		}
 #endif
 	}
@@ -1904,6 +2418,9 @@ namespace Hooks
 			REL::RelocationID(100852, 107642).address() + REL::Relocate(0x29E, 0x28F));
 		stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately3>(
 			REL::RelocationID(100871, 107667).address() + REL::Relocate(0xEE, 0xED));
+		InstallVRRenderPassShaderGuard();
+		InstallVRBatchRendererCacheLifetimeGuards();
+		InstallVRCompressedMeshMaterialLifetimeGuard();
 
 		// Patch render space in BSLightingShader::SetupGeometry to always use world space
 		// The variable updateEyePosition is set to 1 when not skinned. By patching to be 0 it will always use world space
