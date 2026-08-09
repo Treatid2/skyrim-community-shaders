@@ -50,45 +50,9 @@ namespace
 	std::array<VRRenderPassShaderVtable, kVRRenderPassShaderVtableCount> g_vrRenderPassShaderVtables{};
 	bool g_vrRenderPassShaderGuardReady = false;
 
-	using VRCompressedMeshMaterialResolver = const std::uint8_t* (*)(RE::hkpCompressedMeshShape*,
-		RE::hkpShapeKey);
-	VRCompressedMeshMaterialResolver g_vrCompressedMeshMaterialResolver = nullptr;
-	std::atomic<std::uint32_t> g_vrCompressedMeshMaterialRecoveries = 0;
 	std::atomic<std::uint32_t> g_vrRenderPassShaderRecoveries = 0;
 	std::atomic<std::uint32_t> g_vrBatchCacheRetireRecoveries = 0;
 	std::atomic<std::uint32_t> g_vrBatchCacheInsertRecoveries = 0;
-
-	constexpr bool IsVRCompressedMeshMaterialEntryInBounds(
-		std::uintptr_t a_materialBase,
-		std::uintptr_t a_materialAddress,
-		std::uintptr_t a_materialStride,
-		std::uintptr_t a_materialCount) noexcept
-	{
-		if (a_materialBase == 0 || a_materialStride < sizeof(RE::bhkMeshMaterial) || a_materialCount == 0 ||
-			a_materialCount > (std::numeric_limits<std::uintptr_t>::max)() / a_materialStride ||
-			a_materialAddress < a_materialBase) {
-			return false;
-		}
-
-		const auto materialBytes = a_materialStride * a_materialCount;
-		const auto materialOffset = a_materialAddress - a_materialBase;
-		return materialOffset % a_materialStride == 0 &&
-		       materialOffset <= materialBytes - sizeof(RE::bhkMeshMaterial);
-	}
-
-	static_assert(IsVRCompressedMeshMaterialEntryInBounds(0x1000, 0x1000, 8, 1));
-	static_assert(IsVRCompressedMeshMaterialEntryInBounds(0x1000, 0x1008, 8, 2));
-	static_assert(!IsVRCompressedMeshMaterialEntryInBounds(0x1000, 0x1004, 8, 2));
-	static_assert(!IsVRCompressedMeshMaterialEntryInBounds(0x1000, 0x1000 + 0xFFFF * 8, 8, 0xFFFF));
-
-	void RecordVRCompressedMeshMaterialRecovery() noexcept
-	{
-		// This can run on a Havok worker while the main thread waits for the
-		// physics step. Keep recovery lock-free: logging here could invert a lock
-		// held by a thread waiting on that worker. The counter remains available
-		// for debugger/telemetry inspection without changing the recovery path.
-		g_vrCompressedMeshMaterialRecoveries.fetch_add(1, std::memory_order_relaxed);
-	}
 
 	void FlushVRLifetimeGuardRecoveryTelemetry()
 	{
@@ -96,11 +60,10 @@ namespace
 			return;
 		}
 
-		const auto material = g_vrCompressedMeshMaterialRecoveries.load(std::memory_order_relaxed);
 		const auto renderPass = g_vrRenderPassShaderRecoveries.load(std::memory_order_relaxed);
 		const auto cacheRetire = g_vrBatchCacheRetireRecoveries.load(std::memory_order_relaxed);
 		const auto cacheInsert = g_vrBatchCacheInsertRecoveries.load(std::memory_order_relaxed);
-		const auto total = static_cast<std::uint64_t>(material) + renderPass + cacheRetire + cacheInsert;
+		const auto total = static_cast<std::uint64_t>(renderPass) + cacheRetire + cacheInsert;
 
 		// Report the first recovery and then power-of-two aggregate milestones.
 		// The counters are updated lock-free at their native worker/render sites;
@@ -111,137 +74,13 @@ namespace
 		}
 
 		logger::warn(
-			"[VRLifetimeGuard] recoveries: compressedMeshMaterial={} renderPass={} cacheRetire={} cacheInsert={}",
-			material,
+			"[VRLifetimeGuard] recoveries: renderPass={} cacheRetire={} cacheInsert={}",
 			renderPass,
 			cacheRetire,
 			cacheInsert);
 		while (nextReportTotal <= total && nextReportTotal <= (std::numeric_limits<std::uint64_t>::max)() / 2) {
 			nextReportTotal *= 2;
 		}
-	}
-
-	std::uint32_t GuardedVRCompressedMeshMaterialLookup(
-		const void* a_shapeWrapper,
-		RE::hkpShapeKey a_shapeKey) noexcept
-	{
-		if (!a_shapeWrapper || a_shapeKey == RE::HK_INVALID_SHAPE_KEY || !g_vrCompressedMeshMaterialResolver) {
-			return 0;
-		}
-
-		RE::hkpCompressedMeshShape* shape = nullptr;
-#if defined(_MSC_VER)
-		__try
-#endif
-		{
-			shape = *reinterpret_cast<RE::hkpCompressedMeshShape* const*>(
-				reinterpret_cast<const std::uint8_t*>(a_shapeWrapper) + 0x10);
-		}
-#if defined(_MSC_VER)
-		__except (EXCEPTION_EXECUTE_HANDLER) {
-			RecordVRCompressedMeshMaterialRecovery();
-			return 0;
-		}
-#endif
-
-		if (!shape) {
-			return 0;
-		}
-
-		// Keep the resolver outside the exception guard. Compatibility plugins may
-		// detour this decoder; faults inside their implementation are not safe to
-		// unwind through here. The observed engine failure occurs after the resolver
-		// returns a non-null material entry whose backing allocation has already been
-		// retired. In that dump,
-		// the decoder used material index 0xFFFF with stride 8 and returned exactly
-		// base + 0xFFFF * 8; a uint16 material count can never contain that entry.
-		const auto* material = g_vrCompressedMeshMaterialResolver(shape, a_shapeKey);
-		if (!material) {
-			return 0;
-		}
-
-		std::uint32_t materialID = 0;
-		bool validMaterialEntry = false;
-#if defined(_MSC_VER)
-		__try
-#endif
-		{
-			const auto materialBase = reinterpret_cast<std::uintptr_t>(shape->meshMaterials);
-			const auto materialAddress = reinterpret_cast<std::uintptr_t>(material);
-			const auto materialStride = static_cast<std::uintptr_t>(shape->materialStriding);
-			const auto materialCount = static_cast<std::uintptr_t>(shape->numMaterials);
-
-			// Skyrim stores bhkMeshMaterial here (filterInfo + materialID). Verify
-			// that the decoder result is one complete, aligned entry in the shape's
-			// live material table before reading materialID at +0x04.
-			if (IsVRCompressedMeshMaterialEntryInBounds(
-					materialBase,
-					materialAddress,
-					materialStride,
-					materialCount)) {
-				materialID = *reinterpret_cast<const std::uint32_t*>(material + 0x04);
-				validMaterialEntry = true;
-			}
-		}
-#if defined(_MSC_VER)
-		__except (EXCEPTION_EXECUTE_HANDLER) {
-			validMaterialEntry = false;
-		}
-#endif
-
-		if (!validMaterialEntry) {
-			RecordVRCompressedMeshMaterialRecovery();
-			return 0;
-		}
-
-		return materialID;
-	}
-
-	void InstallVRCompressedMeshMaterialLifetimeGuard()
-	{
-		if (!REL::Module::IsVR()) {
-			return;
-		}
-
-		if (REL::Module::get().version() != SKSE::RUNTIME_VR_1_4_15) {
-			logger::error(
-				"VR compressed-mesh material lifetime guard not installed: unsupported Skyrim VR runtime {}",
-				REL::Module::get().version().string());
-			return;
-		}
-
-		// bhkCompressedMeshShape's material virtual calls the native compressed-
-		// mesh decoder and then blindly reads bhkMeshMaterial::materialID. During
-		// cell/physics retirement the decoder can still return an entry from an
-		// already-freed material table (observed at SkyrimVR.exe+E564EC). Returning
-		// zero is this same function's existing null/invalid-key fallback and makes
-		// the contact non-hurtful without altering coherent collision geometry.
-		constexpr std::uintptr_t materialLookupRVA = 0xE564D0;
-		constexpr std::uintptr_t materialResolverRVA = 0xE97490;
-		constexpr std::uint8_t expectedLookupEntry[] = {
-			0x48, 0x83, 0xEC, 0x28,  // sub rsp, 28h
-			0x48, 0x8B, 0x49, 0x10,  // mov rcx, [rcx + 10h]
-			0x48, 0x85, 0xC9,        // test rcx, rcx
-			0x74, 0x17,              // je native neutral return
-			0x83, 0xFA, 0xFF         // cmp edx, -1
-		};
-
-		const auto moduleBase = REL::Module::get().base();
-		const auto materialLookup = moduleBase + materialLookupRVA;
-		if (!std::equal(
-				std::begin(expectedLookupEntry),
-				std::end(expectedLookupEntry),
-				reinterpret_cast<const std::uint8_t*>(materialLookup))) {
-			logger::error(
-				"VR compressed-mesh material lifetime guard not installed: unexpected SkyrimVR.exe instructions");
-			return;
-		}
-
-		g_vrCompressedMeshMaterialResolver =
-			reinterpret_cast<VRCompressedMeshMaterialResolver>(moduleBase + materialResolverRVA);
-		SKSE::GetTrampoline().write_branch<5>(materialLookup, GuardedVRCompressedMeshMaterialLookup);
-
-		logger::info("Installed VR compressed-mesh material lifetime guard");
 	}
 
 	class VRBatchRendererCacheRetireGuard : public Xbyak::CodeGenerator
@@ -2420,7 +2259,6 @@ namespace Hooks
 			REL::RelocationID(100871, 107667).address() + REL::Relocate(0xEE, 0xED));
 		InstallVRRenderPassShaderGuard();
 		InstallVRBatchRendererCacheLifetimeGuards();
-		InstallVRCompressedMeshMaterialLifetimeGuard();
 
 		// Patch render space in BSLightingShader::SetupGeometry to always use world space
 		// The variable updateEyePosition is set to 1 when not skinned. By patching to be 0 it will always use world space
