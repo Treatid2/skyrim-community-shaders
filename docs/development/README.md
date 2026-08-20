@@ -8,6 +8,7 @@
 -   **[Shader Runtime A/B](./shader-runtime-ab.md)** - RenderDoc same-frame shader equivalence checks
 -   **[VR Depth-Culling Temporal Validity](./vr-depth-culling-temporal-validity.md)** - Diagnosis, correction, and physical-HMD validation of one-frame missing-geometry flashes
 -   **[GPU-Unified Presets](./unified-presets.md)** - One preset path with capability-selected DLSS or FSR
+-   **[Shader Analysis](./shader-analysis/README.md)** - Residency/recompile plan, machine-readable ownership manifest, and versioned baselines
 
 ## Quick Links
 
