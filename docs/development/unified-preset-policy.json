@@ -1,9 +1,10 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "status": "provisional-development",
   "generatedAtEvidenceDate": "2026-08-17",
   "policy": "one shader tier policy with capability-selected DLSS primary and FSR fallback",
-  "schemaDefaults": [
+  "templateAuthority": "vendor-neutral-complete-settings",
+  "enforcedDefaults": [
     { "path": ["Disable at Boot", "TruePBR"], "value": false },
     { "path": ["Inverse Square Lighting", "Enabled"], "value": true },
     { "path": ["Menu", "SmartClearShaderCacheDefault"], "value": false },
@@ -103,8 +104,8 @@
   ],
   "tiers": {
     "Performance": {
-      "sourceTemplate": "MGO-Presets/CSX AMD- Performance - Press END on PC to Customize/SKSE/Plugins/CommunityShaders/SettingsUser.json",
-      "sourceSha256": "114494225EEE720D8E65BAAECC47C2A7A4E21E04AC7F5CA68C4AC8E957901AF1",
+      "baselineTemplate": "docs/development/unified-preset-templates/Performance.SettingsUser.json",
+      "baselineSha256": "1EB37F70728ED605DC60E83CBF1E07622024792F5D3E3ED6F74658FA4576A838",
       "outputDirectory": "CSX Unified- Performance - Press END on PC to Customize",
       "overrides": [
         { "path": ["Screen Space GI", "ResolutionMode"], "value": 2, "reason": "dormant Quarter-resolution AO candidate" },
@@ -113,8 +114,8 @@
       ]
     },
     "Balanced": {
-      "sourceTemplate": "MGO-Presets/CSX AMD- Balanced - Press END on PC to Customize/SKSE/Plugins/CommunityShaders/SettingsUser.json",
-      "sourceSha256": "85E5DC08909F189F49C4712636AD785DEC2744A126D5933D008FDFC16AFD8A6B",
+      "baselineTemplate": "docs/development/unified-preset-templates/Balanced.SettingsUser.json",
+      "baselineSha256": "FD5CDC2FD364AB1CAFA78143F9DEDFD20EF4ADD77B92699B4A5CFB87AFB82E4C",
       "outputDirectory": "CSX Unified- Balanced - Press END on PC to Customize",
       "overrides": [
         { "path": ["Screen Space GI", "ResolutionMode"], "value": 1, "reason": "dormant Half-resolution AO candidate" },
@@ -123,8 +124,8 @@
       ]
     },
     "Quality": {
-      "sourceTemplate": "MGO-Presets/CSX AMD- Quality - Press END on PC to Customize/SKSE/Plugins/CommunityShaders/SettingsUser.json",
-      "sourceSha256": "7EA83F938398A41FBA7365F692AE2699E04AFBEF6E7098852CFE78283374DB98",
+      "baselineTemplate": "docs/development/unified-preset-templates/Quality.SettingsUser.json",
+      "baselineSha256": "6235E6DF8FAE92160468B99D572273D6BB27AA8B2790F5FF584A96AD7CBBD6EB",
       "outputDirectory": "CSX Unified- Quality - Press END on PC to Customize",
       "overrides": [
         { "path": ["Screen Space GI", "ResolutionMode"], "value": 0, "reason": "dormant Full-resolution AO candidate" },

@@ -11,9 +11,14 @@ $resolvedPolicyPath = [System.IO.Path]::GetFullPath($PolicyPath)
 $resolvedOutputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
 $policy = Get-Content -Raw -LiteralPath $resolvedPolicyPath | ConvertFrom-Json
 
-if ($policy.schemaVersion -ne 1) {
+if ($policy.schemaVersion -ne 2) {
     throw "Unsupported unified preset policy schema: $($policy.schemaVersion)"
 }
+if ($policy.templateAuthority -ne 'vendor-neutral-complete-settings') {
+    throw "Unsupported unified preset template authority: $($policy.templateAuthority)"
+}
+
+$baselineRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot 'docs\development\unified-preset-templates'))
 
 function Resolve-RepositoryPath {
     param([Parameter(Mandatory = $true)][string]$RelativePath)
@@ -142,30 +147,53 @@ $results = @()
 foreach ($tierProperty in $policy.tiers.psobject.Properties) {
     $tier = $tierProperty.Name
     $definition = $tierProperty.Value
+    if ([string]::IsNullOrWhiteSpace([string]$definition.outputDirectory)) {
+        throw "The $tier tier has no outputDirectory."
+    }
     if ($definition.outputDirectory -match '(?i)AMD|NVIDIA') {
         throw "Unified output directory contains a vendor name: $($definition.outputDirectory)"
     }
 
-    $templatePath = Resolve-RepositoryPath -RelativePath $definition.sourceTemplate
-    $templateHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $templatePath).Hash
-    if ($templateHash -ne $definition.sourceSha256) {
-        throw "Pinned $tier template changed: expected $($definition.sourceSha256), got $templateHash"
-    }
-
-    $settings = Get-Content -Raw -LiteralPath $templatePath | ConvertFrom-Json
-    foreach ($override in @($policy.schemaDefaults) + @($policy.commonOverrides) + @($definition.overrides)) {
-        Set-JsonPathValue -Root $settings -Path $override.path -Value $override.value
-    }
-    Assert-GuardValues -Settings $settings
-
-    $json = (($settings | ConvertTo-Json -Depth 100) -replace "`r`n", "`n") + "`n"
-    $meta = Get-GeneratedMetaIni -Tier $tier
     $outputDirectory = [System.IO.Path]::GetFullPath((Join-Path $resolvedOutputRoot $definition.outputDirectory))
     if (-not $outputDirectory.StartsWith($resolvedOutputRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Output directory escaped the output root: $outputDirectory"
     }
     $settingsPath = Join-Path $outputDirectory 'SKSE\Plugins\CommunityShaders\SettingsUser.json'
     $metaPath = Join-Path $outputDirectory 'meta.ini'
+
+    $baselineTemplate = [string]$definition.baselineTemplate
+    if ([string]::IsNullOrWhiteSpace($baselineTemplate)) {
+        throw "The $tier tier has no baselineTemplate."
+    }
+    if ($baselineTemplate -match '(?i)AMD|NVIDIA') {
+        throw "Unified baseline template contains a vendor name: $baselineTemplate"
+    }
+
+    $templatePath = Resolve-RepositoryPath -RelativePath $baselineTemplate
+    if (-not $templatePath.StartsWith($baselineRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Unified baseline template is outside the neutral baseline directory: $baselineTemplate"
+    }
+    if ($templatePath.Equals([System.IO.Path]::GetFullPath($settingsPath), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Unified baseline template points at its generated output: $baselineTemplate"
+    }
+
+    $expectedBaselineHash = [string]$definition.baselineSha256
+    if ($expectedBaselineHash -notmatch '^[0-9A-Fa-f]{64}$') {
+        throw "The $tier tier has an invalid baselineSha256."
+    }
+    $templateHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $templatePath).Hash
+    if ($templateHash -ne $expectedBaselineHash.ToUpperInvariant()) {
+        throw "Pinned neutral $tier baseline changed: expected $expectedBaselineHash, got $templateHash"
+    }
+
+    $settings = Get-Content -Raw -LiteralPath $templatePath | ConvertFrom-Json
+    foreach ($override in @($policy.enforcedDefaults) + @($policy.commonOverrides) + @($definition.overrides)) {
+        Set-JsonPathValue -Root $settings -Path $override.path -Value $override.value
+    }
+    Assert-GuardValues -Settings $settings
+
+    $json = (($settings | ConvertTo-Json -Depth 100) -replace "`r`n", "`n") + "`n"
+    $meta = Get-GeneratedMetaIni -Tier $tier
 
     if ($Check) {
         if (-not (Test-Path -LiteralPath $settingsPath) -or -not (Test-Path -LiteralPath $metaPath)) {
@@ -190,7 +218,8 @@ foreach ($tierProperty in $policy.tiers.psobject.Properties) {
         state = $state
         outputDirectory = $outputDirectory
         settingsSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $settingsPath).Hash
-        templateSha256 = $templateHash
+        baselineTemplate = $baselineTemplate
+        baselineSha256 = $templateHash
     }
 }
 
