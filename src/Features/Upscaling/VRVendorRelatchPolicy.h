@@ -159,15 +159,15 @@ namespace VRVendorRelatchPolicy
 	[[nodiscard]] constexpr bool CanReleaseGameEntryVendorGate(
 		const GameEntryConvergence& a_state) noexcept
 	{
+		// Queued relatch/profile work consumes this release; treating it as a
+		// prerequisite would leave both the work and its owning gate blocked.
 		return a_state.hasGateOwner &&
 		       !a_state.mainMenuActive &&
 		       !a_state.loadingPresentationActive &&
 		       !a_state.raceSexPresentationActive &&
 		       !a_state.saveLoadProtectionActive &&
 		       a_state.completedWorldFrame &&
-		       !a_state.recoveryPending &&
-		       !a_state.relatchPending &&
-		       !a_state.profileTransitionPending;
+		       !a_state.recoveryPending;
 	}
 
 	enum class MissedLoadingMenuCloseAction : std::uint8_t
@@ -1225,22 +1225,55 @@ namespace VRVendorRelatchPolicy
 	enum class DeferredDispatchAction : std::uint8_t
 	{
 		EvaluateExisting,
-		PresentationStretch
+		ReuseCompletedOutput,
+		PresentationStretch,
+		FailClosed
 	};
 
 	struct DeferredDispatchAdmission
 	{
 		bool mutationDeferred = false;
+		bool physicalMutationStarted = false;
+		bool hardFailure = false;
 		bool exactProviderReady = false;
+		bool completedOutputReady = false;
 	};
 
 	[[nodiscard]] constexpr DeferredDispatchAction SelectDeferredDispatchAction(
 		const DeferredDispatchAdmission& a_state) noexcept
 	{
-		if (!a_state.mutationDeferred || a_state.exactProviderReady)
+		if (a_state.hardFailure || a_state.physicalMutationStarted)
+			return DeferredDispatchAction::FailClosed;
+		if (a_state.exactProviderReady)
+			return DeferredDispatchAction::EvaluateExisting;
+		if (a_state.completedOutputReady)
+			return DeferredDispatchAction::ReuseCompletedOutput;
+		if (!a_state.mutationDeferred)
 			return DeferredDispatchAction::EvaluateExisting;
 
 		return DeferredDispatchAction::PresentationStretch;
+	}
+
+	[[nodiscard]] constexpr bool IsSameStereoDispatchContract(
+		std::uint32_t a_admittedGeneration,
+		std::uint32_t a_currentGeneration,
+		std::uint32_t a_admittedMethod,
+		std::uint32_t a_currentMethod) noexcept
+	{
+		return a_admittedGeneration == a_currentGeneration &&
+		       a_admittedMethod == a_currentMethod;
+	}
+
+	[[nodiscard]] constexpr bool DoesPendingVendorResetInvalidateProvider(
+		bool a_resetPending,
+		std::uint32_t a_resetGeneration,
+		std::uint32_t a_providerGeneration) noexcept
+	{
+		if (!a_resetPending)
+			return false;
+
+		return a_resetGeneration == 0 || a_providerGeneration == 0 ||
+		       a_resetGeneration == a_providerGeneration;
 	}
 
 	enum class PostLoadRecoverySettleAction : std::uint8_t

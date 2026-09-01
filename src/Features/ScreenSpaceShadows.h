@@ -103,7 +103,7 @@ public:
 		Util::LazyShader<ID3D11ComputeShader> right;
 	};
 	// Binaries that can run VR retain native plus every supported render-scale
-	// profile. Flat-only builds keep the historical single-entry footprint.
+	// profile. Flat-only builds need only the active variant.
 #ifdef ENABLE_SKYRIM_VR
 	static constexpr std::size_t kRaymarchShaderVariantCount = 8;
 #else

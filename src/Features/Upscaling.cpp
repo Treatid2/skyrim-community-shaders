@@ -107,6 +107,13 @@ namespace
 		           std::numeric_limits<uint64_t>::max() :
 		           a_left + a_right;
 	}
+
+	uint32_t CurrentVRRenderScaleTelemetryFrame() noexcept
+	{
+		return globals::state ?
+		           globals::state->frameCountAtomic.load(std::memory_order_relaxed) :
+		           0u;
+	}
 #endif
 
 	VRRenderScalePreparationPolicy::Key BuildVRRenderScalePreparationKey(
@@ -332,6 +339,13 @@ uint64_t Upscaling::GetVRRenderScaleCPUPerformanceSessionID() const noexcept
 
 uint64_t Upscaling::StartVRRenderScaleCPUPerformanceTelemetry() noexcept
 {
+	return StartVRRenderScaleCPUPerformanceTelemetry(
+		CurrentVRRenderScaleTelemetryFrame());
+}
+
+uint64_t Upscaling::StartVRRenderScaleCPUPerformanceTelemetry(
+	uint32_t a_startFrame) noexcept
+{
 	uint64_t sessionID = nextVRRenderScaleCPUPerformanceSessionID.load(
 		std::memory_order_relaxed);
 	while (sessionID != 0) {
@@ -354,7 +368,7 @@ uint64_t Upscaling::StartVRRenderScaleCPUPerformanceTelemetry() noexcept
 	vrRenderScaleCPUPerformanceCounters[static_cast<std::size_t>(
 											VRRenderScaleCPUPerformanceCounter::WindowStartFrame)]
 		.store(
-			globals::state ? globals::state->frameCount : 0u,
+			a_startFrame,
 			std::memory_order_relaxed);
 	vrRenderScaleCPUPerformanceSessionID.store(
 		sessionID,
@@ -424,7 +438,17 @@ bool Upscaling::IsVRRenderScaleGPUPerformanceTelemetryActive() const noexcept
 
 void Upscaling::StartVRRenderScaleGPUPerformanceTelemetry() noexcept
 {
+	StartVRRenderScaleGPUPerformanceTelemetry(
+		CurrentVRRenderScaleTelemetryFrame());
+}
+
+void Upscaling::StartVRRenderScaleGPUPerformanceTelemetry(
+	uint32_t a_startFrame) noexcept
+{
 	ResetVRRenderScaleGPUPerformanceTelemetry();
+	vrRenderScaleGPUPerformanceCounters[static_cast<std::size_t>(
+											VRRenderScaleGPUPerformanceCounter::WindowStartFrame)]
+		.store(a_startFrame, std::memory_order_relaxed);
 	vrRenderScaleGPUPerformanceTelemetryActive.store(true, std::memory_order_relaxed);
 }
 
@@ -439,7 +463,7 @@ void Upscaling::ResetVRRenderScaleGPUPerformanceTelemetry() noexcept
 	for (auto& counter : vrRenderScaleGPUPerformanceCounters)
 		counter.store(0, std::memory_order_relaxed);
 	vrRenderScaleGPUPerformanceCounters[static_cast<std::size_t>(VRRenderScaleGPUPerformanceCounter::WindowStartFrame)]
-		.store(globals::state ? globals::state->frameCount : 0u, std::memory_order_relaxed);
+		.store(CurrentVRRenderScaleTelemetryFrame(), std::memory_order_relaxed);
 }
 
 void Upscaling::RecordVRRenderScaleGPUPerformanceCounter(VRRenderScaleGPUPerformanceCounter a_counter, uint64_t a_delta) const noexcept
@@ -18409,8 +18433,55 @@ Upscaling::VRExistingVendorProviderSnapshot Upscaling::GetExistingVRVendorProvid
 	if (!globals::game::isVR)
 		return provider;
 
+	const auto transition = GetVRRenderScaleTransitionSnapshot();
+	const auto resolveProviderBackend = [&](const VRRenderScaleProfileSnapshot& a_profile) {
+		if (a_profile.active)
+			return a_profile.resources.backend;
+		if (a_profile.method == UpscaleMethod::kDLSS)
+			return VRRenderScaleBackendKind::DLSS;
+		if (a_profile.method != UpscaleMethod::kFSR)
+			return VRRenderScaleBackendKind::None;
+
+		if (fidelityFX.AreRuntimeUpscalerResourcesCompatible(
+				a_profile.displayEyeWidth,
+				a_profile.displayEyeHeight,
+				a_profile.displayEyeWidth,
+				a_profile.displayEyeHeight,
+				2u,
+				FFX_UPSCALER_VERSION)) {
+			return VRRenderScaleBackendKind::FSR4Runtime;
+		}
+		if (fidelityFX.AreRuntimeUpscalerResourcesCompatible(
+				a_profile.displayEyeWidth,
+				a_profile.displayEyeHeight,
+				a_profile.displayEyeWidth,
+				a_profile.displayEyeHeight,
+				2u,
+				FidelityFX::Fsr3Version)) {
+			return VRRenderScaleBackendKind::FSRRuntime;
+		}
+		return fidelityFX.HasFSRResources() ?
+		           VRRenderScaleBackendKind::FSRHost :
+		           VRRenderScaleBackendKind::None;
+	};
 	const auto& boot = perfMode.GetBootSnapshot();
 	if (boot.valid && boot.active && IsVendorUpscalingMethod(boot.method)) {
+		const auto matchesBoot = [&](const VRRenderScaleProfileSnapshot& a_profile) {
+			return a_profile.valid && a_profile.active &&
+			       a_profile.method == boot.method &&
+			       a_profile.contractGeneration == boot.generation &&
+			       a_profile.qualityMode == boot.qualityMode &&
+			       a_profile.dlssPreset == boot.dlssPreset &&
+			       a_profile.renderEyeWidth == boot.renderEyeWidth &&
+			       a_profile.renderEyeHeight == boot.renderEyeHeight &&
+			       a_profile.displayEyeWidth == boot.displayEyeWidth &&
+			       a_profile.displayEyeHeight == boot.displayEyeHeight;
+		};
+		const auto* published = matchesBoot(transition.applied) ?
+		                            std::addressof(transition.applied) :
+		                        matchesBoot(transition.stable) ?
+		                            std::addressof(transition.stable) :
+		                            nullptr;
 		provider.valid = true;
 		provider.renderScaleActive = true;
 		provider.method = boot.method;
@@ -18421,10 +18492,13 @@ Upscaling::VRExistingVendorProviderSnapshot Upscaling::GetExistingVRVendorProvid
 		provider.displayEyeWidth = boot.displayEyeWidth;
 		provider.displayEyeHeight = boot.displayEyeHeight;
 		provider.contractGeneration = boot.generation;
+		if (published) {
+			provider.resources = published->resources;
+			provider.backend = resolveProviderBackend(*published);
+		}
 		return provider;
 	}
 
-	const auto transition = GetVRRenderScaleTransitionSnapshot();
 	const auto* physical = transition.applied.valid ?
 	                           std::addressof(transition.applied) :
 	                       transition.stable.valid ?
@@ -18434,6 +18508,7 @@ Upscaling::VRExistingVendorProviderSnapshot Upscaling::GetExistingVRVendorProvid
 		provider.valid = true;
 		provider.renderScaleActive = physical->active;
 		provider.method = physical->method;
+		provider.backend = resolveProviderBackend(*physical);
 		provider.qualityMode = std::min<uint32_t>(physical->qualityMode, kQualityModeMaxIndex);
 		provider.dlssPreset = ClampDLSSPresetUInt(physical->dlssPreset);
 		provider.renderEyeWidth = physical->renderEyeWidth;
@@ -18441,6 +18516,7 @@ Upscaling::VRExistingVendorProviderSnapshot Upscaling::GetExistingVRVendorProvid
 		provider.displayEyeWidth = physical->displayEyeWidth;
 		provider.displayEyeHeight = physical->displayEyeHeight;
 		provider.contractGeneration = physical->contractGeneration;
+		provider.resources = physical->resources;
 		return provider;
 	}
 	return provider;
@@ -18461,24 +18537,83 @@ bool Upscaling::CanDispatchExistingVRVendorEvaluation(
 		provider.valid &&
 		provider.method == a_upscaleMethod &&
 		IsVendorUpscalingMethod(a_upscaleMethod);
+	const auto& resourceKey = provider.resources;
+	const bool publishedBackendMatchesMethod =
+		a_upscaleMethod == UpscaleMethod::kDLSS ?
+			provider.backend == VRRenderScaleBackendKind::DLSS :
+		a_upscaleMethod == UpscaleMethod::kFSR ?
+			(provider.backend == VRRenderScaleBackendKind::FSRHost ||
+				provider.backend == VRRenderScaleBackendKind::FSRRuntime ||
+				provider.backend == VRRenderScaleBackendKind::FSR4Runtime) :
+			false;
+	const bool exactPublishedResourceKey =
+		provider.contractGeneration != 0 && resourceKey.valid &&
+		resourceKey.active == provider.renderScaleActive &&
+		resourceKey.method == provider.method &&
+		publishedBackendMatchesMethod &&
+		(provider.renderScaleActive ?
+				resourceKey.backend == provider.backend :
+				resourceKey.backend == VRRenderScaleBackendKind::None) &&
+		resourceKey.qualityMode == provider.qualityMode &&
+		(a_upscaleMethod != UpscaleMethod::kDLSS ||
+			resourceKey.dlssPreset == provider.dlssPreset) &&
+		resourceKey.renderEyeWidth == provider.renderEyeWidth &&
+		resourceKey.renderEyeHeight == provider.renderEyeHeight &&
+		resourceKey.displayEyeWidth == provider.displayEyeWidth &&
+		resourceKey.displayEyeHeight == provider.displayEyeHeight &&
+		resourceKey.contextCount == 2u;
 	bool resourcesReady = vendorEvaluationSelected &&
-	                      AreCommonVendorTexturesReady(a_upscaleMethod);
+	                      exactPublishedResourceKey &&
+	                      IsCommonVendorResourceContractCurrent(a_upscaleMethod);
 	if (a_upscaleMethod == UpscaleMethod::kDLSS) {
+		const bool resetInvalidatesProvider =
+			VRVendorRelatchPolicy::DoesPendingVendorResetInvalidateProvider(
+				pendingDLSSReset.load(std::memory_order_acquire),
+				pendingDLSSResetGeneration.load(std::memory_order_acquire),
+				provider.contractGeneration);
 		resourcesReady = resourcesReady &&
-		                 (provider.renderScaleActive ||
-							 !pendingDLSSReset.load(std::memory_order_acquire)) &&
+		                 !resetInvalidatesProvider &&
+		                 streamline.IsDLSSRuntimeReady() &&
 		                 streamline.HasCompleteVRDLSSViewportResources();
 	} else if (a_upscaleMethod == UpscaleMethod::kFSR) {
+		const auto providerBackend = provider.backend;
+		const bool hostProvider =
+			providerBackend == VRRenderScaleBackendKind::FSRHost;
+		const bool runtimeFSR3Provider =
+			providerBackend == VRRenderScaleBackendKind::FSRRuntime;
+		const bool runtimeFSR4Provider =
+			providerBackend == VRRenderScaleBackendKind::FSR4Runtime;
+		const uint32_t runtimeVersion = runtimeFSR4Provider ?
+		                                    FFX_UPSCALER_VERSION :
+		                                    FidelityFX::Fsr3Version;
+		const bool runtimeResourcesMatch =
+			hostProvider ||
+			fidelityFX.AreRuntimeUpscalerResourcesCompatible(
+				provider.displayEyeWidth,
+				provider.displayEyeHeight,
+				provider.displayEyeWidth,
+				provider.displayEyeHeight,
+				2u,
+				runtimeVersion);
+		const bool resetInvalidatesProvider =
+			VRVendorRelatchPolicy::DoesPendingVendorResetInvalidateProvider(
+				pendingFSRReset.load(std::memory_order_acquire),
+				pendingFSRResetGeneration.load(std::memory_order_acquire),
+				provider.contractGeneration);
 		resourcesReady = resourcesReady &&
-		                 !pendingFSRReset.load(std::memory_order_acquire) &&
-		                 fidelityFX.HasFSRResources();
+		                 !resetInvalidatesProvider &&
+		                 fidelityFX.HasFSRResources() &&
+		                 (hostProvider || runtimeFSR3Provider ||
+							 runtimeFSR4Provider) &&
+		                 runtimeResourcesMatch;
 	}
 	if (resourcesReady && provider.renderScaleActive) {
 		if (a_upscaleMethod == UpscaleMethod::kDLSS) {
 			resourcesReady = provider.contractGeneration != 0 &&
 			                 vrDLSSRuntimeResourceGeneration == provider.contractGeneration;
 		} else {
-			resourcesReady = IsVendorRuntimeReadyForActiveContract(a_upscaleMethod);
+			resourcesReady = provider.contractGeneration != 0 &&
+			                 vrFSRRuntimeResourceGeneration == provider.contractGeneration;
 		}
 	}
 	if (resourcesReady && globals::game::isVR) {
@@ -31521,6 +31656,10 @@ bool Upscaling::PrepareVRNativeRestorePresentationObservation(
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	if (fixedVendorRuntimePlanExact) {
 		if (applied.method == UpscaleMethod::kDLSS) {
+			if (!streamline.IsDLSSRuntimeReady() ||
+				!streamline.HasCompleteVRDLSSViewportResources()) {
+				return false;
+			}
 			vendorBackend = VRRenderScaleBackendKind::DLSS;
 		} else if (applied.method == UpscaleMethod::kFSR) {
 			const auto dispatch =
@@ -31528,6 +31667,8 @@ bool Upscaling::PrepareVRNativeRestorePresentationObservation(
 			vendorBackend =
 				GetVRRenderScaleBackendFromFSRDispatchPath(dispatch.path);
 			if (!dispatch.valid || dispatch.frame != currentFrame ||
+				dispatch.serial == 0 ||
+				!fidelityFX.IsRuntimeUpscalerDispatchProofUsable(dispatch.path) ||
 				vendorBackend == VRRenderScaleBackendKind::None) {
 				return false;
 			}
@@ -31712,13 +31853,13 @@ void Upscaling::RecordVRRenderScalePresentationObservation(
 			previous.outputWidth == a_observation.outputWidth &&
 			previous.outputHeight == a_observation.outputHeight &&
 			previous.vendorBackend == a_observation.vendorBackend &&
-			previous.vendorDispatchFrame == a_observation.vendorDispatchFrame &&
-			previous.vendorDispatchSerial == a_observation.vendorDispatchSerial &&
 			previous.vendorRuntimeFallback == a_observation.vendorRuntimeFallback &&
 			previous.deviceIdentity == deviceIdentity &&
 			previous.resourceRevision == resourceRevision;
 		const bool duplicate =
 			sameContract &&
+			previous.vendorDispatchFrame == a_observation.vendorDispatchFrame &&
+			previous.vendorDispatchSerial == a_observation.vendorDispatchSerial &&
 			previous.frame == frame &&
 			previous.compositorCycleToken == a_observation.compositorCycleToken &&
 			previous.loadingOrMenuContext == a_observation.loadingOrMenuContext &&
@@ -31860,6 +32001,9 @@ void Upscaling::RecordVRRenderScalePresentationObservation(
 		.contractGeneration = published.contractGeneration,
 		.method = static_cast<uint32_t>(published.method),
 		.backend = static_cast<uint32_t>(published.vendorBackend),
+		.vendorDispatchFrame = published.vendorDispatchFrame,
+		.vendorDispatchSerial = published.vendorDispatchSerial,
+		.vendorRuntimeFallback = published.vendorRuntimeFallback,
 		.path = static_cast<uint32_t>(published.path),
 		.deviceIdentity = published.deviceIdentity,
 		.resourceRevision = published.resourceRevision,
@@ -40456,6 +40600,24 @@ bool Upscaling::AreExistingVRSubmitVendorResourcesCompatible(
 {
 	if (!a_provider.valid || a_provider.method != a_upscaleMethod)
 		return false;
+	auto* currentDevice = globals::d3d::device;
+	const auto currentDeviceIdentity = GetCOMIdentityAddress(currentDevice);
+	const auto belongsToCurrentDevice =
+		[currentDeviceIdentity](ID3D11Resource* a_resource) {
+			if (!currentDeviceIdentity || !a_resource)
+				return false;
+			winrt::com_ptr<ID3D11Device> resourceDevice;
+			a_resource->GetDevice(resourceDevice.put());
+			return resourceDevice &&
+		           GetCOMIdentityAddress(resourceDevice.get()) ==
+		               currentDeviceIdentity;
+		};
+	if (!belongsToCurrentDevice(a_colorSource) ||
+		!belongsToCurrentDevice(a_motionVectorSource) ||
+		!belongsToCurrentDevice(a_reactiveSource) ||
+		!belongsToCurrentDevice(a_transparencySource)) {
+		return false;
+	}
 
 	if (a_provider.renderEyeWidth != a_inputWidth ||
 		a_provider.renderEyeHeight != a_inputHeight ||
@@ -47702,6 +47864,92 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 		a_presentationObservation.loadingOrMenuContext = a_loadingOrMenuContext;
 		a_presentationObservation.transitionCooldown = a_transitionCooldown;
 	};
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	const auto captureSubmitStageVendorDispatchEvidence =
+		[&](SubmitStageVendorEyeState& a_eyeState) {
+			a_eyeState.vendorBackend = VRRenderScaleBackendKind::None;
+			a_eyeState.vendorDispatchFrame = 0;
+			a_eyeState.vendorDispatchSerial = 0;
+			a_eyeState.vendorRuntimeFallback = false;
+			if (upscaleMethod == UpscaleMethod::kDLSS) {
+				if (!streamline.IsDLSSRuntimeReady() ||
+					!streamline.HasCompleteVRDLSSViewportResources()) {
+					return;
+				}
+				a_eyeState.vendorBackend = VRRenderScaleBackendKind::DLSS;
+				a_eyeState.vendorDispatchFrame = std::max(currentFrame, 1u);
+				return;
+			}
+			if (upscaleMethod != UpscaleMethod::kFSR)
+				return;
+
+			const auto dispatch =
+				fidelityFX.GetRuntimeUpscalerDispatchSnapshotForRenderThread();
+			const auto backend =
+				GetVRRenderScaleBackendFromFSRDispatchPath(dispatch.path);
+			if (!dispatch.valid || dispatch.frame != std::max(currentFrame, 1u) ||
+				dispatch.serial == 0 || backend == VRRenderScaleBackendKind::None ||
+				!fidelityFX.IsRuntimeUpscalerDispatchProofUsable(dispatch.path)) {
+				return;
+			}
+
+			a_eyeState.vendorBackend = backend;
+			a_eyeState.vendorDispatchFrame = dispatch.frame;
+			a_eyeState.vendorDispatchSerial = dispatch.serial;
+			a_eyeState.vendorRuntimeFallback =
+				dispatch.path ==
+				FidelityFX::RuntimeUpscalerFramePath::kHostFsr31Fallback;
+		};
+	const auto applySubmitStageVendorDispatchEvidence =
+		[&](const SubmitStageVendorEyeState& a_eyeState) {
+			a_presentationObservation.vendorBackend = VRRenderScaleBackendKind::None;
+			a_presentationObservation.vendorDispatchFrame = 0;
+			a_presentationObservation.vendorDispatchSerial = 0;
+			a_presentationObservation.vendorRuntimeFallback = false;
+			if (a_eyeState.vendorBackend == VRRenderScaleBackendKind::DLSS) {
+				if (!streamline.IsDLSSRuntimeReady() ||
+					!streamline.HasCompleteVRDLSSViewportResources()) {
+					return;
+				}
+			} else if (upscaleMethod == UpscaleMethod::kFSR) {
+				const auto dispatchPath =
+					a_eyeState.vendorRuntimeFallback ?
+						FidelityFX::RuntimeUpscalerFramePath::kHostFsr31Fallback :
+					a_eyeState.vendorBackend == VRRenderScaleBackendKind::FSR4Runtime ?
+						FidelityFX::RuntimeUpscalerFramePath::kRuntimeFsr4 :
+					a_eyeState.vendorBackend == VRRenderScaleBackendKind::FSRRuntime ?
+						FidelityFX::RuntimeUpscalerFramePath::kRuntimeFsr31 :
+					a_eyeState.vendorBackend == VRRenderScaleBackendKind::FSRHost ?
+						FidelityFX::RuntimeUpscalerFramePath::kHostFsr31 :
+						FidelityFX::RuntimeUpscalerFramePath::kInactive;
+				if (!fidelityFX.IsRuntimeUpscalerDispatchProofUsable(dispatchPath))
+					return;
+			} else {
+				return;
+			}
+			a_presentationObservation.vendorBackend = a_eyeState.vendorBackend;
+			a_presentationObservation.vendorDispatchFrame =
+				a_eyeState.vendorDispatchFrame;
+			a_presentationObservation.vendorDispatchSerial =
+				a_eyeState.vendorDispatchSerial;
+			a_presentationObservation.vendorRuntimeFallback =
+				a_eyeState.vendorRuntimeFallback;
+		};
+#endif
+	const auto setVendorPresentationObservation =
+		[&]([[maybe_unused]] const SubmitStageVendorEyeState& a_eyeState) {
+			setPresentationObservation(
+				VRRenderScalePresentationPath::VendorEvaluated,
+				eyeWidthIn,
+				eyeHeightIn,
+				eyeWidthIn,
+				eyeHeightIn,
+				false,
+				false);
+#ifdef DEVBENCH_BRIDGE_ENABLED
+			applySubmitStageVendorDispatchEvidence(a_eyeState);
+#endif
+		};
 	if (!sourceRegion.valid) {
 		if (vrRenderScaleMode) {
 			setPresentationObservation(
@@ -47819,13 +48067,17 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 	}
 	if (vrRenderScaleMode && activeContract.valid && !activeContract.submitStageVendorAllowed)
 		transitionPresentationCooldown = true;
+	const bool presentationContextRequiresStretch =
+		vrRenderScaleMode &&
+		(submitPresentationContext &&
+			!stabilizerDoorHandoffPresentationReady);
 	auto computePresentationOnly = [&]() {
 		// The resolved PostLoadSync contract owns gameplay presentation even when
 		// a derived loading/menu flag outlives the door. Real menus are excluded by
 		// IsAppliedVRFpsStabilizerDoorHandoffReadyForPresentation.
 		return vrRenderScaleMode &&
 		       (transitionPresentationCooldown ||
-				   (submitPresentationContext && !stabilizerDoorHandoffPresentationReady));
+				   presentationContextRequiresStretch);
 	};
 	// Before an inactive post-load activation, OpenVR continues receiving Skyrim's
 	// accepted full-resolution submit. Once the Render Scale contract is active, this
@@ -47862,12 +48114,33 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 	const auto deferredDispatchAction =
 		VRVendorRelatchPolicy::SelectDeferredDispatchAction({
 			.mutationDeferred = vendorLifecycleMutationDeferred,
+			.physicalMutationStarted =
+				perfModeRenderTargetRecreateInProgress.load(
+					std::memory_order_acquire) ||
+				vrRenderScaleUnresolvedPhysicalMutationEpoch.load(
+					std::memory_order_acquire) != 0,
+			.hardFailure = IsSubmitStageDeviceLost(),
 			.exactProviderReady = exactExistingProviderReady,
+			// Completed outputs are frame-scoped and mutable; none currently has
+			// the cross-frame ownership proof required by this disposition.
+			.completedOutputReady = false,
 		});
 	if (deferredDispatchAction ==
-		VRVendorRelatchPolicy::DeferredDispatchAction::PresentationStretch) {
-		// Other deferred transitions retain the established presentation-only
-		// fallback. In particular, keep FSR's stricter lifecycle protection.
+			VRVendorRelatchPolicy::DeferredDispatchAction::FailClosed ||
+		deferredDispatchAction ==
+			VRVendorRelatchPolicy::DeferredDispatchAction::ReuseCompletedOutput) {
+		// No completed submit-stage output currently has cross-frame immutable
+		// ownership. Keep that policy outcome fail-closed until one does.
+		return false;
+	}
+	if (deferredDispatchAction ==
+			VRVendorRelatchPolicy::DeferredDispatchAction::EvaluateExisting &&
+		vendorLifecycleMutationDeferred && exactExistingProviderReady) {
+		// Replacement admission does not own presentation before creator entry.
+		// Preserve only real menu/loading fallback requirements here.
+		presentationOnly = presentationContextRequiresStretch;
+	} else if (deferredDispatchAction ==
+			   VRVendorRelatchPolicy::DeferredDispatchAction::PresentationStretch) {
 		presentationOnly = true;
 	}
 	bool useAuthoritativeDLSSProfile =
@@ -47887,8 +48160,7 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 			submitStageVendorAdmissionPresentationOnly = presentationOnly;
 			submitStageVendorAdmissionExactProviderReady =
 				vendorLifecycleMutationDeferred &&
-				exactExistingProviderReady &&
-				useAuthoritativeDLSSProfile;
+				exactExistingProviderReady;
 			submitStageVendorAdmissionAuthoritativeDLSSProfile =
 				useAuthoritativeDLSSProfile;
 			submitStageVendorAdmissionDLSSQualityMode =
@@ -47902,15 +48174,20 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 			// same fallback, even if a loading edge arrives between submissions.
 			// The token is authoritative: never establish a second admission when
 			// a physical method/generation unexpectedly changes between its eyes.
-			if (submitStageVendorAdmissionGeneration != activeContractGeneration ||
-				submitStageVendorAdmissionMethod != methodValue) {
-				submitStageVendorAdmissionPresentationOnly = true;
+			if (!VRVendorRelatchPolicy::IsSameStereoDispatchContract(
+					submitStageVendorAdmissionGeneration,
+					activeContractGeneration,
+					submitStageVendorAdmissionMethod,
+					methodValue)) {
+				// A compositor cycle cannot span physical generations. The first eye
+				// has already committed its identity, so fail the peer eye closed.
+				submitStageVendorAdmissionExactProviderReady = false;
+				return false;
 			}
 			presentationOnly = submitStageVendorAdmissionPresentationOnly;
 			useAuthoritativeDLSSProfile =
 				submitStageVendorAdmissionAuthoritativeDLSSProfile;
-			if (submitStageVendorAdmissionExactProviderReady &&
-				useAuthoritativeDLSSProfile) {
+			if (submitStageVendorAdmissionExactProviderReady) {
 				vendorLifecycleMutationDeferred = true;
 				exactExistingProviderReady = true;
 			}
@@ -47922,10 +48199,9 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 	} else {
 		submitStageVendorAdmissionFrame = currentFrame;
 	}
-	const bool admittedExistingDLSSProvider =
+	const bool admittedExistingVendorProvider =
 		vendorLifecycleMutationDeferred &&
-		exactExistingProviderReady &&
-		useAuthoritativeDLSSProfile;
+		exactExistingProviderReady;
 	const auto applyAuthoritativeDLSSProfile =
 		[&](VendorEyeDispatchParams& a_params) {
 			if (!useAuthoritativeDLSSProfile)
@@ -48157,7 +48433,7 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 			return false;
 
 		if (HasPendingVRVendorRuntimeReset(*this, upscaleMethod) &&
-			!admittedExistingDLSSProvider)
+			!admittedExistingVendorProvider)
 			return false;
 
 		if (historyResetLatchedFrame != currentFrame)
@@ -48167,7 +48443,7 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 		const bool vendorResetPending = HasPendingVRVendorRuntimeReset(*this, upscaleMethod);
 		if (vendorResetPending &&
 			!presentationOnly &&
-			!admittedExistingDLSSProvider)
+			!admittedExistingVendorProvider)
 			return false;
 	}
 
@@ -48350,14 +48626,7 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 		a_outputTexture.eType = vr::TextureType_DirectX;
 		a_outputBounds = { 0.0f, 0.0f, 1.0f, 1.0f };
 		menuPresentationSucceeded = menuPresentationAttempt;
-		setPresentationObservation(
-			VRRenderScalePresentationPath::VendorEvaluated,
-			eyeWidthIn,
-			eyeHeightIn,
-			eyeWidthIn,
-			eyeHeightIn,
-			false,
-			false);
+		setVendorPresentationObservation(cachedEyeState);
 		return true;
 	}
 
@@ -48590,6 +48859,10 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 		submitStageVendorEyeState[targetEyeIndex].usedDLSSSharpening = replaySubmitDLSSSharpening;
 		submitStageVendorEyeState[targetEyeIndex].usedMenuFinalComposite = submitStageMenuFinalCompositeRequested;
 		submitStageVendorEyeState[targetEyeIndex].menuLayerGeneration = submitStageMenuLayerGeneration;
+#ifdef DEVBENCH_BRIDGE_ENABLED
+		captureSubmitStageVendorDispatchEvidence(
+			submitStageVendorEyeState[targetEyeIndex]);
+#endif
 		return true;
 	};
 
@@ -48873,6 +49146,9 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 							otherEyeState.usedDLSSSharpening = false;
 							otherEyeState.usedMenuFinalComposite = submitStageMenuFinalCompositeRequested;
 							otherEyeState.menuLayerGeneration = submitStageMenuLayerGeneration;
+#ifdef DEVBENCH_BRIDGE_ENABLED
+							captureSubmitStageVendorDispatchEvidence(otherEyeState);
+#endif
 						}
 					} else if (stereoResult == FidelityFX::StereoUpscaleResult::Failed) {
 #ifdef DEVBENCH_BRIDGE_ENABLED
@@ -49031,6 +49307,10 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 	submitStageVendorEyeState[eyeIndex].depthHeight = sourceRegion.depthHeight;
 	submitStageVendorEyeState[eyeIndex].depthOffsetX = sourceRegion.depthOffsetX;
 	submitStageVendorEyeState[eyeIndex].depthOffsetY = sourceRegion.depthOffsetY;
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	captureSubmitStageVendorDispatchEvidence(
+		submitStageVendorEyeState[eyeIndex]);
+#endif
 	RecordVRRenderScaleFidelityObservation(
 		upscaleMethod,
 		eyeIndex,
@@ -49133,14 +49413,8 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 		a_outputTexture.eType = vr::TextureType_DirectX;
 		a_outputBounds = { 0.0f, 0.0f, 1.0f, 1.0f };
 		menuPresentationSucceeded = menuPresentationAttempt;
-		setPresentationObservation(
-			VRRenderScalePresentationPath::VendorEvaluated,
-			eyeWidthIn,
-			eyeHeightIn,
-			eyeWidthIn,
-			eyeHeightIn,
-			false,
-			false);
+		setVendorPresentationObservation(
+			submitStageVendorEyeState[eyeIndex]);
 		return true;
 	}
 
@@ -49185,14 +49459,8 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 	a_outputTexture = *a_inputTexture;
 	a_outputTexture.eType = vr::TextureType_DirectX;
 	a_outputBounds = a_inputBounds ? *a_inputBounds : vr::VRTextureBounds_t{ 0.0f, 0.0f, 1.0f, 1.0f };
-	setPresentationObservation(
-		VRRenderScalePresentationPath::VendorEvaluated,
-		eyeWidthIn,
-		eyeHeightIn,
-		eyeWidthIn,
-		eyeHeightIn,
-		false,
-		false);
+	setVendorPresentationObservation(
+		submitStageVendorEyeState[eyeIndex]);
 	return true;
 }
 
@@ -52571,7 +52839,9 @@ bool Upscaling::IsVendorRuntimeReadyForActiveContract(UpscaleMethod a_upscaleMet
 	switch (a_upscaleMethod) {
 	case UpscaleMethod::kDLSS:
 		return !pendingDLSSReset.load(std::memory_order_acquire) &&
-		       vrDLSSRuntimeResourceGeneration == generation;
+		       vrDLSSRuntimeResourceGeneration == generation &&
+		       streamline.IsDLSSRuntimeReady() &&
+		       streamline.HasCompleteVRDLSSViewportResources();
 	case UpscaleMethod::kFSR:
 		return !pendingFSRReset.load(std::memory_order_acquire) &&
 		       vrFSRRuntimeResourceGeneration == generation &&

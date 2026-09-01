@@ -522,6 +522,8 @@ public:
 		}
 		return false;
 	}
+	/** @brief Reports whether the complete Streamline DLSS activation contract is live. */
+	[[nodiscard]] bool IsDLSSRuntimeReady() const noexcept;
 	/** @brief Proves exact option identity and ownership for both eyes of one slot. */
 	[[nodiscard]] bool HasCompleteVRDLSSViewportResources(
 		DLSSViewportRole a_viewportRole,
