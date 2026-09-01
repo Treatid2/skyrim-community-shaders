@@ -48103,7 +48103,7 @@ void Upscaling::ServiceDeferredVRRenderScaleRequestAfterPhysicalRecovery()
 		return;
 	}
 
-	std::optional<VRRenderScaleDesiredProfile> replay;
+	std::optional<VRRenderScaleDesiredProfile> candidate;
 	{
 		std::scoped_lock lock(pendingVRRenderScaleRequestMutex);
 		if (pendingVRRenderScaleRequest ||
@@ -48112,6 +48112,26 @@ void Upscaling::ServiceDeferredVRRenderScaleRequestAfterPhysicalRecovery()
 				deferredCandidate->requestID ||
 			deferredVRRenderScaleRequestAfterPhysicalRecovery->transitionEpoch !=
 				deferredCandidate->transitionEpoch) {
+			return;
+		}
+		candidate = *deferredVRRenderScaleRequestAfterPhysicalRecovery;
+	}
+	const bool retryRevalidated =
+		candidate->startupNativeFallbackControlAction !=
+			VRVendorRelatchPolicy::StartupNativeFallbackControlAction::ResolveRetry ||
+		CanRetryVRStartupNativeFallbackFromCSMenu(false);
+	if (!retryRevalidated)
+		return;
+
+	std::optional<VRRenderScaleDesiredProfile> replay;
+	{
+		std::scoped_lock lock(pendingVRRenderScaleRequestMutex);
+		if (pendingVRRenderScaleRequest ||
+			!deferredVRRenderScaleRequestAfterPhysicalRecovery ||
+			deferredVRRenderScaleRequestAfterPhysicalRecovery->requestID !=
+				candidate->requestID ||
+			deferredVRRenderScaleRequestAfterPhysicalRecovery->transitionEpoch !=
+				candidate->transitionEpoch) {
 			return;
 		}
 		replay = *deferredVRRenderScaleRequestAfterPhysicalRecovery;
@@ -48146,6 +48166,9 @@ void Upscaling::ServiceDeferredVRRenderScaleRequestAfterPhysicalRecovery()
 			replay->transitionEpoch);
 		return;
 	}
+	ResolveVRStartupNativeFallbackAfterPublication(
+		*replay,
+		retryRevalidated);
 	InvalidateFrameScopedUpscalingState();
 	logger::info(
 		"[VRRenderScale] Replayed deferred request id={} epoch={} origin={} after coherent recovery and provider retirement.",
@@ -50886,6 +50909,8 @@ Upscaling::VRRenderScaleRequestQueueResult Upscaling::QueueVRRenderScaleRequest(
 	request.queuedFrame = frame;
 	request.origin = a_origin;
 	request.directMenuEdit = directMenuEdit;
+	request.startupNativeFallbackControlAction =
+		startupFallbackControlAction;
 	request.stabilizerDoorHandoff = bufferedAPIDoorHandoff;
 	request.stabilizerDoorHandoffSerial =
 		bufferedAPIDoorHandoff ? a_bufferedStabilizerDoorHandoffSerial : 0;
@@ -51038,22 +51063,9 @@ Upscaling::VRRenderScaleRequestQueueResult Upscaling::QueueVRRenderScaleRequest(
 			magic_enum::enum_name(request.origin));
 		return result;
 	}
-	if (VRVendorRelatchPolicy::CanResolveStartupNativeFallback(
-			startupFallbackControlAction,
-			result.Published() &&
-				IsLatestVRRenderScaleRequest(result.requestID)) &&
-		vrStartupRenderScaleNativeFallbackRestartRequired.exchange(
-			false,
-			std::memory_order_acq_rel)) {
-		logger::info(
-			"[VRRenderScale] Accepted explicit CS-menu {} from the coherent startup native fallback. request={} epoch={}.",
-			startupFallbackControlAction ==
-					VRVendorRelatchPolicy::StartupNativeFallbackControlAction::ResolveRetry ?
-				"retry after memory recovery" :
-				"Render Scale disable",
-			request.requestID,
-			request.transitionEpoch);
-	}
+	ResolveVRStartupNativeFallbackAfterPublication(
+		request,
+		explicitStartupFallbackRetryAdmitted);
 	InvalidateFrameScopedUpscalingState();
 	if (ShouldEmitUpscalingDiagLogs()) {
 		logger::debug(
@@ -51070,6 +51082,39 @@ Upscaling::VRRenderScaleRequestQueueResult Upscaling::QueueVRRenderScaleRequest(
 			BoolText(request.fsr4RuntimeEnabled));
 	}
 	return result;
+}
+
+bool Upscaling::ResolveVRStartupNativeFallbackAfterPublication(
+	const VRRenderScaleDesiredProfile& a_request,
+	bool a_retryRevalidated)
+{
+	const auto controller = GetVRRenderScaleTransitionSnapshot();
+	if (!VRVendorRelatchPolicy::CanResolveStartupNativeFallback({
+			.action = a_request.startupNativeFallbackControlAction,
+			.requestID = a_request.requestID,
+			.transitionEpoch = a_request.transitionEpoch,
+			.authoritativeRequestID = controller.requested.requestID,
+			.authoritativeTransitionEpoch =
+				controller.requested.transitionEpoch,
+			.latestRequestID = latestVRRenderScaleRequestID.load(
+				std::memory_order_acquire),
+			.retryRevalidated = a_retryRevalidated,
+		}) ||
+		!vrStartupRenderScaleNativeFallbackRestartRequired.exchange(
+			false,
+			std::memory_order_acq_rel)) {
+		return false;
+	}
+
+	logger::info(
+		"[VRRenderScale] Accepted explicit CS-menu {} from the coherent startup native fallback. request={} epoch={}.",
+		a_request.startupNativeFallbackControlAction ==
+				VRVendorRelatchPolicy::StartupNativeFallbackControlAction::ResolveRetry ?
+			"retry after memory recovery" :
+			"Render Scale disable",
+		a_request.requestID,
+		a_request.transitionEpoch);
+	return true;
 }
 
 std::optional<Upscaling::VRRenderScaleDesiredProfile> Upscaling::TakePendingVRRenderScaleRequest()
