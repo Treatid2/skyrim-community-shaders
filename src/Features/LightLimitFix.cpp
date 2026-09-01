@@ -4,6 +4,7 @@
 #include "GpuPass.h"
 #include "InverseSquareLighting.h"
 #include "LightLimitFix/ShadowLightPolicy.h"
+#include "LightLimitFix/VRHookPolicy.h"
 #include "LinearLighting.h"
 #include "LocationContext.h"
 
@@ -156,6 +157,11 @@ namespace
 	bool MatchesInstructions(std::uintptr_t a_address, const std::uint8_t (&a_expected)[N]) noexcept
 	{
 		return std::equal(std::begin(a_expected), std::end(a_expected), reinterpret_cast<const std::uint8_t*>(a_address));
+	}
+
+	bool IsEngineFixesLoaded() noexcept
+	{
+		return GetModuleHandleW(L"EngineFixes.dll") != nullptr;
 	}
 
 	class VRValidatedObjectGuard : public Xbyak::CodeGenerator
@@ -2426,17 +2432,34 @@ void LightLimitFix::Hooks::InstallVRSceneGraphCullingObjectGuard()
 		0x41, 0x83, 0xC8, 0xFF,
 		0xE9, 0x9C, 0xFE, 0xFF, 0xFF
 	};
+	constexpr std::uint8_t expectedVirtualCallPrefix[] = {
+		0x41, 0x83, 0xF9, 0x06,
+		0x75, 0x24,
+		0x48, 0x8B, 0x07,
+		0x48, 0x8B, 0xD3,
+		0x48, 0x8B, 0xCF
+	};
 
 	const auto moduleBase = REL::Module::get().base();
 	const auto helperEntry = moduleBase + helperEntryRVA;
 	const auto virtualCallContext = moduleBase + virtualCallContextRVA;
 	const auto helperEpilogue = moduleBase + helperEpilogueRVA;
 	const auto helperTailContext = moduleBase + helperTailContextRVA;
+	const auto engineFixesCullingGuard =
+		IsEngineFixesLoaded() &&
+		MatchesInstructions(virtualCallContext, expectedVirtualCallPrefix) &&
+		LightLimitFixVRHookPolicy::HasExternalBranchPrefix(
+			reinterpret_cast<const std::uint8_t*>(virtualCallContext + std::size(expectedVirtualCallPrefix)),
+			2);
 	if (!MatchesInstructions(helperEntry, expectedHelperEntry) ||
-		!MatchesInstructions(virtualCallContext, expectedVirtualCallContext) ||
+		(!MatchesInstructions(virtualCallContext, expectedVirtualCallContext) && !engineFixesCullingGuard) ||
 		!MatchesInstructions(helperEpilogue, expectedHelperEpilogue) ||
 		!MatchesInstructions(helperTailContext, expectedHelperTailContext)) {
 		logger::error("[LLF] VR scene-graph culling-object guard not installed: unexpected SkyrimVR.exe instructions");
+		return;
+	}
+	if (engineFixesCullingGuard) {
+		logger::info("[LLF] Engine Fixes VR culling freed-object guard detected; skipping duplicate scene-graph guard");
 		return;
 	}
 
@@ -2499,8 +2522,8 @@ void LightLimitFix::Hooks::InstallVRShadowMapCameraGuard()
 		0x49, 0x8B, 0x5B, 0x38,
 		0x49, 0x8B, 0x73, 0x40,
 		0x49, 0x8B, 0x7B, 0x48,
-		0x45, 0x0F, 0x28, 0x73, 0xF0,
-		0x45, 0x0F, 0x28, 0x7B, 0xE0,
+		0x41, 0x0F, 0x28, 0x73, 0xF0,
+		0x41, 0x0F, 0x28, 0x7B, 0xE0,
 		0x45, 0x0F, 0x28, 0x43, 0xD0,
 		0x45, 0x0F, 0x28, 0x4B, 0xC0,
 		0x45, 0x0F, 0x28, 0x53, 0xB0,

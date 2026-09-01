@@ -1545,16 +1545,13 @@ if(BUILD_CONTROLLER_TESTS)
     add_test(
         NAME FeaturePresetCompatibilityContract
         COMMAND
-            "${CMAKE_COMMAND}"
-            "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}"
-            -P "${PROJECT_SOURCE_DIR}/tests/feature_preset_compatibility_contract_test.cmake"
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}" -P
+            "${PROJECT_SOURCE_DIR}/tests/feature_preset_compatibility_contract_test.cmake"
     )
     add_test(
         NAME PerformanceTuningDevBenchContract
         COMMAND
-            "${CMAKE_COMMAND}"
-            "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}"
-            -P
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}" -P
             "${PROJECT_SOURCE_DIR}/tests/performance_tuning_devbench_contract_test.cmake"
     )
     add_test(
@@ -1564,8 +1561,10 @@ if(BUILD_CONTROLLER_TESTS)
             "${PROJECT_SOURCE_DIR}/tests/vr_menu_ui_contract_test.cmake"
     )
     set_tests_properties(
-        MenuDevBenchPreflightContract PerformanceTuningDevBenchContract
-        VRMenuUiContract FeaturePresetCompatibilityContract
+        MenuDevBenchPreflightContract
+        PerformanceTuningDevBenchContract
+        VRMenuUiContract
+        FeaturePresetCompatibilityContract
         PROPERTIES LABELS "ControllerTests"
     )
     add_test(
@@ -1666,6 +1665,11 @@ if(BUILD_CONTROLLER_TESTS)
         tests/reflex_policy_test.cpp
     )
     add_controller_test(
+        light_limit_fix_vr_hook_policy_test
+        LightLimitFixVRHookPolicy
+        tests/light_limit_fix_vr_hook_policy_test.cpp
+    )
+    add_controller_test(
         fsr_host_lifecycle_policy_test
         FSRHostLifecyclePolicy
         tests/fsr_host_lifecycle_policy_test.cpp
@@ -1761,9 +1765,15 @@ if(BUILD_CONTROLLER_TESTS)
         preset_compatibility_test
         PRIVATE "${PROJECT_SOURCE_DIR}/src"
     )
-    target_link_libraries(preset_compatibility_test PRIVATE nlohmann_json::nlohmann_json)
+    target_link_libraries(
+        preset_compatibility_test
+        PRIVATE nlohmann_json::nlohmann_json
+    )
     add_test(NAME PresetCompatibility COMMAND preset_compatibility_test)
-    set_tests_properties(PresetCompatibility PROPERTIES LABELS "ControllerTests")
+    set_tests_properties(
+        PresetCompatibility
+        PROPERTIES LABELS "ControllerTests"
+    )
 
     add_executable(
         api_runtime_thread_affinity_test
@@ -1792,7 +1802,10 @@ if(BUILD_CONTROLLER_TESTS)
         src/RenderMap/Collector.cpp
     )
     target_compile_features(render_map_collector_test PRIVATE cxx_std_23)
-    target_include_directories(render_map_collector_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_include_directories(
+        render_map_collector_test
+        PRIVATE "${PROJECT_SOURCE_DIR}/src"
+    )
     add_test(NAME RenderMapCollector COMMAND render_map_collector_test)
     set_tests_properties(RenderMapCollector PROPERTIES LABELS "ControllerTests")
 
@@ -1804,7 +1817,10 @@ if(BUILD_CONTROLLER_TESTS)
         src/RenderMap/Runtime.cpp
     )
     target_compile_features(render_map_runtime_test PRIVATE cxx_std_23)
-    target_include_directories(render_map_runtime_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_include_directories(
+        render_map_runtime_test
+        PRIVATE "${PROJECT_SOURCE_DIR}/src"
+    )
     add_test(NAME RenderMapRuntime COMMAND render_map_runtime_test)
     set_tests_properties(RenderMapRuntime PROPERTIES LABELS "ControllerTests")
 
@@ -1819,10 +1835,19 @@ if(BUILD_CONTROLLER_TESTS)
         src/RenderMap/Serialization.cpp
     )
     target_compile_features(render_map_controller_test PRIVATE cxx_std_23)
-    target_include_directories(render_map_controller_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-    target_link_libraries(render_map_controller_test PRIVATE nlohmann_json::nlohmann_json bcrypt.lib)
+    target_include_directories(
+        render_map_controller_test
+        PRIVATE "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(
+        render_map_controller_test
+        PRIVATE nlohmann_json::nlohmann_json bcrypt.lib
+    )
     add_test(NAME RenderMapController COMMAND render_map_controller_test)
-    set_tests_properties(RenderMapController PROPERTIES LABELS "ControllerTests")
+    set_tests_properties(
+        RenderMapController
+        PROPERTIES LABELS "ControllerTests"
+    )
 
     add_executable(
         api_service_foundation_test
@@ -1859,38 +1884,56 @@ if(BUILD_CONTROLLER_TESTS)
     add_test(NAME ApiServiceRegistry COMMAND api_service_registry_test)
     set_tests_properties(ApiServiceRegistry PROPERTIES LABELS "ControllerTests")
 
-	add_executable(
-		api_screenshot_contract_test
-		EXCLUDE_FROM_ALL
-		tests/api_screenshot_contract_test.cpp
-	)
-	target_compile_features(api_screenshot_contract_test PRIVATE cxx_std_23)
-	target_include_directories(
-		api_screenshot_contract_test
-		PRIVATE "${PROJECT_SOURCE_DIR}/include"
-	)
-	add_test(NAME ApiScreenshotContract COMMAND api_screenshot_contract_test)
-	set_tests_properties(ApiScreenshotContract PROPERTIES LABELS "ControllerTests")
+    add_executable(
+        api_screenshot_contract_test
+        EXCLUDE_FROM_ALL
+        tests/api_screenshot_contract_test.cpp
+    )
+    target_compile_features(api_screenshot_contract_test PRIVATE cxx_std_23)
+    target_include_directories(
+        api_screenshot_contract_test
+        PRIVATE "${PROJECT_SOURCE_DIR}/include"
+    )
+    add_test(NAME ApiScreenshotContract COMMAND api_screenshot_contract_test)
+    set_tests_properties(
+        ApiScreenshotContract
+        PROPERTIES LABELS "ControllerTests"
+    )
 
-	add_executable(
-		main_thread_dispatch_state_test
-		EXCLUDE_FROM_ALL
-		tests/main_thread_dispatch_state_test.cpp
-	)
-	target_compile_features(main_thread_dispatch_state_test PRIVATE cxx_std_23)
-	target_include_directories(main_thread_dispatch_state_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-	add_test(NAME MainThreadDispatchState COMMAND main_thread_dispatch_state_test)
-	set_tests_properties(MainThreadDispatchState PROPERTIES LABELS "ControllerTests")
+    add_executable(
+        main_thread_dispatch_state_test
+        EXCLUDE_FROM_ALL
+        tests/main_thread_dispatch_state_test.cpp
+    )
+    target_compile_features(main_thread_dispatch_state_test PRIVATE cxx_std_23)
+    target_include_directories(
+        main_thread_dispatch_state_test
+        PRIVATE "${PROJECT_SOURCE_DIR}/src"
+    )
+    add_test(
+        NAME MainThreadDispatchState
+        COMMAND main_thread_dispatch_state_test
+    )
+    set_tests_properties(
+        MainThreadDispatchState
+        PROPERTIES LABELS "ControllerTests"
+    )
 
-	add_executable(
-		screenshot_api_policy_test
-		EXCLUDE_FROM_ALL
-		tests/screenshot_api_policy_test.cpp
-	)
-	target_compile_features(screenshot_api_policy_test PRIVATE cxx_std_23)
-	target_include_directories(screenshot_api_policy_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-	add_test(NAME ScreenshotApiPolicy COMMAND screenshot_api_policy_test)
-	set_tests_properties(ScreenshotApiPolicy PROPERTIES LABELS "ControllerTests")
+    add_executable(
+        screenshot_api_policy_test
+        EXCLUDE_FROM_ALL
+        tests/screenshot_api_policy_test.cpp
+    )
+    target_compile_features(screenshot_api_policy_test PRIVATE cxx_std_23)
+    target_include_directories(
+        screenshot_api_policy_test
+        PRIVATE "${PROJECT_SOURCE_DIR}/src"
+    )
+    add_test(NAME ScreenshotApiPolicy COMMAND screenshot_api_policy_test)
+    set_tests_properties(
+        ScreenshotApiPolicy
+        PROPERTIES LABELS "ControllerTests"
+    )
 
     add_executable(
         api_upscaling_contract_test
@@ -1956,16 +1999,26 @@ if(BUILD_CONTROLLER_TESTS)
         src/Api/ShaderCompatibilityRegistry.cpp
         src/Utils/CryptoHash.cpp
     )
-    target_compile_features(api_shader_compatibility_registry_test PRIVATE cxx_std_23)
+    target_compile_features(
+        api_shader_compatibility_registry_test
+        PRIVATE cxx_std_23
+    )
     target_include_directories(
         api_shader_compatibility_registry_test
-        PRIVATE
-            "${PROJECT_SOURCE_DIR}/include"
-            "${PROJECT_SOURCE_DIR}/src"
+        PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src"
     )
-    target_link_libraries(api_shader_compatibility_registry_test PRIVATE bcrypt.lib)
-    add_test(NAME ApiShaderCompatibilityRegistry COMMAND api_shader_compatibility_registry_test)
-    set_tests_properties(ApiShaderCompatibilityRegistry PROPERTIES LABELS "ControllerTests")
+    target_link_libraries(
+        api_shader_compatibility_registry_test
+        PRIVATE bcrypt.lib
+    )
+    add_test(
+        NAME ApiShaderCompatibilityRegistry
+        COMMAND api_shader_compatibility_registry_test
+    )
+    set_tests_properties(
+        ApiShaderCompatibilityRegistry
+        PROPERTIES LABELS "ControllerTests"
+    )
 
     add_executable(
         shader_cache_pack_test
@@ -1977,9 +2030,7 @@ if(BUILD_CONTROLLER_TESTS)
     target_compile_features(shader_cache_pack_test PRIVATE cxx_std_23)
     target_include_directories(
         shader_cache_pack_test
-        PRIVATE
-            "${PROJECT_SOURCE_DIR}/include"
-            "${PROJECT_SOURCE_DIR}/src"
+        PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src"
     )
     target_link_libraries(shader_cache_pack_test PRIVATE bcrypt.lib)
     add_test(NAME ShaderCachePack COMMAND shader_cache_pack_test)
@@ -1992,7 +2043,10 @@ if(BUILD_CONTROLLER_TESTS)
             "${PROJECT_SOURCE_DIR}/tests/shader_cache_pack_builder_test.py"
             "$<TARGET_FILE:shader_cache_pack_test>"
     )
-    set_tests_properties(ShaderCachePackBuilder PROPERTIES LABELS "ControllerTests")
+    set_tests_properties(
+        ShaderCachePackBuilder
+        PROPERTIES LABELS "ControllerTests"
+    )
 
     add_executable(
         api_weather_service_policy_test
@@ -2091,9 +2145,9 @@ if(BUILD_CONTROLLER_TESTS)
             render_map_controller_test
             api_service_foundation_test
             api_service_registry_test
-			api_screenshot_contract_test
-			main_thread_dispatch_state_test
-			screenshot_api_policy_test
+            api_screenshot_contract_test
+            main_thread_dispatch_state_test
+            screenshot_api_policy_test
             api_upscaling_contract_test
             api_upscaling_service_policy_test
             api_shader_service_policy_test
