@@ -2195,6 +2195,12 @@ bool FidelityFX::HasRuntimeUpscalerResources() const
 	return FSRRuntimeLifecyclePolicy::HasRetirementRelevantState(state);
 }
 
+bool FidelityFX::IsRuntimeUpscalerTeardownFencePending() const
+{
+	return pendingRuntimeTeardownD3D11FenceValue != 0 ||
+	       pendingRuntimeTeardownD3D12FenceValue != 0;
+}
+
 bool FidelityFX::HasCompleteRuntimeUpscalerSharedResources(
 	uint32_t a_contextCount) const
 {
@@ -2722,7 +2728,7 @@ FidelityFX::RuntimeDispatchPlan FidelityFX::ResolveRuntimeDispatchPlan()
 {
 	RuntimeDispatchPlan plan{};
 	auto state = globals::state;
-	if (!state)
+	if (!state || IsRuntimeUpscalerTeardownFencePending())
 		return plan;
 
 	auto& upscaling = globals::features::upscaling;
@@ -2927,6 +2933,9 @@ FidelityFX::LifecycleResult FidelityFX::EnsureRuntimeUpscalerInterop()
 
 FidelityFX::LifecycleResult FidelityFX::EnsureRuntimeUpscalerContexts(uint32_t a_fullRenderWidth, uint32_t a_fullRenderHeight, uint32_t a_fullDisplayWidth, uint32_t a_fullDisplayHeight, uint32_t a_contextCount, uint32_t a_requestedVersion)
 {
+	if (IsRuntimeUpscalerTeardownFencePending())
+		return LifecycleResult::Pending;
+
 	auto recordRuntimeProviderResult = [&](bool a_supported) {
 		runtimeUpscalerSupportCheckKnown = true;
 		runtimeUpscalerSupportConfirmed = a_supported;
@@ -3258,6 +3267,9 @@ FidelityFX::LifecycleResult FidelityFX::ExecuteRuntimeUpscalerBatch(
 	const RuntimeDispatchPlan& a_plan,
 	std::span<const UpscaleRegionParameters> a_regions)
 {
+	if (IsRuntimeUpscalerTeardownFencePending())
+		return LifecycleResult::Pending;
+
 	try {
 		const auto contextResult = EnsureRuntimeUpscalerContexts(
 			a_plan.fullRenderWidth,
