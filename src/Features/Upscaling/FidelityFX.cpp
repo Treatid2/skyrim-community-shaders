@@ -1411,7 +1411,7 @@ bool FidelityFX::SetupFrameGeneration()
 	return frameGenContextValid;
 }
 
-bool FidelityFX::ResetFrameGenerationContexts() noexcept
+bool FidelityFX::ResetFrameGenerationRenderContext() noexcept
 {
 	bool resetComplete = true;
 	bool crashed = false;
@@ -1428,7 +1428,19 @@ bool FidelityFX::ResetFrameGenerationContexts() noexcept
 			frameGenContextIndeterminate = false;
 		}
 	}
-	crashed = false;
+
+	isFrameGenActive = false;
+	if (!resetComplete)
+		QuarantineFrameGenerationForSession("frame-generation context destruction");
+	else
+		frameGenerationDisableConfirmed.store(true, std::memory_order_release);
+	return resetComplete;
+}
+
+bool FidelityFX::ResetFrameGenerationContexts() noexcept
+{
+	bool resetComplete = ResetFrameGenerationRenderContext();
+	bool crashed = false;
 	if (swapChainContextIndeterminate) {
 		resetComplete = false;
 	} else if (swapChainContextValid) {
@@ -1442,7 +1454,6 @@ bool FidelityFX::ResetFrameGenerationContexts() noexcept
 			swapChainContextIndeterminate = false;
 		}
 	}
-	isFrameGenActive = false;
 	if (!resetComplete)
 		QuarantineFrameGenerationForSession("context destruction");
 	else
