@@ -6803,18 +6803,29 @@ namespace VRRenderScaleDevBenchBridge
 								   resources.backend == Upscaling::VRRenderScaleBackendKind::None);
 				};
 			const auto exactProfileMatches = [&](const auto& a_profile) {
-				return a_profile.valid &&
-				       a_profile.contractGeneration != 0 &&
-				       a_observation.transitionEpoch == a_profile.transitionEpoch &&
-				       a_observation.contractGeneration == a_profile.contractGeneration &&
-				       a_observation.method == static_cast<uint32_t>(a_profile.method) &&
-				       a_observation.renderWidth == a_profile.renderEyeWidth &&
-				       a_observation.renderHeight == a_profile.renderEyeHeight &&
-				       a_observation.displayWidth == a_profile.displayEyeWidth &&
-				       a_observation.displayHeight == a_profile.displayEyeHeight &&
-				       a_observation.deviceIdentity ==
-				           reinterpret_cast<uintptr_t>(globals::d3d::device) &&
-				       a_observation.resourceRevision != 0;
+				return ReplacementTelemetry::MatchesPublishedReplacementProfile({
+					.profileValid = a_profile.valid,
+					.requiresPublishedGeneration = a_profile.active,
+					.observedTransitionEpoch = a_observation.transitionEpoch,
+					.expectedTransitionEpoch = a_profile.transitionEpoch,
+					.observedContractGeneration =
+						a_observation.contractGeneration,
+					.expectedContractGeneration = a_profile.contractGeneration,
+					.observedMethod = a_observation.method,
+					.expectedMethod = static_cast<uint32_t>(a_profile.method),
+					.observedRenderWidth = a_observation.renderWidth,
+					.observedRenderHeight = a_observation.renderHeight,
+					.observedDisplayWidth = a_observation.displayWidth,
+					.observedDisplayHeight = a_observation.displayHeight,
+					.expectedRenderWidth = a_profile.renderEyeWidth,
+					.expectedRenderHeight = a_profile.renderEyeHeight,
+					.expectedDisplayWidth = a_profile.displayEyeWidth,
+					.expectedDisplayHeight = a_profile.displayEyeHeight,
+					.observedDeviceIdentity = a_observation.deviceIdentity,
+					.currentDeviceIdentity = reinterpret_cast<uintptr_t>(
+						globals::d3d::device),
+					.observedResourceRevision = a_observation.resourceRevision,
+				});
 			};
 			const auto boundaryMatchesProfile = [&](const auto& a_profile) {
 				return boundaryRecorded && a_profile.valid &&

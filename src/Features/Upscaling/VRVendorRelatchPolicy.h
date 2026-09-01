@@ -1264,6 +1264,13 @@ namespace VRVendorRelatchPolicy
 		       a_admittedMethod == a_currentMethod;
 	}
 
+	[[nodiscard]] constexpr bool IsExistingProviderContractGenerationValid(
+		bool a_renderScaleActive,
+		std::uint32_t a_contractGeneration) noexcept
+	{
+		return !a_renderScaleActive || a_contractGeneration != 0;
+	}
+
 	[[nodiscard]] constexpr bool DoesPendingVendorResetInvalidateProvider(
 		bool a_resetPending,
 		std::uint32_t a_resetGeneration,
@@ -1272,8 +1279,9 @@ namespace VRVendorRelatchPolicy
 		if (!a_resetPending)
 			return false;
 
-		return a_resetGeneration == 0 || a_providerGeneration == 0 ||
-		       a_resetGeneration == a_providerGeneration;
+		return a_resetGeneration == 0 ||
+		       (a_providerGeneration != 0 &&
+				   a_resetGeneration == a_providerGeneration);
 	}
 
 	enum class PostLoadRecoverySettleAction : std::uint8_t

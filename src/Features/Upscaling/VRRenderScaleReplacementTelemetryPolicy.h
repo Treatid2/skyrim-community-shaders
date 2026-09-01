@@ -408,6 +408,50 @@ namespace VRRenderScaleReplacementTelemetryPolicy
 		       (!a_requiresPublishedGeneration || a_observed != 0);
 	}
 
+	struct PublishedReplacementProfileFacts
+	{
+		bool profileValid = false;
+		bool requiresPublishedGeneration = false;
+		std::uint64_t observedTransitionEpoch = 0;
+		std::uint64_t expectedTransitionEpoch = 0;
+		std::uint32_t observedContractGeneration = 0;
+		std::uint32_t expectedContractGeneration = 0;
+		std::uint32_t observedMethod = 0;
+		std::uint32_t expectedMethod = 0;
+		std::uint32_t observedRenderWidth = 0;
+		std::uint32_t observedRenderHeight = 0;
+		std::uint32_t observedDisplayWidth = 0;
+		std::uint32_t observedDisplayHeight = 0;
+		std::uint32_t expectedRenderWidth = 0;
+		std::uint32_t expectedRenderHeight = 0;
+		std::uint32_t expectedDisplayWidth = 0;
+		std::uint32_t expectedDisplayHeight = 0;
+		std::uintptr_t observedDeviceIdentity = 0;
+		std::uintptr_t currentDeviceIdentity = 0;
+		std::uint64_t observedResourceRevision = 0;
+	};
+
+	[[nodiscard]] constexpr bool MatchesPublishedReplacementProfile(
+		const PublishedReplacementProfileFacts& a_facts) noexcept
+	{
+		return a_facts.profileValid &&
+		       a_facts.observedTransitionEpoch ==
+		           a_facts.expectedTransitionEpoch &&
+		       MatchesTargetContractGeneration(
+				   a_facts.requiresPublishedGeneration,
+				   a_facts.observedContractGeneration,
+				   a_facts.expectedContractGeneration) &&
+		       a_facts.observedMethod == a_facts.expectedMethod &&
+		       a_facts.observedRenderWidth == a_facts.expectedRenderWidth &&
+		       a_facts.observedRenderHeight == a_facts.expectedRenderHeight &&
+		       a_facts.observedDisplayWidth == a_facts.expectedDisplayWidth &&
+		       a_facts.observedDisplayHeight == a_facts.expectedDisplayHeight &&
+		       a_facts.observedDeviceIdentity != 0 &&
+		       a_facts.observedDeviceIdentity ==
+		           a_facts.currentDeviceIdentity &&
+		       a_facts.observedResourceRevision != 0;
+	}
+
 	[[nodiscard]] constexpr bool MatchesMutationBoundaryGeneration(
 		std::uint32_t a_boundary,
 		std::uint32_t a_published) noexcept

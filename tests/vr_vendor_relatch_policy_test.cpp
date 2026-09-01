@@ -1436,11 +1436,16 @@ namespace
 
 	constexpr bool CoversPendingVendorResetOwnership()
 	{
-		return !DoesPendingVendorResetInvalidateProvider(false, 0, 7) &&
+		return IsExistingProviderContractGenerationValid(false, 0) &&
+		       IsExistingProviderContractGenerationValid(false, 7) &&
+		       !IsExistingProviderContractGenerationValid(true, 0) &&
+		       IsExistingProviderContractGenerationValid(true, 7) &&
+		       !DoesPendingVendorResetInvalidateProvider(false, 0, 7) &&
 		       !DoesPendingVendorResetInvalidateProvider(true, 8, 7) &&
 		       DoesPendingVendorResetInvalidateProvider(true, 7, 7) &&
 		       DoesPendingVendorResetInvalidateProvider(true, 0, 7) &&
-		       DoesPendingVendorResetInvalidateProvider(true, 8, 0);
+		       !DoesPendingVendorResetInvalidateProvider(true, 8, 0) &&
+		       DoesPendingVendorResetInvalidateProvider(true, 0, 0);
 	}
 
 	constexpr bool CoversPostLoadRecoverySettleDeadline()

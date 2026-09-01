@@ -200,13 +200,76 @@ namespace
 
 	constexpr bool CoversGenerationCorrelation()
 	{
-		return MatchesTargetContractGeneration(false, 0, 0) &&
-		       !MatchesTargetContractGeneration(true, 0, 0) &&
-		       MatchesTargetContractGeneration(true, 8, 8) &&
-		       !MatchesTargetContractGeneration(true, 8, 9) &&
-		       MatchesMutationBoundaryGeneration(0, 8) &&
-		       MatchesMutationBoundaryGeneration(8, 8) &&
-		       !MatchesMutationBoundaryGeneration(8, 9);
+		if (!MatchesTargetContractGeneration(false, 0, 0) ||
+			MatchesTargetContractGeneration(true, 0, 0) ||
+			!MatchesTargetContractGeneration(true, 8, 8) ||
+			MatchesTargetContractGeneration(true, 8, 9) ||
+			!MatchesMutationBoundaryGeneration(0, 8) ||
+			!MatchesMutationBoundaryGeneration(8, 8) ||
+			MatchesMutationBoundaryGeneration(8, 9)) {
+			return false;
+		}
+
+		PublishedReplacementProfileFacts facts{
+			.profileValid = true,
+			.requiresPublishedGeneration = false,
+			.observedTransitionEpoch = 17,
+			.expectedTransitionEpoch = 17,
+			.observedContractGeneration = 0,
+			.expectedContractGeneration = 0,
+			.observedMethod = 2,
+			.expectedMethod = 2,
+			.observedRenderWidth = 2016,
+			.observedRenderHeight = 2240,
+			.observedDisplayWidth = 2016,
+			.observedDisplayHeight = 2240,
+			.expectedRenderWidth = 2016,
+			.expectedRenderHeight = 2240,
+			.expectedDisplayWidth = 2016,
+			.expectedDisplayHeight = 2240,
+			.observedDeviceIdentity = 0x1234,
+			.currentDeviceIdentity = 0x1234,
+			.observedResourceRevision = 9,
+		};
+		if (!MatchesPublishedReplacementProfile(facts))
+			return false;
+		auto stale = facts;
+		stale.profileValid = false;
+		if (MatchesPublishedReplacementProfile(stale))
+			return false;
+		stale = facts;
+		stale.observedTransitionEpoch = 18;
+		if (MatchesPublishedReplacementProfile(stale))
+			return false;
+		stale = facts;
+		stale.observedMethod = 3;
+		if (MatchesPublishedReplacementProfile(stale))
+			return false;
+		stale = facts;
+		stale.observedRenderWidth = 2015;
+		if (MatchesPublishedReplacementProfile(stale))
+			return false;
+		stale = facts;
+		stale.observedDisplayHeight = 2239;
+		if (MatchesPublishedReplacementProfile(stale))
+			return false;
+		stale = facts;
+		stale.observedResourceRevision = 0;
+		if (MatchesPublishedReplacementProfile(stale))
+			return false;
+		facts.requiresPublishedGeneration = true;
+		if (MatchesPublishedReplacementProfile(facts))
+			return false;
+		facts.observedContractGeneration = 8;
+		facts.expectedContractGeneration = 8;
+		if (!MatchesPublishedReplacementProfile(facts))
+			return false;
+		facts.observedContractGeneration = 9;
+		if (MatchesPublishedReplacementProfile(facts))
+			return false;
+		facts.observedContractGeneration = 8;
+		facts.observedDeviceIdentity = 0x5678;
+		return !MatchesPublishedReplacementProfile(facts);
 	}
 
 	constexpr bool CoversProofKinds()

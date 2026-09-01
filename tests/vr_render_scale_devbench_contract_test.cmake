@@ -654,6 +654,8 @@ foreach(_required_vendor_presentation_evidence IN ITEMS
 	"rightVendorDispatchSerial"
 	"observationVendorDispatchProven"
 	".vendorDispatchProven = observationVendorDispatchProven"
+	"IsExistingProviderContractGenerationValid("
+	"MatchesPublishedReplacementProfile("
 	"MatchesTargetContractGeneration("
 	"target.renderScaleMode"
 )

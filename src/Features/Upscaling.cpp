@@ -18547,7 +18547,10 @@ bool Upscaling::CanDispatchExistingVRVendorEvaluation(
 				provider.backend == VRRenderScaleBackendKind::FSR4Runtime) :
 			false;
 	const bool exactPublishedResourceKey =
-		provider.contractGeneration != 0 && resourceKey.valid &&
+		VRVendorRelatchPolicy::IsExistingProviderContractGenerationValid(
+			provider.renderScaleActive,
+			provider.contractGeneration) &&
+		resourceKey.valid &&
 		resourceKey.active == provider.renderScaleActive &&
 		resourceKey.method == provider.method &&
 		publishedBackendMatchesMethod &&
