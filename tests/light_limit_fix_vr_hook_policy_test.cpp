@@ -21,10 +21,57 @@ namespace
 		       !HasExternalBranchPrefix(nullptr, 0);
 	}
 
+	constexpr bool CoversIntegratedGuardDecision()
+	{
+		using Decision = SceneGraphGuardDecision;
+
+		return DecideSceneGraphGuard(true, true, false, false, false) == Decision::kInstall &&
+		       DecideSceneGraphGuard(true, true, true, false, false) == Decision::kInstall &&
+		       DecideSceneGraphGuard(true, false, true, true, true) == Decision::kSkipCompatibleExternalGuard &&
+		       DecideSceneGraphGuard(true, false, false, true, true) == Decision::kRejectUnknownSite &&
+		       DecideSceneGraphGuard(true, false, true, false, true) == Decision::kRejectUnknownSite &&
+		       DecideSceneGraphGuard(true, false, true, true, false) == Decision::kRejectUnknownSite &&
+		       DecideSceneGraphGuard(false, true, false, false, false) == Decision::kRejectUnknownSite &&
+		       DecideSceneGraphGuard(false, false, true, true, true) == Decision::kRejectUnknownSite;
+	}
+
+	constexpr bool CoversShadowMapXmmRestorePrefixes()
+	{
+		constexpr std::array<std::uint8_t, 45> expected{
+			0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+			0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+			0x41, 0, 0, 0, 0,
+			0x41, 0, 0, 0, 0,
+			0x45, 0, 0, 0, 0,
+			0x45, 0, 0, 0, 0,
+			0x45, 0, 0, 0, 0
+		};
+		constexpr std::array<std::uint8_t, 45> formerXmm14Xmm15{
+			0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+			0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+			0x45, 0, 0, 0, 0,
+			0x45, 0, 0, 0, 0,
+			0x45, 0, 0, 0, 0,
+			0x45, 0, 0, 0, 0,
+			0x45, 0, 0, 0, 0
+		};
+
+		return HasExpectedShadowMapXmmRestorePrefixes(expected.data(), expected.size()) &&
+		       !HasExpectedShadowMapXmmRestorePrefixes(formerXmm14Xmm15.data(), formerXmm14Xmm15.size()) &&
+		       !HasExpectedShadowMapXmmRestorePrefixes(expected.data(), 44) &&
+		       !HasExpectedShadowMapXmmRestorePrefixes(nullptr, 0);
+	}
+
 	static_assert(CoversExternalBranchRecognition());
+	static_assert(CoversIntegratedGuardDecision());
+	static_assert(CoversShadowMapXmmRestorePrefixes());
 }
 
 int main()
 {
-	return CoversExternalBranchRecognition() ? 0 : 1;
+	return CoversExternalBranchRecognition() &&
+	               CoversIntegratedGuardDecision() &&
+	               CoversShadowMapXmmRestorePrefixes() ?
+	           0 :
+	           1;
 }

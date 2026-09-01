@@ -2445,20 +2445,23 @@ void LightLimitFix::Hooks::InstallVRSceneGraphCullingObjectGuard()
 	const auto virtualCallContext = moduleBase + virtualCallContextRVA;
 	const auto helperEpilogue = moduleBase + helperEpilogueRVA;
 	const auto helperTailContext = moduleBase + helperTailContextRVA;
-	const auto engineFixesCullingGuard =
-		IsEngineFixesLoaded() &&
-		MatchesInstructions(virtualCallContext, expectedVirtualCallPrefix) &&
+	const auto helperSignaturesMatch =
+		MatchesInstructions(helperEntry, expectedHelperEntry) &&
+		MatchesInstructions(helperEpilogue, expectedHelperEpilogue) &&
+		MatchesInstructions(helperTailContext, expectedHelperTailContext);
+	const auto guardDecision = LightLimitFixVRHookPolicy::DecideSceneGraphGuard(
+		helperSignaturesMatch,
+		MatchesInstructions(virtualCallContext, expectedVirtualCallContext),
+		IsEngineFixesLoaded(),
+		MatchesInstructions(virtualCallContext, expectedVirtualCallPrefix),
 		LightLimitFixVRHookPolicy::HasExternalBranchPrefix(
 			reinterpret_cast<const std::uint8_t*>(virtualCallContext + std::size(expectedVirtualCallPrefix)),
-			2);
-	if (!MatchesInstructions(helperEntry, expectedHelperEntry) ||
-		(!MatchesInstructions(virtualCallContext, expectedVirtualCallContext) && !engineFixesCullingGuard) ||
-		!MatchesInstructions(helperEpilogue, expectedHelperEpilogue) ||
-		!MatchesInstructions(helperTailContext, expectedHelperTailContext)) {
+			2));
+	if (guardDecision == LightLimitFixVRHookPolicy::SceneGraphGuardDecision::kRejectUnknownSite) {
 		logger::error("[LLF] VR scene-graph culling-object guard not installed: unexpected SkyrimVR.exe instructions");
 		return;
 	}
-	if (engineFixesCullingGuard) {
+	if (guardDecision == LightLimitFixVRHookPolicy::SceneGraphGuardDecision::kSkipCompatibleExternalGuard) {
 		logger::info("[LLF] Engine Fixes VR culling freed-object guard detected; skipping duplicate scene-graph guard");
 		return;
 	}
@@ -2546,7 +2549,8 @@ void LightLimitFix::Hooks::InstallVRShadowMapCameraGuard()
 	if (!MatchesInstructions(helperEntry, expectedHelperEntry) ||
 		!MatchesInstructions(cameraUseContext, expectedCameraUseContext) ||
 		!MatchesInstructions(cameraLateFrustumLoad, expectedLateFrustumLoad) ||
-		!MatchesInstructions(helperEpilogue, expectedHelperEpilogue)) {
+		!MatchesInstructions(helperEpilogue, expectedHelperEpilogue) ||
+		!LightLimitFixVRHookPolicy::HasExpectedShadowMapXmmRestorePrefixes(expectedHelperEpilogue, std::size(expectedHelperEpilogue))) {
 		logger::error("[LLF] VR shadow-map camera guard not installed: unexpected SkyrimVR.exe instructions");
 		return;
 	}
