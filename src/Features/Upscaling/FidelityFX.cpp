@@ -1895,6 +1895,7 @@ void FidelityFX::ReleaseIdleRuntimeUpscalerInterop()
 	ResetRuntimeCommandContexts();
 	pendingRuntimeTeardownD3D11FenceValue = 0;
 	pendingRuntimeTeardownD3D12FenceValue = 0;
+	runtimeUpscalerIdleProofValid = false;
 	runtimeD3D11Fence = nullptr;
 	runtimeD3D12Fence = nullptr;
 	runtimeFenceValue = 1;
@@ -2345,6 +2346,13 @@ FidelityFX::LifecycleResult FidelityFX::PollRuntimeUpscalerTeardownIdle(const ch
 	if (!HasRuntimeUpscalerResources()) {
 		pendingRuntimeTeardownD3D11FenceValue = 0;
 		pendingRuntimeTeardownD3D12FenceValue = 0;
+		runtimeUpscalerIdleProofValid = true;
+		return LifecycleResult::Ready;
+	}
+	if (FSRRuntimeLifecyclePolicy::ResolveIdleProofAction(
+			runtimeUpscalerIdleProofValid,
+			IsRuntimeUpscalerTeardownFencePending()) ==
+		FSRRuntimeLifecyclePolicy::IdleProofAction::ReuseProof) {
 		return LifecycleResult::Ready;
 	}
 
@@ -2356,6 +2364,7 @@ FidelityFX::LifecycleResult FidelityFX::PollRuntimeUpscalerTeardownIdle(const ch
 	try {
 		if (pendingRuntimeTeardownD3D12FenceValue == 0) {
 			if (pendingRuntimeTeardownD3D11FenceValue == 0) {
+				runtimeUpscalerIdleProofValid = false;
 				pendingRuntimeTeardownD3D11FenceValue = runtimeFenceValue++;
 				DX::ThrowIfFailed(swapChain.d3d11Context->Signal(runtimeD3D11Fence.get(), pendingRuntimeTeardownD3D11FenceValue));
 				swapChain.d3d11Context->Flush();
@@ -2388,6 +2397,7 @@ FidelityFX::LifecycleResult FidelityFX::PollRuntimeUpscalerTeardownIdle(const ch
 				commandContext.fenceValue = 0;
 		}
 	} catch (const std::exception& e) {
+		runtimeUpscalerIdleProofValid = false;
 		logger::warn("[FidelityFX] Failed to poll runtime upscaler idle before {}: {}", reason, e.what());
 		const auto failureResult = ResolveRuntimeUpscalerLifecycleFailure(reason);
 		if (failureResult != LifecycleResult::RuntimeDeviceLost) {
@@ -2396,6 +2406,7 @@ FidelityFX::LifecycleResult FidelityFX::PollRuntimeUpscalerTeardownIdle(const ch
 		}
 		return failureResult;
 	} catch (...) {
+		runtimeUpscalerIdleProofValid = false;
 		logger::warn("[FidelityFX] Failed to poll runtime upscaler idle before {}.", reason);
 		const auto failureResult = ResolveRuntimeUpscalerLifecycleFailure(reason);
 		if (failureResult != LifecycleResult::RuntimeDeviceLost) {
@@ -2405,6 +2416,7 @@ FidelityFX::LifecycleResult FidelityFX::PollRuntimeUpscalerTeardownIdle(const ch
 		return failureResult;
 	}
 
+	runtimeUpscalerIdleProofValid = true;
 	return LifecycleResult::Ready;
 }
 
@@ -3479,6 +3491,9 @@ FidelityFX::LifecycleResult FidelityFX::DispatchRuntimeUpscalerBatch(std::span<c
 	};
 
 	try {
+		// From this point onward the runtime shared resources can be referenced by
+		// newly queued cross-API work, so an earlier teardown proof is consumed.
+		runtimeUpscalerIdleProofValid = false;
 		// FFX permits oversized resources but defines input work by renderSize.
 		auto copyIntoShared = [&](ID3D11Resource* a_source, const std::unique_ptr<WrappedResource>& a_destination, uint32_t a_width, uint32_t a_height) {
 			D3D11_BOX sourceBox{ 0, 0, 0, a_width, a_height, 1 };
