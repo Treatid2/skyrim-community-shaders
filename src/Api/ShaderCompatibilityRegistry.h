@@ -6,6 +6,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace CSX::Api
@@ -71,8 +72,7 @@ namespace CSX::Api
 		bool GetScope(std::uint32_t a_registrationIndex, std::uint32_t a_scopeIndex, ShaderCompatibilityScope& a_output) const;
 		ShaderCompatibilityRequirementSet BuildRequirementSet(
 			std::string_view a_shaderFamily,
-			std::string_view a_shaderSource,
-			std::string_view a_feature = {}) const;
+			std::string_view a_shaderSource) const;
 		void Freeze();
 
 	private:
@@ -82,6 +82,7 @@ namespace CSX::Api
 		std::uint64_t nextHandle = 1;
 		std::vector<ShaderCompatibilityRegistration> registrations;
 		std::string compatibilitySetDigest;
+		mutable std::unordered_map<std::string, ShaderCompatibilityRequirementSet> requirementCache;
 
 		static ShaderCompatibilityResult ValidateAndCopy(
 			const ShaderCompatibilityAPI::Registration001& a_input,
@@ -89,14 +90,12 @@ namespace CSX::Api
 		static bool Applies(
 			const ShaderCompatibilityRegistration& a_registration,
 			std::string_view a_shaderFamily,
-			std::string_view a_shaderSource,
-			std::string_view a_feature);
+			std::string_view a_shaderSource);
 	};
 
 	ShaderCompatibilityRegistry& GetShaderCompatibilityRegistry();
 	void FreezeShaderCompatibilityRegistrations();
 	ShaderCompatibilityRequirementSet GetShaderCompatibilityRequirementSet(
 		std::string_view a_shaderFamily,
-		std::string_view a_shaderSource,
-		std::string_view a_feature = {});
+		std::string_view a_shaderSource);
 }
