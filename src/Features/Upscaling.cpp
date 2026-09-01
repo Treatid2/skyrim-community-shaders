@@ -18596,12 +18596,20 @@ bool Upscaling::CanDispatchExistingVRVendorEvaluation(
 				pendingFSRReset.load(std::memory_order_acquire),
 				pendingFSRResetGeneration.load(std::memory_order_acquire),
 				provider.contractGeneration);
+		const bool providerContextsMatch =
+			hostProvider ?
+				fidelityFX.AreFSRResourcesCompatible(
+					provider.renderEyeWidth,
+					provider.renderEyeHeight,
+					provider.displayEyeWidth,
+					provider.displayEyeHeight,
+					2u) :
+				runtimeResourcesMatch;
 		resourcesReady = resourcesReady &&
 		                 !resetInvalidatesProvider &&
-		                 fidelityFX.HasFSRResources() &&
 		                 (hostProvider || runtimeFSR3Provider ||
 							 runtimeFSR4Provider) &&
-		                 runtimeResourcesMatch;
+		                 providerContextsMatch;
 	}
 	if (resourcesReady && provider.renderScaleActive) {
 		if (a_upscaleMethod == UpscaleMethod::kDLSS) {
@@ -18650,12 +18658,26 @@ bool Upscaling::CanDispatchExistingVRVendorEvaluation(
 					}
 				}
 			} else if (resourcesReady && a_upscaleMethod == UpscaleMethod::kFSR) {
-				resourcesReady = fidelityFX.AreFSRResourcesCompatible(
-					provider.renderEyeWidth,
-					provider.renderEyeHeight,
-					provider.displayEyeWidth,
-					provider.displayEyeHeight,
-					2u);
+				if (provider.backend == VRRenderScaleBackendKind::FSRHost) {
+					resourcesReady = fidelityFX.AreFSRResourcesCompatible(
+						provider.renderEyeWidth,
+						provider.renderEyeHeight,
+						provider.displayEyeWidth,
+						provider.displayEyeHeight,
+						2u);
+				} else {
+					const uint32_t runtimeVersion =
+						provider.backend == VRRenderScaleBackendKind::FSR4Runtime ?
+							FFX_UPSCALER_VERSION :
+							FidelityFX::Fsr3Version;
+					resourcesReady = fidelityFX.AreRuntimeUpscalerResourcesCompatible(
+						provider.displayEyeWidth,
+						provider.displayEyeHeight,
+						provider.displayEyeWidth,
+						provider.displayEyeHeight,
+						2u,
+						runtimeVersion);
+				}
 			}
 		}
 	}
@@ -24946,13 +24968,13 @@ bool Upscaling::ApplyPendingPerfModeRenderTargetRecreate(const char* a_caller)
 			}
 
 			if (relatchUpscaleMethod == UpscaleMethod::kFSR &&
-				(!fidelityFX.HasFSRResources() ||
-					!fidelityFX.AreFSRResourcesCompatible(
-						perfMode.trueHMDEyeWidth,
-						perfMode.trueHMDEyeHeight,
-						perfMode.trueHMDEyeWidth,
-						perfMode.trueHMDEyeHeight,
-						2u))) {
+				!fidelityFX.AreFSRProviderContextsCompatible(
+					perfMode.trueHMDEyeWidth,
+					perfMode.trueHMDEyeHeight,
+					perfMode.trueHMDEyeWidth,
+					perfMode.trueHMDEyeHeight,
+					2u,
+					relatchSettings.fsr4RuntimeEnable)) {
 				return false;
 			}
 
@@ -25116,7 +25138,15 @@ bool Upscaling::ApplyPendingPerfModeRenderTargetRecreate(const char* a_caller)
 		noOpPlan.stateScreenDimensionsMatch = true;
 		noOpPlan.vendorDimensionsUnchanged = true;
 		noOpPlan.preserveDLSSResources = relatchUpscaleMethod == UpscaleMethod::kDLSS;
-		noOpPlan.preserveFSRResources = relatchUpscaleMethod == UpscaleMethod::kFSR && fidelityFX.HasFSRResources();
+		noOpPlan.preserveFSRResources =
+			relatchUpscaleMethod == UpscaleMethod::kFSR &&
+			fidelityFX.AreFSRProviderContextsCompatible(
+				physicalProfile.renderEyeWidth,
+				physicalProfile.renderEyeHeight,
+				physicalProfile.displayEyeWidth,
+				physicalProfile.displayEyeHeight,
+				2u,
+				physicalProfile.fsr4RuntimeEnabled);
 		if (!RecordVRRenderScaleRelatchPlan(noOpPlan)) {
 			requeueRelatch(kVRUpscalingTransitionApplyDelayFrames, false);
 			return false;
@@ -26271,18 +26301,18 @@ bool Upscaling::ApplyPendingPerfModeRenderTargetRecreate(const char* a_caller)
 			previousBootSnapshot.active &&
 			previousVendorWasFSR;
 		const auto areFSRResourcesCompatibleForRelatch = [&]() {
-			if (!fidelityFX.HasFSRResources() ||
-				!perfMode.trueHMDEyeWidth ||
+			if (!perfMode.trueHMDEyeWidth ||
 				!perfMode.trueHMDEyeHeight) {
 				return false;
 			}
 
-			return fidelityFX.AreFSRResourcesCompatible(
+			return fidelityFX.AreFSRProviderContextsCompatible(
 				relatchTargetRenderEyeWidth,
 				relatchTargetRenderEyeHeight,
 				perfMode.trueHMDEyeWidth,
 				perfMode.trueHMDEyeHeight,
-				2u);
+				2u,
+				relatchSettings.fsr4RuntimeEnable);
 		};
 		const bool reuseCompatibleFSRResourcesForRelatch =
 			VRVendorRelatchPolicy::CanReuseCompatibleFSRResources({
@@ -36359,7 +36389,13 @@ bool Upscaling::ApplyPendingVendorRuntimeReset(UpscaleMethod a_upscaleMethod, co
 		const uint32_t displayHeight = ClampPositiveDimension(runtimeResolutionPlan.finalOutputSize.y);
 		const uint32_t renderWidthPerEye = std::max<uint32_t>(1u, ClampPositiveDimension(runtimeResolutionPlan.engineRenderSize.x) / 2u);
 		const uint32_t renderHeight = ClampPositiveDimension(runtimeResolutionPlan.engineRenderSize.y);
-		return fidelityFX.AreFSRResourcesCompatible(renderWidthPerEye, renderHeight, displayWidthPerEye, displayHeight, 2u);
+		return fidelityFX.AreFSRProviderContextsCompatible(
+			renderWidthPerEye,
+			renderHeight,
+			displayWidthPerEye,
+			displayHeight,
+			2u,
+			GetRuntimeFSR4Enabled());
 	};
 
 	static bool loggedVendorResetFailure = false;
@@ -36949,7 +36985,6 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 		foveatedDispatchChanged;
 	const auto canPreserveFSRResourcesForCurrentVRPlan = [&]() {
 		if (!globals::game::isVR ||
-			!fidelityFX.HasFSRResources() ||
 			runtimeResolutionPlan.finalOutputSize.x <= 0.0f ||
 			runtimeResolutionPlan.finalOutputSize.y <= 0.0f ||
 			runtimeResolutionPlan.engineRenderSize.x <= 0.0f ||
@@ -36961,7 +36996,13 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 		const uint32_t displayHeight = ClampPositiveDimension(runtimeResolutionPlan.finalOutputSize.y);
 		const uint32_t renderWidthPerEye = std::max<uint32_t>(1u, ClampPositiveDimension(runtimeResolutionPlan.engineRenderSize.x) / 2u);
 		const uint32_t renderHeight = ClampPositiveDimension(runtimeResolutionPlan.engineRenderSize.y);
-		return fidelityFX.AreFSRResourcesCompatible(renderWidthPerEye, renderHeight, displayWidthPerEye, displayHeight, 2u);
+		return fidelityFX.AreFSRProviderContextsCompatible(
+			renderWidthPerEye,
+			renderHeight,
+			displayWidthPerEye,
+			displayHeight,
+			2u,
+			GetRuntimeFSR4Enabled());
 	};
 	const bool vrFSRQualityChangeCanPreserveResources =
 		fsrQualityModeChanged &&
@@ -40655,12 +40696,13 @@ bool Upscaling::AreExistingVRSubmitVendorResourcesCompatible(
 	}
 
 	return a_upscaleMethod != UpscaleMethod::kFSR ||
-	       fidelityFX.AreFSRResourcesCompatible(
+	       fidelityFX.AreFSRProviderContextsCompatible(
 			   a_inputWidth,
 			   a_inputHeight,
 			   a_outputWidth,
 			   a_outputHeight,
-			   2u);
+			   2u,
+			   GetRuntimeFSR4Enabled());
 }
 
 void Upscaling::FinalizePerEyeOutputs(ID3D11Resource* colorDst)
@@ -52841,8 +52883,7 @@ bool Upscaling::IsVendorRuntimeReadyForActiveContract(UpscaleMethod a_upscaleMet
 		       streamline.HasCompleteVRDLSSViewportResources();
 	case UpscaleMethod::kFSR:
 		return !pendingFSRReset.load(std::memory_order_acquire) &&
-		       vrFSRRuntimeResourceGeneration == generation &&
-		       fidelityFX.HasFSRResources();
+		       vrFSRRuntimeResourceGeneration == generation;
 	default:
 		return true;
 	}
@@ -52909,7 +52950,9 @@ void Upscaling::ClearVendorRuntimeResourcesDirty(UpscaleMethod a_upscaleMethod, 
 		a_upscaleMethod == UpscaleMethod::kFSR  ? vrFSRRuntimeResourceGeneration :
 												  0u;
 	const bool resourcesPresent =
-		a_upscaleMethod == UpscaleMethod::kFSR ? fidelityFX.HasFSRResources() : runtimeGeneration != 0;
+		a_upscaleMethod == UpscaleMethod::kFSR ?
+			(fidelityFX.HasFSRResources() || runtimeGeneration != 0) :
+			runtimeGeneration != 0;
 	RecordVRVendorRuntimeLifecycle(
 		a_upscaleMethod,
 		a_clearRuntimeGeneration || !resourcesPresent ?
@@ -52928,7 +52971,9 @@ void Upscaling::RecordVRVendorRuntimeLifecycle(UpscaleMethod a_upscaleMethod, VR
 	const uint32_t runtimeGeneration =
 		a_upscaleMethod == UpscaleMethod::kDLSS ? vrDLSSRuntimeResourceGeneration : vrFSRRuntimeResourceGeneration;
 	const bool resourcesPresent =
-		a_upscaleMethod == UpscaleMethod::kFSR ? fidelityFX.HasFSRResources() : runtimeGeneration != 0;
+		a_upscaleMethod == UpscaleMethod::kFSR ?
+			(fidelityFX.HasFSRResources() || runtimeGeneration != 0) :
+			runtimeGeneration != 0;
 	VRVendorRuntimeLifecycleSnapshot lifecycle{};
 	uint64_t revision = 0;
 	{
@@ -53657,15 +53702,13 @@ void Upscaling::PreparePendingVRRenderScaleTransition(
 				!fidelityFX.IsRuntimeFsr4FailureLatched() &&
 				fidelityFX.IsRuntimeFsr4Available();
 			vendorResourcesReady =
-				fidelityFX.AreRuntimeUpscalerResourcesCompatible(
-					perfMode.trueHMDEyeWidth,
-					perfMode.trueHMDEyeHeight,
+				fidelityFX.PrepareRuntimeUpscalerContextsForFSR(
+					renderEyeWidth,
+					renderEyeHeight,
 					perfMode.trueHMDEyeWidth,
 					perfMode.trueHMDEyeHeight,
 					2u,
-					runtimeFSR4 ?
-						FFX_UPSCALER_VERSION :
-						FidelityFX::Fsr3Version);
+					runtimeFSR4) == FidelityFX::LifecycleResult::Ready;
 		} else {
 			vendorResourcesReady = fidelityFX.AreFSRResourcesCompatible(
 				renderEyeWidth,
