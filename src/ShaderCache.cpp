@@ -536,33 +536,10 @@ namespace SIE
 			return key.substr(0, separator);
 		}
 
-		std::optional<Util::ShaderCachePack::PackSetId> ParsePackSetId(std::string_view a_value)
-		{
-			if (a_value.size() != 32)
-				return std::nullopt;
-			Util::ShaderCachePack::PackSetId result{};
-			for (std::size_t index = 0; index < result.size(); ++index) {
-				auto nibble = [](char a_character) -> std::optional<std::uint8_t> {
-					if (a_character >= '0' && a_character <= '9')
-						return static_cast<std::uint8_t>(a_character - '0');
-					if (a_character >= 'a' && a_character <= 'f')
-						return static_cast<std::uint8_t>(a_character - 'a' + 10);
-					return std::nullopt;
-				};
-				const auto high = nibble(a_value[index * 2]);
-				const auto low = nibble(a_value[index * 2 + 1]);
-				if (!high || !low)
-					return std::nullopt;
-				result[index] = static_cast<std::byte>((*high << 4) | *low);
-			}
-			return result;
-		}
-
 		struct ManagedPackSet
 		{
 			std::once_flag initialized;
-			bool layoutInstalled = false;
-			bool manifestValid = false;
+			Util::ShaderCachePack::LayoutState layoutState = Util::ShaderCachePack::LayoutState::Absent;
 			std::unique_ptr<Util::ShaderCachePack::Store> optimized;
 			std::unique_ptr<Util::ShaderCachePack::Store> developer;
 			std::atomic_bool optimizedAvailable{ false };
@@ -579,22 +556,32 @@ namespace SIE
 		{
 			auto& packs = ManagedPacks();
 			std::call_once(packs.initialized, [&] {
-				constexpr std::array packPaths{
+				constexpr std::array<const wchar_t*, 4> packPaths{
 					L"Data/ShaderCache/Optimized.A.csxpack",
 					L"Data/ShaderCache/Optimized.B.csxpack",
 					L"Data/ShaderCache/Developer.A.csxpack",
 					L"Data/ShaderCache/Developer.B.csxpack"
 				};
 				constexpr auto manifestPath = L"Data/ShaderCache/PackManifest.json";
+				std::array<bool, 5> present{};
 				std::error_code error;
-				packs.layoutInstalled = std::filesystem::exists(manifestPath, error) && !error;
-				for (const auto* path : packPaths) {
+				present[0] = std::filesystem::exists(manifestPath, error) && !error;
+				for (std::size_t index = 0; index < packPaths.size(); ++index) {
 					error.clear();
-					packs.layoutInstalled = packs.layoutInstalled ||
-					                        (std::filesystem::exists(path, error) && !error);
+					present[index + 1] = std::filesystem::exists(packPaths[index], error) && !error;
 				}
-				if (!packs.layoutInstalled)
+				const auto presentCount = std::ranges::count(present, true);
+				const auto memberState = Util::ShaderCachePack::ClassifyLayoutMembers(present);
+				if (memberState == Util::ShaderCachePack::LayoutState::Absent)
 					return;
+				packs.layoutState = Util::ShaderCachePack::LayoutState::PartialOrInvalid;
+				if (memberState == Util::ShaderCachePack::LayoutState::PartialOrInvalid) {
+					logger::error(
+						"Managed shader pack layout is partial ({}/{} fixed members present); retaining legacy loose-cache fallback until repaired or cleared",
+						presentCount,
+						present.size());
+					return;
+				}
 
 				try {
 					std::ifstream manifestStream(manifestPath);
@@ -605,22 +592,22 @@ namespace SIE
 					nlohmann::json manifest;
 					manifestStream >> manifest;
 					const auto expectedRuntime = REL::Module::IsVR() ? "VR" : "SE";
-					const auto setId = ParsePackSetId(manifest.value("packSetId", std::string{}));
-					if (manifest.value("schema", std::string{}) != "csx.shader-cache.pack-manifest" ||
-						manifest.value("schemaVersion", 0) != 2 ||
-						manifest.value("formatVersion", 0) != 1 ||
-						manifest.value("runtime", std::string{}) != expectedRuntime ||
-						manifest.value("shaderCacheABI", std::string{}) != BuildProvenance::GetShaderCacheAbiId() ||
-						!setId || !manifest.contains("files") || !manifest["files"].is_object()) {
-						logger::error("Managed shader pack manifest does not match this runtime, ABI, format, or pack-set identity");
+					std::string manifestError;
+					const auto contract = Util::ShaderCachePack::ParseManifestContract(
+						manifest,
+						expectedRuntime,
+						BuildProvenance::GetShaderCacheAbiId(),
+						&manifestError);
+					if (!contract) {
+						logger::error("Managed shader pack manifest is invalid; retaining legacy loose-cache fallback: {}", manifestError);
 						return;
 					}
 
 					packs.optimized = std::make_unique<Util::ShaderCachePack::Store>(
-						packPaths[0], packPaths[1], Util::ShaderCachePack::Lane::Optimized, *setId);
+						packPaths[0], packPaths[1], Util::ShaderCachePack::Lane::Optimized, contract->packSetId);
 					packs.developer = std::make_unique<Util::ShaderCachePack::Store>(
-						packPaths[2], packPaths[3], Util::ShaderCachePack::Lane::Developer, *setId);
-					packs.manifestValid = true;
+						packPaths[2], packPaths[3], Util::ShaderCachePack::Lane::Developer, contract->packSetId);
+					packs.layoutState = Util::ShaderCachePack::LayoutState::Complete;
 
 					auto openLane = [&](Util::ShaderCachePack::Store& a_store,
 										std::atomic_bool& a_available,
@@ -647,12 +634,12 @@ namespace SIE
 						*packs.optimized,
 						packs.optimizedAvailable,
 						"Optimized",
-						manifest.value("optimizedRecordCount", std::uint64_t{}));
+						contract->optimizedRecordCount);
 					const bool developerOpen = openLane(
 						*packs.developer,
 						packs.developerAvailable,
 						"Developer",
-						manifest.value("developerRecordCount", std::uint64_t{}));
+						contract->developerRecordCount);
 
 					logger::info(
 						"Managed shader pack layout initialized (optimized={}, developer={})",
@@ -669,7 +656,7 @@ namespace SIE
 		bool ManagedShaderPackLayoutInstalled()
 		{
 			InitializeManagedPacks();
-			return ManagedPacks().layoutInstalled;
+			return ManagedPacks().layoutState == Util::ShaderCachePack::LayoutState::Complete;
 		}
 
 		void QuarantineShaderPackLane(bool a_developerMode, std::string_view a_cause)
@@ -821,27 +808,40 @@ namespace SIE
 			}
 		}
 
-		bool ResetManagedShaderPacks()
+		Util::ShaderCachePack::ResetDisposition ResetManagedShaderPacks()
 		{
 			InitializeManagedPacks();
 			auto& packs = ManagedPacks();
-			bool success = true;
+			auto aggregate = Util::ShaderCachePack::ResetDisposition::Complete;
 			for (const bool developerMode : { false, true }) {
 				auto* store = developerMode ? packs.developer.get() : packs.optimized.get();
 				auto& available = developerMode ? packs.developerAvailable : packs.optimizedAvailable;
 				if (!store) {
-					success = false;
+					aggregate = Util::ShaderCachePack::ResetDisposition::FailedBeforeCommit;
 					continue;
 				}
 				std::string error;
-				if (!store->Reset(&error)) {
-					success = false;
+				const auto disposition = store->Reset(&error);
+				if (disposition == Util::ShaderCachePack::ResetDisposition::FailedBeforeCommit) {
+					aggregate = disposition;
 					QuarantineShaderPackLane(developerMode, error);
 					logger::error("Failed to reset {} shader pack: {}", developerMode ? "developer" : "optimized", error);
-				} else
-					available.store(true, std::memory_order_release);
+					continue;
+				}
+
+				const bool laneAvailable = store->GetStats().available;
+				available.store(laneAvailable, std::memory_order_release);
+				if (disposition == Util::ShaderCachePack::ResetDisposition::CommittedDegraded) {
+					if (aggregate == Util::ShaderCachePack::ResetDisposition::Complete)
+						aggregate = disposition;
+					logger::warn(
+						"{} shader-pack reset committed with degraded cleanup (available={}): {}",
+						developerMode ? "Developer" : "Optimized",
+						laneAvailable,
+						error);
+				}
 			}
-			return success;
+			return aggregate;
 		}
 
 		bool RemoveLooseDiskCacheEntries()
@@ -4091,14 +4091,17 @@ namespace SIE
 		std::scoped_lock lock{ compilationSet.compilationMutex, g_diskCacheMutationMutex };
 		AdvanceDiskCacheGeneration();
 		if (ManagedShaderPackLayoutInstalled()) {
-			const bool reset = ResetManagedShaderPacks();
-			if (!reset) {
+			const auto reset = ResetManagedShaderPacks();
+			if (reset == Util::ShaderCachePack::ResetDisposition::FailedBeforeCommit) {
 				logger::error("Managed shader-pack clear did not commit for every lane; retaining cache metadata and process-local quarantine");
 				return;
 			}
 			const bool removedLoose = RemoveLooseDiskCacheEntries();
 			DiscardShaderCacheManifestLocked();
-			logger::info("Cleared managed shader packs in place (reset={}, legacyCleanup={})", reset, removedLoose);
+			logger::info(
+				"Cleared managed shader packs in place (reset={}, legacyCleanup={})",
+				reset == Util::ShaderCachePack::ResetDisposition::Complete ? "complete" : "committed-degraded",
+				removedLoose);
 			return;
 		}
 		if (RemovePath(DiskCachePath(), "active")) {
@@ -4112,8 +4115,8 @@ namespace SIE
 		std::scoped_lock lock{ compilationSet.compilationMutex, g_diskCacheMutationMutex };
 		AdvanceDiskCacheGeneration();
 		if (ManagedShaderPackLayoutInstalled()) {
-			const bool reset = ResetManagedShaderPacks();
-			if (!reset) {
+			const auto reset = ResetManagedShaderPacks();
+			if (reset == Util::ShaderCachePack::ResetDisposition::FailedBeforeCommit) {
 				logger::error("Managed shader-cache clear did not commit for every lane; retaining cache metadata and lifecycle state");
 				return;
 			}
@@ -4123,7 +4126,8 @@ namespace SIE
 			DiscardShaderCacheManifestLocked();
 			logger::info(
 				"Cleared managed shader cache in place (reset={}, legacyCleanup={}, previousCleanup={}, swapCleanup={})",
-				reset, removedLoose, removedPrevious, removedSwap);
+				reset == Util::ShaderCachePack::ResetDisposition::Complete ? "complete" : "committed-degraded",
+				removedLoose, removedPrevious, removedSwap);
 			diskCacheHeld = false;
 			featureSetChanged = false;
 			featureSetRevertPending = false;

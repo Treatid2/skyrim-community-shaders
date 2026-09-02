@@ -362,6 +362,10 @@ def validate_shader_pack(
     expected_pack_set_id: str | None = None,
 ) -> dict[str, int | str]:
     """Validate the exact committed pack format consumed by the C++ runtime."""
+    if expected_pack_set_id is not None and not valid_pack_set_id(
+        expected_pack_set_id
+    ):
+        raise SystemExit("expected pack-set identity is invalid or reserved")
     try:
         data = path.read_bytes()
     except OSError as exc:
@@ -375,6 +379,7 @@ def validate_shader_pack(
         magic != b"CSXSPK1\0"
         or version != PACK_FORMAT_VERSION
         or lane != expected_lane
+        or pack_set_id == b"\0" * 16
         or reserved
         or (
             expected_pack_set_id is not None
@@ -436,6 +441,127 @@ def validate_shader_pack(
     }
 
 
+def valid_pack_set_id(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r"[0-9a-f]{32}", value) is not None
+        and value != "0" * 32
+    )
+
+
+def validate_pack_manifest_contract(
+    pack_manifest: object,
+    expected_runtime: str,
+    expected_shader_cache_abi: str,
+    pack_stats: dict[str, dict[str, int | str]],
+) -> dict[str, Any]:
+    """Validate the canonical manifest/file contract used by all packagers."""
+    if not isinstance(pack_manifest, dict):
+        raise SystemExit("managed pack manifest must be an object")
+    pack_set_id = pack_manifest.get("packSetId")
+    variants = pack_manifest.get("compatibilityVariants")
+    if (
+        pack_manifest.get("schema") != "csx.shader-cache.pack-manifest"
+        or pack_manifest.get("schemaVersion") != PACK_MANIFEST_SCHEMA_VERSION
+        or pack_manifest.get("formatVersion") != PACK_FORMAT_VERSION
+        or pack_manifest.get("hashAlgorithm") != "sha256"
+        or pack_manifest.get("runtime") != expected_runtime
+        or pack_manifest.get("shaderCacheABI") != expected_shader_cache_abi
+        or not valid_pack_set_id(pack_set_id)
+        or not isinstance(variants, list)
+        or not variants
+        or any(not isinstance(value, str) or not value for value in variants)
+        or len(set(variants)) != len(variants)
+        or "default" not in variants
+    ):
+        raise SystemExit("managed pack manifest metadata is invalid")
+
+    if set(pack_stats) != set(PACK_FILE_NAMES):
+        raise SystemExit("managed pack validation requires exactly four fixed pack files")
+
+    # bool is an int subclass in Python; reject it explicitly so package admission
+    # matches the runtime JSON contract rather than accepting false as zero.
+    def manifest_count(value: object, label: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise SystemExit(
+                f"managed pack manifest {label} must be a nonnegative integer"
+            )
+        return value
+
+    optimized_count = manifest_count(
+        pack_manifest.get("optimizedRecordCount"), "optimizedRecordCount"
+    )
+    developer_count = manifest_count(
+        pack_manifest.get("developerRecordCount"), "developerRecordCount"
+    )
+    manifest_files = pack_manifest.get("files")
+    if not isinstance(manifest_files, dict) or set(manifest_files) != set(
+        PACK_FILE_NAMES
+    ):
+        raise SystemExit(
+            "managed pack manifest must describe exactly four fixed pack files"
+        )
+    for file_name, expected_lane in (
+        ("Optimized.A.csxpack", 1),
+        ("Optimized.B.csxpack", 1),
+        ("Developer.A.csxpack", 2),
+        ("Developer.B.csxpack", 2),
+    ):
+        entry = manifest_files.get(file_name)
+        if not isinstance(entry, dict) or set(entry) != {
+            "lane",
+            "generation",
+            "recordCount",
+        }:
+            raise SystemExit(
+                f"managed pack manifest has an invalid entry for {file_name}"
+            )
+        lane = manifest_count(entry.get("lane"), f"{file_name}.lane")
+        manifest_count(entry.get("generation"), f"{file_name}.generation")
+        manifest_count(entry.get("recordCount"), f"{file_name}.recordCount")
+        if lane != expected_lane:
+            raise SystemExit(
+                f"managed pack manifest has the wrong lane for {file_name}"
+            )
+
+    expected_files = {
+        file_name: {
+            "lane": 1 if file_name.startswith("Optimized") else 2,
+            "generation": stats["generation"],
+            "recordCount": stats["recordCount"],
+        }
+        for file_name, stats in pack_stats.items()
+    }
+    if (
+        manifest_files != expected_files
+        or optimized_count
+        != sum(
+            int(pack_stats[name]["recordCount"])
+            for name in PACK_FILE_NAMES
+            if name.startswith("Optimized")
+        )
+        or developer_count
+        != sum(
+            int(pack_stats[name]["recordCount"])
+            for name in PACK_FILE_NAMES
+            if name.startswith("Developer")
+        )
+    ):
+        raise SystemExit("managed pack manifest disagrees with its pack files")
+    for first, second in (
+        ("Optimized.A.csxpack", "Optimized.B.csxpack"),
+        ("Developer.A.csxpack", "Developer.B.csxpack"),
+    ):
+        if abs(
+            int(pack_stats[first]["generation"])
+            - int(pack_stats[second]["generation"])
+        ) != 1:
+            raise SystemExit(
+                f"managed cache lane has invalid A/B generations: {first}, {second}"
+            )
+    return pack_manifest
+
+
 def write_shader_pack(
     path: Path,
     lane: int,
@@ -443,8 +569,10 @@ def write_shader_pack(
     entries: list[dict[str, Any]],
     pack_set_id: str,
 ) -> None:
-    if not re.fullmatch(r"[0-9a-f]{32}", pack_set_id):
-        raise SystemExit("pack-set identity must be 16 lower-case hexadecimal bytes")
+    if not valid_pack_set_id(pack_set_id):
+        raise SystemExit(
+            "pack-set identity must be 16 nonzero lower-case hexadecimal bytes"
+        )
     file_prefix = struct.pack(
         "<8sIIQ16sQ",
         b"CSXSPK1\0",
@@ -2099,36 +2227,17 @@ def validate_cache_archive(
                 pack_root / "Developer.B.csxpack", 2, pack_set_id
             ),
         }
-        if (
-            pack_manifest.get("schema") != "csx.shader-cache.pack-manifest"
-            or pack_manifest.get("schemaVersion") != PACK_MANIFEST_SCHEMA_VERSION
-            or pack_manifest.get("formatVersion") != PACK_FORMAT_VERSION
-            or pack_manifest.get("hashAlgorithm") != "sha256"
-            or not isinstance(pack_set_id, str)
-            or re.fullmatch(r"[0-9a-f]{32}", pack_set_id) is None
-            or pack_manifest.get("runtime") != runtime
-            or pack_manifest.get("shaderCacheABI") != archived_shader_abi
-            or pack_manifest.get("optimizedRecordCount")
-            != pack_stats["Optimized.A.csxpack"]["recordCount"] + pack_stats["Optimized.B.csxpack"]["recordCount"]
-            or pack_manifest.get("developerRecordCount")
-            != pack_stats["Developer.A.csxpack"]["recordCount"] + pack_stats["Developer.B.csxpack"]["recordCount"]
-        ):
-            raise SystemExit(f"packaged {runtime} cache pack manifest disagrees with its pack files")
-        if pack_manifest.get("files") != {
-            file_name: {
-                "lane": 1 if file_name.startswith("Optimized") else 2,
-                "generation": stats["generation"],
-                "recordCount": stats["recordCount"],
-            }
-            for file_name, stats in pack_stats.items()
-        }:
-            raise SystemExit(f"packaged {runtime} cache file contract disagrees with its pack files")
-        for first, second in (
-            ("Optimized.A.csxpack", "Optimized.B.csxpack"),
-            ("Developer.A.csxpack", "Developer.B.csxpack"),
-        ):
-            if pack_stats[first]["generation"] == pack_stats[second]["generation"]:
-                raise SystemExit(f"packaged {runtime} cache has ambiguous A/B generations")
+        try:
+            validate_pack_manifest_contract(
+                pack_manifest,
+                runtime,
+                archived_shader_abi,
+                pack_stats,
+            )
+        except SystemExit as exc:
+            raise SystemExit(
+                f"packaged {runtime} cache pack manifest disagrees with its pack files: {exc}"
+            ) from exc
 
 
 def prepare_cache_archive(

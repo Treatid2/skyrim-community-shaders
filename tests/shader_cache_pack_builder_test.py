@@ -112,6 +112,28 @@ def main() -> int:
             stats["packSetId"] == manifest["packSetId"]
             for stats in (optimized_a, optimized_b, developer_a, developer_b)
         )
+        builder.validate_pack_manifest_contract(
+            manifest,
+            "VR",
+            "a" * 64,
+            {
+                "Optimized.A.csxpack": optimized_a,
+                "Optimized.B.csxpack": optimized_b,
+                "Developer.A.csxpack": developer_a,
+                "Developer.B.csxpack": developer_b,
+            },
+        )
+        try:
+            builder.write_shader_pack(
+                root / "zero.csxpack",
+                1,
+                1,
+                [],
+                "0" * 32,
+            )
+            raise AssertionError("all-zero pack-set identity was accepted")
+        except SystemExit:
+            pass
         assert not list(standard.rglob("*.pso"))
         if len(sys.argv) == 2:
             default_requirement = builder.canonical_compatibility_requirement_set([])
@@ -125,6 +147,7 @@ def main() -> int:
                     str(standard / "Optimized.A.csxpack"),
                     str(standard / "Optimized.B.csxpack"),
                     exact_key,
+                    manifest["packSetId"],
                 ],
                 check=True,
             )

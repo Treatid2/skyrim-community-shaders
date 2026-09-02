@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
+#include <nlohmann/json_fwd.hpp>
 #include <optional>
+#include <ranges>
 #include <shared_mutex>
 #include <span>
 #include <string>
@@ -21,6 +23,44 @@ namespace Util::ShaderCachePack
 		Optimized = 1,
 		Developer = 2
 	};
+
+	enum class ResetDisposition
+	{
+		Complete,
+		CommittedDegraded,
+		FailedBeforeCommit
+	};
+
+	enum class LayoutState
+	{
+		Absent,
+		PartialOrInvalid,
+		Complete
+	};
+
+	constexpr LayoutState ClassifyLayoutMembers(const std::array<bool, 5>& a_present)
+	{
+		const auto presentCount = std::ranges::count(a_present, true);
+		if (presentCount == 0)
+			return LayoutState::Absent;
+		if (static_cast<std::size_t>(presentCount) == a_present.size())
+			return LayoutState::Complete;
+		return LayoutState::PartialOrInvalid;
+	}
+
+	struct ManifestContract
+	{
+		PackSetId packSetId{};
+		std::uint64_t optimizedRecordCount = 0;
+		std::uint64_t developerRecordCount = 0;
+	};
+
+	bool IsValidPackSetId(const PackSetId& a_packSetId);
+	std::optional<ManifestContract> ParseManifestContract(
+		const nlohmann::json& a_manifest,
+		std::string_view a_expectedRuntime,
+		std::string_view a_expectedShaderCacheABI,
+		std::string* a_error = nullptr);
 
 	// A complete, readable managed pack set is authoritative. A miss in that
 	// set means the exact shader contract must be compiled; consulting a legacy
@@ -70,7 +110,7 @@ namespace Util::ShaderCachePack
 			std::filesystem::path a_pathA,
 			std::filesystem::path a_pathB,
 			Lane a_lane,
-			PackSetId a_packSetId = {});
+			PackSetId a_packSetId);
 		~Store();
 
 		Store(const Store&) = delete;
@@ -84,7 +124,7 @@ namespace Util::ShaderCachePack
 		Stats GetStats() const;
 		bool ShouldCompact(double a_minimumFragmentation = 0.30, std::uint64_t a_minimumSupersededBytes = 32ull * 1024ull * 1024ull) const;
 		bool Compact(std::string* a_error = nullptr);
-		bool Reset(std::string* a_error = nullptr);
+		ResetDisposition Reset(std::string* a_error = nullptr);
 
 	private:
 		struct RecordLocation
@@ -120,9 +160,10 @@ namespace Util::ShaderCachePack
 		Lane lane;
 		PackSetId packSetId{};
 		bool opened = false;
+		std::string leaseKey;
+		bool leaseOwned = false;
 #ifdef _WIN32
 		void* leaseHandle = nullptr;
-		bool leaseOwned = false;
 #endif
 		ScannedFile active;
 		ScannedFile fallback;

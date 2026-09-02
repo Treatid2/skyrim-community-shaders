@@ -75,13 +75,26 @@ it, and selects its higher generation; the prior file remains a searchable
 fallback generation. Fragmentation is measured only within the active file, so
 the intentional fallback generation does not cause endless compaction.
 
-The managed layout is authoritative when all four fixed files are present. Its
-optimized and developer lanes open and fail independently, so damage in one
-lane does not disable the other. An unavailable managed lane recompiles from
-source without consulting or writing legacy loose blobs; cache lifecycle
-operations continue to address the fixed pack files. Explicit cache clearing
-first commits a new empty generation barrier, then reinitializes the superseded
-file, rather than creating or deleting VFS entries.
+The managed layout is authoritative only when the manifest and all four fixed
+files are present and the manifest passes the same strict identity, runtime,
+ABI, variant, file-entry, lane, generation, and record-count contract used by
+packaging. No managed members means the established loose cache remains active.
+A partial or invalid layout is diagnosed explicitly and also retains that
+fallback until the installation is repaired or cleared; one fragment never
+silently suppresses an otherwise valid loose cache.
+
+Every writable pack set has a nonzero 128-bit identity. Runtime header checks
+are unconditional, and mutation ownership combines canonical process-local
+exclusion with a crash-recoverable cross-process file lease. Optimized and
+developer lanes open and fail independently, so damage in one lane does not
+disable the other. An unavailable lane in an otherwise authoritative layout
+recompiles from source without consulting or writing legacy loose blobs.
+
+Explicit cache clearing first commits a new empty generation barrier, then
+reinitializes the superseded file, rather than creating or deleting VFS entries.
+The result distinguishes complete cleanup, committed-but-degraded cleanup, and
+failure before commit. A committed degraded reset keeps the safe empty
+generation authoritative while emitting a bounded warning for later repair.
 
 This storage transition is `engine-cache-v3-managed-pack` in
 `config/shader-cache-abi.json`. The generated pack manifest embeds the exact

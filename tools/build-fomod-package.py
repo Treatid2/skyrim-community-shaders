@@ -288,29 +288,7 @@ def validate_cache_source(cache_directory: Path, expected_runtime: str) -> None:
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise SystemExit(f"invalid managed pack manifest {pack_manifest_path}: {exc}") from exc
     pack_set_id = pack_manifest.get("packSetId") if isinstance(pack_manifest, dict) else None
-    variants = (
-        pack_manifest.get("compatibilityVariants")
-        if isinstance(pack_manifest, dict)
-        else None
-    )
-    if (
-        not isinstance(pack_manifest, dict)
-        or pack_manifest.get("schema") != "csx.shader-cache.pack-manifest"
-        or pack_manifest.get("schemaVersion")
-        != SHADER_CACHE_CONTRACT.PACK_MANIFEST_SCHEMA_VERSION
-        or pack_manifest.get("formatVersion")
-        != SHADER_CACHE_CONTRACT.PACK_FORMAT_VERSION
-        or pack_manifest.get("hashAlgorithm") != "sha256"
-        or pack_manifest.get("runtime") != contract_runtime
-        or pack_manifest.get("shaderCacheABI") != shader_cache_abi
-        or not isinstance(pack_set_id, str)
-        or re.fullmatch(r"[0-9a-f]{32}", pack_set_id) is None
-        or not isinstance(variants, list)
-        or not variants
-        or any(not isinstance(value, str) or not value for value in variants)
-        or len(set(variants)) != len(variants)
-        or "default" not in variants
-    ):
+    if not SHADER_CACHE_CONTRACT.valid_pack_set_id(pack_set_id):
         raise SystemExit(
             f"managed pack manifest does not match its runtime metadata: "
             f"{pack_manifest_path}"
@@ -345,41 +323,18 @@ def validate_cache_source(cache_directory: Path, expected_runtime: str) -> None:
         )
         for name in PACK_FILES
     }
-    expected_files = {
-        name: {
-            "lane": PACK_LANES[name],
-            "generation": stats["generation"],
-            "recordCount": stats["recordCount"],
-        }
-        for name, stats in pack_stats.items()
-    }
-    if (
-        pack_manifest.get("files") != expected_files
-        or pack_manifest.get("optimizedRecordCount")
-        != sum(
-            pack_stats[name]["recordCount"]
-            for name in PACK_FILES
-            if name.startswith("Optimized")
+    try:
+        SHADER_CACHE_CONTRACT.validate_pack_manifest_contract(
+            pack_manifest,
+            contract_runtime,
+            shader_cache_abi,
+            pack_stats,
         )
-        or pack_manifest.get("developerRecordCount")
-        != sum(
-            pack_stats[name]["recordCount"]
-            for name in PACK_FILES
-            if name.startswith("Developer")
-        )
-    ):
+    except SystemExit as exc:
         raise SystemExit(
             f"managed pack manifest disagrees with its pack files: "
-            f"{pack_manifest_path}"
-        )
-    for first, second in (
-        ("Optimized.A.csxpack", "Optimized.B.csxpack"),
-        ("Developer.A.csxpack", "Developer.B.csxpack"),
-    ):
-        if abs(pack_stats[first]["generation"] - pack_stats[second]["generation"]) != 1:
-            raise SystemExit(
-                f"managed cache lane has invalid A/B generations: {first}, {second}"
-            )
+            f"{pack_manifest_path}: {exc}"
+        ) from exc
 
 
 def flag_pairs(element: ET.Element) -> tuple[tuple[str, str], ...]:

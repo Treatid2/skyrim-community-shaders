@@ -8,7 +8,10 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <mutex>
+#include <nlohmann/json.hpp>
 #include <ranges>
+#include <unordered_set>
 
 #ifdef _WIN32
 #	include <Windows.h>
@@ -71,6 +74,73 @@ namespace
 	};
 
 	void SetError(std::string* a_error, std::string a_value);
+
+	std::mutex g_writerLeaseRegistryMutex;
+	std::unordered_set<std::string> g_writerLeaseRegistry;
+
+	std::string CanonicalLeasePath(const std::filesystem::path& a_path)
+	{
+		std::error_code error;
+		auto canonical = std::filesystem::weakly_canonical(a_path, error);
+		if (error) {
+			error.clear();
+			canonical = std::filesystem::absolute(a_path, error);
+			if (error)
+				canonical = a_path.lexically_normal();
+		}
+		auto value = canonical.lexically_normal().generic_string();
+#ifdef _WIN32
+		std::ranges::transform(value, value.begin(), [](unsigned char a_character) {
+			return static_cast<char>(std::tolower(a_character));
+		});
+#endif
+		return value;
+	}
+
+	std::string BuildWriterLeaseKey(
+		const std::filesystem::path& a_pathA,
+		const std::filesystem::path& a_pathB,
+		Util::ShaderCachePack::Lane a_lane)
+	{
+		return CanonicalLeasePath(a_pathA) + '|' + CanonicalLeasePath(a_pathB) + '|' +
+		       std::to_string(static_cast<std::uint32_t>(a_lane));
+	}
+
+	std::optional<std::uint64_t> ReadUnsigned(const nlohmann::json& a_value)
+	{
+		if (a_value.is_number_unsigned())
+			return a_value.get<std::uint64_t>();
+		if (a_value.is_number_integer()) {
+			const auto signedValue = a_value.get<std::int64_t>();
+			if (signedValue >= 0)
+				return static_cast<std::uint64_t>(signedValue);
+		}
+		return std::nullopt;
+	}
+
+	std::optional<Util::ShaderCachePack::PackSetId> ParsePackSetIdText(std::string_view a_value)
+	{
+		if (a_value.size() != 32)
+			return std::nullopt;
+		Util::ShaderCachePack::PackSetId result{};
+		for (std::size_t index = 0; index < result.size(); ++index) {
+			auto nibble = [](char a_character) -> std::optional<std::uint8_t> {
+				if (a_character >= '0' && a_character <= '9')
+					return static_cast<std::uint8_t>(a_character - '0');
+				if (a_character >= 'a' && a_character <= 'f')
+					return static_cast<std::uint8_t>(a_character - 'a' + 10);
+				return std::nullopt;
+			};
+			const auto high = nibble(a_value[index * 2]);
+			const auto low = nibble(a_value[index * 2 + 1]);
+			if (!high || !low)
+				return std::nullopt;
+			result[index] = static_cast<std::byte>((*high << 4) | *low);
+		}
+		if (!Util::ShaderCachePack::IsValidPackSetId(result))
+			return std::nullopt;
+		return result;
+	}
 
 	bool CheckedAdd(std::uint64_t& a_value, std::uint64_t a_addend)
 	{
@@ -177,11 +247,6 @@ namespace
 			*a_error = std::move(a_value);
 	}
 
-	bool HasPackSetId(const Util::ShaderCachePack::PackSetId& a_packSetId)
-	{
-		return std::ranges::any_of(a_packSetId, [](std::byte a_value) { return a_value != std::byte{}; });
-	}
-
 	bool DurableFlush(const std::filesystem::path& a_path)
 	{
 #ifdef _WIN32
@@ -202,6 +267,127 @@ namespace
 
 namespace Util::ShaderCachePack
 {
+	bool IsValidPackSetId(const PackSetId& a_packSetId)
+	{
+		return std::ranges::any_of(a_packSetId, [](std::byte a_value) { return a_value != std::byte{}; });
+	}
+
+	std::optional<ManifestContract> ParseManifestContract(
+		const nlohmann::json& a_manifest,
+		std::string_view a_expectedRuntime,
+		std::string_view a_expectedShaderCacheABI,
+		std::string* a_error)
+	{
+		auto reject = [&](std::string a_reason) -> std::optional<ManifestContract> {
+			SetError(a_error, std::move(a_reason));
+			return std::nullopt;
+		};
+		try {
+			if (!a_manifest.is_object() ||
+				a_manifest.value("schema", std::string{}) != "csx.shader-cache.pack-manifest" ||
+				a_manifest.value("schemaVersion", 0) != 2 ||
+				a_manifest.value("formatVersion", 0) != kFormatVersion ||
+				a_manifest.value("hashAlgorithm", std::string{}) != "sha256" ||
+				a_manifest.value("runtime", std::string{}) != a_expectedRuntime ||
+				a_manifest.value("shaderCacheABI", std::string{}) != a_expectedShaderCacheABI) {
+				return reject("managed shader pack manifest metadata does not match this runtime, ABI, or format");
+			}
+
+			const auto packSetValue = a_manifest.find("packSetId");
+			if (packSetValue == a_manifest.end() || !packSetValue->is_string())
+				return reject("managed shader pack manifest has no valid nonzero pack-set identity");
+			const auto packSetId = ParsePackSetIdText(packSetValue->get_ref<const std::string&>());
+			if (!packSetId)
+				return reject("managed shader pack manifest has no valid nonzero pack-set identity");
+
+			const auto optimizedValue = a_manifest.find("optimizedRecordCount");
+			const auto developerValue = a_manifest.find("developerRecordCount");
+			if (optimizedValue == a_manifest.end() || developerValue == a_manifest.end())
+				return reject("managed shader pack manifest is missing aggregate record counts");
+			const auto optimizedRecordCount = ReadUnsigned(*optimizedValue);
+			const auto developerRecordCount = ReadUnsigned(*developerValue);
+			if (!optimizedRecordCount || !developerRecordCount)
+				return reject("managed shader pack manifest record counts must be unsigned integers");
+
+			const auto variants = a_manifest.find("compatibilityVariants");
+			if (variants == a_manifest.end() || !variants->is_array() || variants->empty())
+				return reject("managed shader pack manifest has no compatibility variants");
+			std::unordered_set<std::string> uniqueVariants;
+			bool hasDefault = false;
+			for (const auto& value : *variants) {
+				if (!value.is_string())
+					return reject("managed shader pack compatibility variants must be nonempty strings");
+				const auto& variant = value.get_ref<const std::string&>();
+				if (variant.empty() || !uniqueVariants.insert(variant).second)
+					return reject("managed shader pack compatibility variants must be nonempty and unique");
+				hasDefault = hasDefault || variant == "default";
+			}
+			if (!hasDefault)
+				return reject("managed shader pack compatibility variants must include default");
+
+			const auto files = a_manifest.find("files");
+			if (files == a_manifest.end() || !files->is_object() || files->size() != 4)
+				return reject("managed shader pack manifest must describe exactly four fixed pack files");
+
+			struct ExpectedFile
+			{
+				std::string_view name;
+				Lane lane;
+				std::uint64_t* laneTotal;
+				std::uint64_t generation = 0;
+			};
+			std::uint64_t optimizedFileTotal = 0;
+			std::uint64_t developerFileTotal = 0;
+			std::array<ExpectedFile, 4> expected{ {
+				{ "Optimized.A.csxpack", Lane::Optimized, &optimizedFileTotal },
+				{ "Optimized.B.csxpack", Lane::Optimized, &optimizedFileTotal },
+				{ "Developer.A.csxpack", Lane::Developer, &developerFileTotal },
+				{ "Developer.B.csxpack", Lane::Developer, &developerFileTotal },
+			} };
+			for (auto& expectedFile : expected) {
+				const auto file = files->find(expectedFile.name);
+				if (file == files->end() || !file->is_object() || file->size() != 3)
+					return reject("managed shader pack manifest has an invalid fixed-file entry");
+				const auto laneValue = file->find("lane");
+				const auto generationValue = file->find("generation");
+				const auto recordCountValue = file->find("recordCount");
+				if (laneValue == file->end() || generationValue == file->end() || recordCountValue == file->end())
+					return reject("managed shader pack manifest file entry is incomplete");
+				const auto lane = ReadUnsigned(*laneValue);
+				const auto generation = ReadUnsigned(*generationValue);
+				const auto recordCount = ReadUnsigned(*recordCountValue);
+				if (!lane || !generation || !recordCount ||
+					*lane != static_cast<std::uint32_t>(expectedFile.lane) ||
+					*recordCount > (std::numeric_limits<std::uint64_t>::max)() - *expectedFile.laneTotal) {
+					return reject("managed shader pack manifest file entry has invalid lane, generation, or record count");
+				}
+				expectedFile.generation = *generation;
+				*expectedFile.laneTotal += *recordCount;
+			}
+			auto adjacentGenerations = [](std::uint64_t a_first, std::uint64_t a_second) {
+				return a_first > a_second ? a_first - a_second == 1 : a_second - a_first == 1;
+			};
+			if (!adjacentGenerations(expected[0].generation, expected[1].generation) ||
+				!adjacentGenerations(expected[2].generation, expected[3].generation)) {
+				return reject("managed shader pack manifest has ambiguous A/B generations");
+			}
+			if (optimizedFileTotal != *optimizedRecordCount || developerFileTotal != *developerRecordCount)
+				return reject("managed shader pack manifest aggregate record counts disagree with its file entries");
+
+			if (a_error)
+				a_error->clear();
+			return ManifestContract{
+				.packSetId = *packSetId,
+				.optimizedRecordCount = *optimizedRecordCount,
+				.developerRecordCount = *developerRecordCount,
+			};
+		} catch (const std::exception& e) {
+			return reject(std::string("managed shader pack manifest validation failed: ") + e.what());
+		} catch (...) {
+			return reject("managed shader pack manifest validation failed");
+		}
+	}
+
 	Store::Store(
 		std::filesystem::path a_pathA,
 		std::filesystem::path a_pathB,
@@ -217,54 +403,70 @@ namespace Util::ShaderCachePack
 
 	bool Store::AcquireWriterLease(std::string* a_error)
 	{
-#ifdef _WIN32
-		if (!HasPackSetId(packSetId) || leaseOwned)
+		if (leaseOwned)
 			return true;
-		if (leaseHandle) {
-			SetError(a_error, "managed shader pack writer lease is held by another process");
+		if (!IsValidPackSetId(packSetId)) {
+			SetError(a_error, "managed shader pack requires a nonzero pack-set identity");
 			return false;
 		}
 
-		auto normalizedPath = [](const std::filesystem::path& a_path) {
-			auto value = a_path.lexically_normal().string();
-			std::ranges::transform(value, value.begin(), [](unsigned char a_character) {
-				return static_cast<char>(std::tolower(a_character));
-			});
-			return value;
-		};
-		std::string identity = normalizedPath(pathA) + '|' + normalizedPath(pathB) + '|' +
-		                       std::to_string(static_cast<std::uint32_t>(lane));
-		const auto digest = CryptoHash::Sha256Hex(identity);
-		const auto mutexName = L"Local\\CSX.ShaderCachePack." + std::wstring(digest.begin(), digest.end());
-		leaseHandle = CreateMutexW(nullptr, FALSE, mutexName.c_str());
-		if (!leaseHandle) {
-			SetError(a_error, "failed to create managed shader pack writer lease");
+		leaseKey = BuildWriterLeaseKey(pathA, pathB, lane);
+		{
+			std::lock_guard registryLock(g_writerLeaseRegistryMutex);
+			if (!g_writerLeaseRegistry.insert(leaseKey).second) {
+				leaseKey.clear();
+				SetError(a_error, "managed shader pack writer lease is already held in this process");
+				return false;
+			}
+		}
+
+#ifdef _WIN32
+		const auto digest = CryptoHash::Sha256Hex(leaseKey);
+		std::error_code error;
+		const auto leasePath =
+			std::filesystem::temp_directory_path(error) /
+			("CSX.ShaderCachePack." + digest + ".lock");
+		if (error) {
+			std::lock_guard registryLock(g_writerLeaseRegistryMutex);
+			g_writerLeaseRegistry.erase(leaseKey);
+			leaseKey.clear();
+			SetError(a_error, "failed to resolve managed shader pack writer-lease directory");
 			return false;
 		}
-		const DWORD result = WaitForSingleObject(static_cast<HANDLE>(leaseHandle), 0);
-		if (result != WAIT_OBJECT_0 && result != WAIT_ABANDONED) {
+		leaseHandle = CreateFileW(
+			leasePath.c_str(),
+			GENERIC_READ | GENERIC_WRITE,
+			FILE_SHARE_READ,
+			nullptr,
+			OPEN_ALWAYS,
+			FILE_ATTRIBUTE_TEMPORARY,
+			nullptr);
+		if (leaseHandle == INVALID_HANDLE_VALUE) {
 			SetError(a_error, "managed shader pack writer lease is held by another process");
-			CloseHandle(static_cast<HANDLE>(leaseHandle));
 			leaseHandle = nullptr;
+			std::lock_guard registryLock(g_writerLeaseRegistryMutex);
+			g_writerLeaseRegistry.erase(leaseKey);
+			leaseKey.clear();
 			return false;
 		}
-		leaseOwned = true;
-#else
-		(void)a_error;
 #endif
+		leaseOwned = true;
 		return true;
 	}
 
 	void Store::ReleaseWriterLease() noexcept
 	{
 #ifdef _WIN32
-		if (leaseOwned && leaseHandle)
-			ReleaseMutex(static_cast<HANDLE>(leaseHandle));
-		leaseOwned = false;
 		if (leaseHandle)
 			CloseHandle(static_cast<HANDLE>(leaseHandle));
 		leaseHandle = nullptr;
 #endif
+		if (leaseOwned && !leaseKey.empty()) {
+			std::lock_guard registryLock(g_writerLeaseRegistryMutex);
+			g_writerLeaseRegistry.erase(leaseKey);
+		}
+		leaseOwned = false;
+		leaseKey.clear();
 	}
 
 	bool Store::Scan(const std::filesystem::path& a_path, ScannedFile& a_output, std::string* a_error) const
@@ -312,7 +514,7 @@ namespace Util::ShaderCachePack
 		if (std::memcmp(file.magic, kFileMagic.data(), kFileMagic.size()) != 0 ||
 			file.version != kFormatVersion || file.lane != static_cast<std::uint32_t>(lane) ||
 			file.reserved != 0 ||
-			(HasPackSetId(packSetId) && std::memcmp(file.packSetId, packSetId.data(), packSetId.size()) != 0) ||
+			std::memcmp(file.packSetId, packSetId.data(), packSetId.size()) != 0 ||
 			std::memcmp(file.hash, expectedHeaderHash.data(), expectedHeaderHash.size()) != 0) {
 			a_output.diagnostic = "pack file header, lane, set identity, or header hash is invalid";
 			return true;
@@ -430,6 +632,11 @@ namespace Util::ShaderCachePack
 	{
 		if (a_error)
 			a_error->clear();
+		if (!IsValidPackSetId(packSetId)) {
+			SetError(a_error, "managed shader pack requires a nonzero pack-set identity");
+			opened = false;
+			return false;
+		}
 		if (!AcquireWriterLease(a_error)) {
 			opened = false;
 			return false;
@@ -470,12 +677,26 @@ namespace Util::ShaderCachePack
 				degraded += "; ";
 			degraded += "B: " + b.diagnostic;
 		}
+		if (a.valid && b.valid && a.generation == b.generation) {
+			SetError(a_error, "managed shader pack A/B generations are equal and therefore ambiguous");
+			opened = false;
+			return false;
+		}
 		if (b.valid && (!a.valid || b.generation > a.generation)) {
 			active = std::move(b);
 			fallback = std::move(a);
 		} else {
 			active = std::move(a);
 			fallback = std::move(b);
+		}
+		if (fallback.valid && active.generation - fallback.generation > 1) {
+			if (!degraded.empty())
+				degraded += "; ";
+			degraded += std::format(
+				"A/B generation gap is {} (authoritative generation {}, superseded generation {}); prior reset cleanup may be incomplete",
+				active.generation - fallback.generation,
+				active.generation,
+				fallback.generation);
 		}
 		opened = active.valid;
 		RebuildIndexes();
@@ -541,8 +762,7 @@ namespace Util::ShaderCachePack
 			fileHeader.lane != static_cast<std::uint32_t>(lane) ||
 			fileHeader.generation != a_location.generation ||
 			fileHeader.reserved != 0 ||
-			(HasPackSetId(packSetId) &&
-				std::memcmp(fileHeader.packSetId, packSetId.data(), packSetId.size()) != 0) ||
+			std::memcmp(fileHeader.packSetId, packSetId.data(), packSetId.size()) != 0 ||
 			std::memcmp(fileHeader.hash, fileHeaderHash.data(), fileHeaderHash.size()) != 0) {
 			SetError(a_error, "committed shader pack generation changed after indexing");
 			return std::nullopt;
@@ -636,7 +856,7 @@ namespace Util::ShaderCachePack
 			currentHeader.lane != static_cast<std::uint32_t>(lane) ||
 			currentHeader.generation != a_file.generation ||
 			currentHeader.reserved != 0 ||
-			(HasPackSetId(packSetId) && std::memcmp(currentHeader.packSetId, packSetId.data(), packSetId.size()) != 0) ||
+			std::memcmp(currentHeader.packSetId, packSetId.data(), packSetId.size()) != 0 ||
 			std::memcmp(currentHeader.hash, currentHeaderHash.data(), currentHeaderHash.size()) != 0) {
 			SetError(a_error, "managed pack generation changed before append");
 			return false;
@@ -849,19 +1069,20 @@ namespace Util::ShaderCachePack
 		}
 	}
 
-	bool Store::Reset(std::string* a_error)
+	ResetDisposition Store::Reset(std::string* a_error)
 	{
+		bool barrierCommitted = false;
 		try {
 			std::unique_lock lock(mutex);
 			if (!opened && !OpenLocked(a_error))
-				return false;
+				return ResetDisposition::FailedBeforeCommit;
 			if (!active.exists || !fallback.exists) {
 				SetError(a_error, "both fixed A/B files are required to reset a managed shader pack");
-				return false;
+				return ResetDisposition::FailedBeforeCommit;
 			}
 			if (active.generation > (std::numeric_limits<std::uint64_t>::max)() - 2) {
 				SetError(a_error, "shader pack generation is exhausted");
-				return false;
+				return ResetDisposition::FailedBeforeCommit;
 			}
 
 			// Write and verify a reset barrier into the inactive generation first.
@@ -869,9 +1090,15 @@ namespace Util::ShaderCachePack
 			// cleanup of that old file is interrupted.
 			ScannedFile resetTarget = fallback;
 			if (!InitializeEmpty(resetTarget, active.generation + 2, a_error))
-				return false;
-			if (!OpenLocked(a_error))
-				return false;
+				return ResetDisposition::FailedBeforeCommit;
+			barrierCommitted = true;
+			if (!OpenLocked(a_error)) {
+				if (a_error && a_error->empty())
+					*a_error = "managed pack reset committed but the authoritative empty generation could not be reopened";
+				else if (a_error)
+					*a_error = "managed pack reset committed but reopen failed: " + *a_error;
+				return ResetDisposition::CommittedDegraded;
+			}
 
 			// The reset is already durable and authoritative. Clearing the superseded
 			// file is cleanup only; a failure must not invalidate the new empty store.
@@ -879,15 +1106,22 @@ namespace Util::ShaderCachePack
 			std::string cleanupError;
 			if (!InitializeEmpty(oldGeneration, active.generation - 1, &cleanupError)) {
 				SetError(a_error, "managed pack reset committed; superseded generation cleanup failed: " + cleanupError);
-				return true;
+				return ResetDisposition::CommittedDegraded;
 			}
-			return OpenLocked(a_error);
+			if (!OpenLocked(a_error)) {
+				if (a_error && a_error->empty())
+					*a_error = "managed pack reset committed but final reopen failed";
+				else if (a_error)
+					*a_error = "managed pack reset committed but final reopen failed: " + *a_error;
+				return ResetDisposition::CommittedDegraded;
+			}
+			return ResetDisposition::Complete;
 		} catch (const std::exception& e) {
 			SetError(a_error, e.what());
-			return false;
+			return barrierCommitted ? ResetDisposition::CommittedDegraded : ResetDisposition::FailedBeforeCommit;
 		} catch (...) {
 			SetError(a_error, "unknown shader pack reset failure");
-			return false;
+			return barrierCommitted ? ResetDisposition::CommittedDegraded : ResetDisposition::FailedBeforeCommit;
 		}
 	}
 }

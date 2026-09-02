@@ -259,6 +259,34 @@ class FomodPackageTests(unittest.TestCase):
                     core, se_cache, vr_cache, root / "staged", "v3.18.0"
                 )
 
+    def test_rejects_reserved_or_malformed_manifest_contract(self) -> None:
+        mutations = (
+            ("zero identity", lambda manifest: manifest.__setitem__("packSetId", "0" * 32)),
+            ("missing hash", lambda manifest: manifest.pop("hashAlgorithm")),
+            ("wrong count type", lambda manifest: manifest.__setitem__("optimizedRecordCount", "0")),
+            ("boolean count", lambda manifest: manifest.__setitem__("optimizedRecordCount", False)),
+            ("missing file", lambda manifest: manifest["files"].pop("Developer.B.csxpack")),
+            (
+                "wrong lane",
+                lambda manifest: manifest["files"]["Developer.A.csxpack"].__setitem__("lane", 1),
+            ),
+            (
+                "ambiguous generation",
+                lambda manifest: manifest["files"]["Optimized.B.csxpack"].__setitem__("generation", 1),
+            ),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                _, _, vr_cache = self._inputs(root)
+                cache = vr_cache / BUILDER.CACHE_DIRECTORY
+                manifest_path = cache / BUILDER.PACK_MANIFEST_FILE
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                mutate(manifest)
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                with self.assertRaises(SystemExit):
+                    BUILDER.validate_cache_source(cache, BUILDER.RUNTIME_VR)
+
     def test_refuses_to_replace_existing_staging_tree(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
