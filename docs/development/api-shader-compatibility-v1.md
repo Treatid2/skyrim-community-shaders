@@ -84,18 +84,27 @@ open successfully, their headers and identities validate, and their per-file
 state satisfies the manifest contract. A partial, unreadable, non-file,
 malformed, or otherwise invalid layout is diagnosed explicitly and also retains
 the loose fallback until the installation is repaired or cleared; one fragment
-never silently suppresses an otherwise valid loose cache.
+never silently suppresses an otherwise valid loose cache. Admission is
+read-only: zero-byte placeholders are rejected rather than initialized, and a
+global rejection releases every provisional lane lease without changing any
+member. Release tooling must ship all four files with valid headers.
 
 Every writable pack set has a nonzero 128-bit identity. Runtime header checks
 are unconditional, and mutation ownership combines canonical process-local
 exclusion with a crash-recoverable machine-wide Windows named-pipe lease. Its
-key is the sorted physical file identity of the A/B pair, independent of `TEMP`, argument
-order, lane labels, and path aliases that Windows resolves to the same files.
-The handle may be released from another thread and is reclaimed if the process
-terminates. Optimized and developer lanes open and validate independently
-during admission; after a complete layout becomes authoritative, an operational
-failure quarantines only the affected lane. An unavailable authoritative lane
-recompiles from source without consulting or writing legacy loose blobs.
+key is the sorted physical file identity of the A/B pair, independent of `TEMP`,
+argument order, lane labels, and hard-link aliases. Physical identity is
+mandatory on Windows: directories, reparse points, identity-query failures, and
+same-object A/B pairs are rejected. Non-delete-sharing identity handles remain
+open for the lease lifetime, binding later path-based I/O to the admitted file
+objects by preventing replacement. All four fixed members must have distinct
+identities. The lease handle may be released from another thread and is
+reclaimed if the process terminates. Optimized and developer lanes open and
+validate independently during admission; any global rejection destroys both
+stores and releases their leases. After a complete layout becomes authoritative,
+an operational failure quarantines only the affected lane. An unavailable
+authoritative lane recompiles from source without consulting or writing legacy
+loose blobs.
 
 `PackManifest.json` is immutable installation metadata. Schema 2 requires
 `fileStateSemantics: installation-baseline-v1`; its schema, format,
@@ -108,7 +117,10 @@ file to be at or beyond its named baseline, reject count regression within the
 baseline generation, reject identity/lane mismatch and equal A/B generations,
 and accept a later generation even when its count changed. All numeric manifest
 fields are non-Boolean unsigned 64-bit integers; schema and format values must
-also equal their supported constants.
+also equal their supported constants. Each installation-baseline A/B generation
+pair must differ by exactly one. Record sequences use the common domain
+`1..UINT64_MAX-1`; zero and `UINT64_MAX` are reserved and rejected by both the
+runtime scanner and packaging validator.
 
 Explicit cache clearing first commits a new empty generation barrier, then
 reinitializes the superseded file, rather than creating or deleting VFS entries.

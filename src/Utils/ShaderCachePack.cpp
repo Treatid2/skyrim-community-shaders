@@ -78,26 +78,48 @@ namespace
 	std::mutex g_writerLeaseRegistryMutex;
 	std::unordered_set<std::string> g_writerLeaseRegistry;
 
+#ifdef _WIN32
+	bool AcquireFileIdentityGuard(
+		const std::filesystem::path& a_path,
+		void*& a_handle,
+		std::string& a_identity,
+		std::string* a_error)
+	{
+		const HANDLE file = CreateFileW(
+			a_path.c_str(), GENERIC_READ | GENERIC_WRITE,
+			FILE_SHARE_READ | FILE_SHARE_WRITE,
+			nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+		if (file == INVALID_HANDLE_VALUE) {
+			SetError(a_error, std::format(
+								  "failed to acquire physical identity for managed shader pack '{}' (Windows error {})",
+								  a_path.string(),
+								  GetLastError()));
+			return false;
+		}
+
+		BY_HANDLE_FILE_INFORMATION information{};
+		if (!GetFileInformationByHandle(file, &information) ||
+			(information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+			const auto identityError = GetLastError();
+			CloseHandle(file);
+			SetError(a_error, std::format(
+								  "managed shader pack '{}' is not a stable regular file identity (Windows error {})",
+								  a_path.string(),
+								  identityError));
+			return false;
+		}
+
+		a_handle = file;
+		a_identity = std::format(
+			"file-id:{:08x}:{:08x}{:08x}",
+			information.dwVolumeSerialNumber,
+			information.nFileIndexHigh,
+			information.nFileIndexLow);
+		return true;
+	}
+#else
 	std::string CanonicalLeasePath(const std::filesystem::path& a_path)
 	{
-#ifdef _WIN32
-		const HANDLE file = CreateFileW(
-			a_path.c_str(), FILE_READ_ATTRIBUTES,
-			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-			nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-		if (file != INVALID_HANDLE_VALUE) {
-			BY_HANDLE_FILE_INFORMATION information{};
-			if (GetFileInformationByHandle(file, &information)) {
-				CloseHandle(file);
-				return std::format(
-					"file-id:{:08x}:{:08x}{:08x}",
-					information.dwVolumeSerialNumber,
-					information.nFileIndexHigh,
-					information.nFileIndexLow);
-			}
-			CloseHandle(file);
-		}
-#endif
 		std::error_code error;
 		auto canonical = std::filesystem::weakly_canonical(a_path, error);
 		if (error) {
@@ -106,23 +128,9 @@ namespace
 			if (error)
 				canonical = a_path.lexically_normal();
 		}
-		auto value = canonical.lexically_normal().generic_string();
-#ifdef _WIN32
-		std::ranges::transform(value, value.begin(), [](unsigned char a_character) {
-			return static_cast<char>(std::tolower(a_character));
-		});
+		return canonical.lexically_normal().generic_string();
+	}
 #endif
-		return value;
-	}
-
-	std::string BuildWriterLeaseKey(
-		const std::filesystem::path& a_pathA,
-		const std::filesystem::path& a_pathB)
-	{
-		std::array paths{ CanonicalLeasePath(a_pathA), CanonicalLeasePath(a_pathB) };
-		std::ranges::sort(paths);
-		return paths[0] + '|' + paths[1];
-	}
 
 	std::optional<std::uint64_t> ReadUnsigned(const nlohmann::json& a_value)
 	{
@@ -445,6 +453,22 @@ namespace Util::ShaderCachePack
 		return true;
 	}
 
+	bool ValidateDistinctFileIdentities(
+		const std::array<std::string, 4>& a_identities,
+		std::string* a_error)
+	{
+		std::unordered_set<std::string> unique;
+		for (const auto& identity : a_identities) {
+			if (identity.empty() || !unique.insert(identity).second) {
+				SetError(a_error, "managed shader pack fixed members must resolve to four distinct stable file identities");
+				return false;
+			}
+		}
+		if (a_error)
+			a_error->clear();
+		return true;
+	}
+
 	Store::Store(
 		std::filesystem::path a_pathA,
 		std::filesystem::path a_pathB,
@@ -467,12 +491,30 @@ namespace Util::ShaderCachePack
 			return false;
 		}
 
-		leaseKey = BuildWriterLeaseKey(pathA, pathB);
+#ifdef _WIN32
+		if (!AcquireFileIdentityGuard(pathA, fileIdentityHandles[0], fileIdentityKeys[0], a_error) ||
+			!AcquireFileIdentityGuard(pathB, fileIdentityHandles[1], fileIdentityKeys[1], a_error)) {
+			ReleaseWriterLease();
+			return false;
+		}
+#else
+		fileIdentityKeys = { CanonicalLeasePath(pathA), CanonicalLeasePath(pathB) };
+#endif
+		if (fileIdentityKeys[0].empty() || fileIdentityKeys[1].empty() ||
+			fileIdentityKeys[0] == fileIdentityKeys[1]) {
+			SetError(a_error, "managed shader pack A/B members must be distinct stable file identities");
+			ReleaseWriterLease();
+			return false;
+		}
+		auto sortedIdentities = fileIdentityKeys;
+		std::ranges::sort(sortedIdentities);
+		leaseKey = sortedIdentities[0] + '|' + sortedIdentities[1];
 		{
 			std::lock_guard registryLock(g_writerLeaseRegistryMutex);
 			if (!g_writerLeaseRegistry.insert(leaseKey).second) {
 				leaseKey.clear();
 				SetError(a_error, "managed shader pack writer lease is already held in this process");
+				ReleaseWriterLease();
 				return false;
 			}
 		}
@@ -500,6 +542,7 @@ namespace Util::ShaderCachePack
 			std::lock_guard registryLock(g_writerLeaseRegistryMutex);
 			g_writerLeaseRegistry.erase(leaseKey);
 			leaseKey.clear();
+			ReleaseWriterLease();
 			return false;
 		}
 #endif
@@ -524,12 +567,23 @@ namespace Util::ShaderCachePack
 		return { state(fileA), state(fileB) };
 	}
 
+	std::array<std::string, 2> Store::GetFileIdentityKeys() const
+	{
+		std::shared_lock lock(mutex);
+		return fileIdentityKeys;
+	}
+
 	void Store::ReleaseWriterLease() noexcept
 	{
 #ifdef _WIN32
 		if (leaseHandle)
 			CloseHandle(static_cast<HANDLE>(leaseHandle));
 		leaseHandle = nullptr;
+		for (auto& handle : fileIdentityHandles) {
+			if (handle)
+				CloseHandle(static_cast<HANDLE>(handle));
+			handle = nullptr;
+		}
 #endif
 		if (leaseOwned && !leaseKey.empty()) {
 			std::lock_guard registryLock(g_writerLeaseRegistryMutex);
@@ -537,6 +591,7 @@ namespace Util::ShaderCachePack
 		}
 		leaseOwned = false;
 		leaseKey.clear();
+		fileIdentityKeys = {};
 	}
 
 	bool Store::Scan(const std::filesystem::path& a_path, ScannedFile& a_output, std::string* a_error) const
@@ -686,7 +741,7 @@ namespace Util::ShaderCachePack
 	{
 		try {
 			std::unique_lock lock(mutex);
-			const bool result = OpenLocked(a_error);
+			const bool result = OpenLocked(false, a_error);
 			if (!result)
 				ReleaseWriterLease();
 			return result;
@@ -703,7 +758,41 @@ namespace Util::ShaderCachePack
 		}
 	}
 
-	bool Store::OpenLocked(std::string* a_error)
+	bool Store::InitializeEmptyFilesAndOpen(std::string* a_error)
+	{
+		try {
+			std::unique_lock lock(mutex);
+			const bool result = OpenLocked(true, a_error);
+			if (!result)
+				ReleaseWriterLease();
+			return result;
+		} catch (const std::exception& e) {
+			SetError(a_error, e.what());
+			opened = false;
+			ReleaseWriterLease();
+			return false;
+		} catch (...) {
+			SetError(a_error, "unknown shader pack initialization failure");
+			opened = false;
+			ReleaseWriterLease();
+			return false;
+		}
+	}
+
+	void Store::Close()
+	{
+		std::unique_lock lock(mutex);
+		opened = false;
+		active = {};
+		fallback = {};
+		exactIndex.clear();
+		liveByLogical.clear();
+		activeLiveByLogical.clear();
+		stats = {};
+		ReleaseWriterLease();
+	}
+
+	bool Store::OpenLocked(bool a_allowEmptyInitialization, std::string* a_error)
 	{
 		if (a_error)
 			a_error->clear();
@@ -735,34 +824,29 @@ namespace Util::ShaderCachePack
 			opened = false;
 			return false;
 		}
-		if (!a.valid && !b.valid) {
-			ScannedFile* emptyA = a.exists && a.fileSize == 0 ? &a : nullptr;
-			ScannedFile* emptyB = b.exists && b.fileSize == 0 ? &b : nullptr;
-			if (!emptyA && !emptyB) {
-				SetError(a_error, std::format("both managed pack generations are invalid (A='{}', B='{}')", a.diagnostic, b.diagnostic));
+		if (!a.valid || !b.valid) {
+			const bool emptyPair = a.fileSize == 0 && b.fileSize == 0;
+			if (!a_allowEmptyInitialization || !emptyPair) {
+				SetError(a_error, std::format(
+									  "managed pack admission is read-only and requires two valid prebuilt files (A='{}', B='{}')",
+									  a.diagnostic,
+									  b.diagnostic));
 				opened = false;
 				return false;
 			}
-			if (emptyA && !InitializeEmpty(*emptyA, 1, a_error)) {
+
+			auto restoreEmptyPair = [&] {
+				for (const auto& path : { pathA, pathB }) {
+					std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+					stream.close();
+					DurableFlush(path);
+				}
+			};
+			if (!InitializeEmpty(a, 1, a_error) || !InitializeEmpty(b, 0, a_error)) {
+				restoreEmptyPair();
 				opened = false;
 				return false;
 			}
-			if (emptyB && !InitializeEmpty(*emptyB, emptyA ? 0 : 1, a_error)) {
-				if (!emptyA)
-					SetError(a_error, std::format("both managed pack generations are invalid (A='{}', B='{}')", a.diagnostic, b.diagnostic));
-				opened = false;
-				return false;
-			}
-		}
-		if (a.valid && !b.valid && b.exists && b.fileSize == 0 &&
-			!InitializeEmpty(b, a.generation == 0 ? 1 : a.generation - 1, a_error)) {
-			opened = false;
-			return false;
-		}
-		if (b.valid && !a.valid && a.exists && a.fileSize == 0 &&
-			!InitializeEmpty(a, b.generation == 0 ? 1 : b.generation - 1, a_error)) {
-			opened = false;
-			return false;
 		}
 		std::string degraded;
 		if (!a.diagnostic.empty())
@@ -793,7 +877,7 @@ namespace Util::ShaderCachePack
 				active.generation,
 				fallback.generation);
 		}
-		opened = active.valid;
+		opened = active.valid && fallback.valid;
 		RebuildIndexes();
 		if (!degraded.empty())
 			SetError(a_error, std::move(degraded));
@@ -1016,7 +1100,7 @@ namespace Util::ShaderCachePack
 	{
 		try {
 			std::unique_lock lock(mutex);
-			if (!opened && !OpenLocked(a_error))
+			if (!opened && !OpenLocked(false, a_error))
 				return false;
 			const auto offset = active.validSize;
 			const auto sequence = active.nextSequence;
@@ -1154,7 +1238,7 @@ namespace Util::ShaderCachePack
 				SetError(a_error, "failed to durably checkpoint compacted shader pack");
 				return false;
 			}
-			return OpenLocked(a_error);
+			return OpenLocked(false, a_error);
 		} catch (const std::exception& e) {
 			SetError(a_error, e.what());
 			return false;
@@ -1169,7 +1253,7 @@ namespace Util::ShaderCachePack
 		bool barrierCommitted = false;
 		try {
 			std::unique_lock lock(mutex);
-			if (!opened && !OpenLocked(a_error))
+			if (!opened && !OpenLocked(false, a_error))
 				return ResetDisposition::FailedBeforeCommit;
 			if (!active.exists || !fallback.exists) {
 				SetError(a_error, "both fixed A/B files are required to reset a managed shader pack");
@@ -1187,7 +1271,7 @@ namespace Util::ShaderCachePack
 			if (!InitializeEmpty(resetTarget, active.generation + 2, a_error))
 				return ResetDisposition::FailedBeforeCommit;
 			barrierCommitted = true;
-			if (!OpenLocked(a_error)) {
+			if (!OpenLocked(false, a_error)) {
 				if (a_error && a_error->empty())
 					*a_error = "managed pack reset committed but the authoritative empty generation could not be reopened";
 				else if (a_error)
@@ -1203,7 +1287,7 @@ namespace Util::ShaderCachePack
 				SetError(a_error, "managed pack reset committed; superseded generation cleanup failed: " + cleanupError);
 				return ResetDisposition::CommittedDegraded;
 			}
-			if (!OpenLocked(a_error)) {
+			if (!OpenLocked(false, a_error)) {
 				if (a_error && a_error->empty())
 					*a_error = "managed pack reset committed but final reopen failed";
 				else if (a_error)
