@@ -2118,9 +2118,11 @@ if(BUILD_CONTROLLER_TESTS)
             vr_render_scale_qualification_policy_test
             vr_render_scale_replacement_telemetry_policy_test
             streamline_frame_token_publication_test
+            main_thread_dispatch_policy_test
             vr_render_scale_preparation_policy_test
             vr_presentation_stretch_telemetry_policy_test
             reflex_policy_test
+            light_limit_fix_vr_hook_policy_test
             fsr_host_lifecycle_policy_test
             overlay_policy_test
             performance_tuning_statistics_test
