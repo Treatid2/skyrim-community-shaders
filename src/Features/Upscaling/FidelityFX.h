@@ -157,6 +157,8 @@ public:
 	bool IsRuntimeUpscalerProviderMatchingRequestedVersion() const;
 	bool IsRuntimeUpscalerFailureLatched() const;
 	bool IsRuntimeFsr4FailureLatched() const;
+	/** @brief Validates that the provider which produced a dispatch proof remains usable. */
+	bool IsRuntimeUpscalerDispatchProofUsable(RuntimeUpscalerFramePath a_path) const;
 	const std::string& GetRuntimeUpscalerLastFramePathLabel() const;
 	const std::string& GetConfiguredFsrPathLabel() const;
 	const std::string& GetDisplayedFsrPathLabel() const;

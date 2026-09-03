@@ -2403,6 +2403,17 @@ bool Streamline::HasCompleteVRDLSSViewportResources(
 	return true;
 }
 
+bool Streamline::IsDLSSRuntimeReady() const noexcept
+{
+	return lifecycleState.load(std::memory_order_acquire) == LifecycleState::Initialized &&
+	       initialized.load(std::memory_order_acquire) &&
+	       featureCheckComplete.load(std::memory_order_acquire) &&
+	       featureDLSS.load(std::memory_order_acquire) &&
+	       boundDeviceIdentity &&
+	       slEvaluateFeature && slSetConstants && slGetNewFrameToken &&
+	       slDLSSGetOptimalSettings && slDLSSGetState && slDLSSSetOptions;
+}
+
 bool Streamline::ResolveDLSSViewport(DLSSViewportRole viewportRole, sl::ViewportHandle p_viewport, uint32_t eyeIndex, uint32_t qualityMode, uint32_t dlssPreset, sl::ViewportHandle& outViewport)
 {
 	outViewport = p_viewport;
