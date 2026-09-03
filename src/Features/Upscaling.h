@@ -1772,6 +1772,8 @@ public:
 	[[nodiscard]] uint64_t GetVRRenderScaleCPUPerformanceSessionID() const noexcept;
 	/** @brief Starts a new monotonically identified session, or returns zero if IDs are exhausted. */
 	[[nodiscard]] uint64_t StartVRRenderScaleCPUPerformanceTelemetry() noexcept;
+	/** @brief Starts CPU telemetry at an exact caller-owned frame boundary. */
+	[[nodiscard]] uint64_t StartVRRenderScaleCPUPerformanceTelemetry(uint32_t a_startFrame) noexcept;
 	/** @brief Stops recording while retaining the current session ID and counters. */
 	void StopVRRenderScaleCPUPerformanceTelemetry() noexcept;
 	/** @brief Clears retained telemetry and its session ID without rewinding ID allocation. */
@@ -1779,6 +1781,8 @@ public:
 	VRRenderScaleGPUPerformanceSnapshot GetVRRenderScaleGPUPerformanceSnapshot() const noexcept;
 	[[nodiscard]] bool IsVRRenderScaleGPUPerformanceTelemetryActive() const noexcept;
 	void StartVRRenderScaleGPUPerformanceTelemetry() noexcept;
+	/** @brief Starts GPU telemetry at an exact caller-owned frame boundary. */
+	void StartVRRenderScaleGPUPerformanceTelemetry(uint32_t a_startFrame) noexcept;
 	void StopVRRenderScaleGPUPerformanceTelemetry() noexcept;
 	void ResetVRRenderScaleGPUPerformanceTelemetry() noexcept;
 	void RecordVRRenderScaleGPUPerformanceCounter(VRRenderScaleGPUPerformanceCounter a_counter, uint64_t a_delta = 1) const noexcept;
@@ -2370,6 +2374,7 @@ public:
 		bool valid = false;
 		bool renderScaleActive = false;
 		UpscaleMethod method = UpscaleMethod::kNONE;
+		VRRenderScaleBackendKind backend = VRRenderScaleBackendKind::None;
 		uint32_t qualityMode = 0;
 		uint32_t dlssPreset = kDLSSPresetK;
 		uint32_t renderEyeWidth = 0;
@@ -2377,6 +2382,7 @@ public:
 		uint32_t displayEyeWidth = 0;
 		uint32_t displayEyeHeight = 0;
 		uint32_t contractGeneration = 0;
+		VRRenderScaleResourceKey resources{};
 	};
 
 	// Helper: Create a Texture2D matching source format at a given size
@@ -2961,6 +2967,12 @@ public:
 		uint32_t depthHeight = 0;
 		uint32_t depthOffsetX = 0;
 		uint32_t depthOffsetY = 0;
+#ifdef DEVBENCH_BRIDGE_ENABLED
+		VRRenderScaleBackendKind vendorBackend = VRRenderScaleBackendKind::None;
+		uint32_t vendorDispatchFrame = 0;
+		uint64_t vendorDispatchSerial = 0;
+		bool vendorRuntimeFallback = false;
+#endif
 	};
 	struct SubmitStageFoveatedCenterState
 	{
