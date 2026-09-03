@@ -221,7 +221,7 @@ This compiles HLSL but does not build the C++ plugin. The builder:
 9. packages each runtime's managed cache into a raw archive with no installer
    metadata or automatic runtime detection;
 10. publishes output only after every requested runtime has passed the earlier
-   stages.
+    stages.
 
 An existing runtime output is replaced only when it has the expected,
 non-link cache layout and a readable `[Cache] PluginVersion` ownership field.
@@ -438,7 +438,7 @@ foreach ($runtime in @("SE", "VR")) {
     $manifest = Get-Content (Join-Path $cacheRoot "PackManifest.json") -Raw |
         ConvertFrom-Json
     $packs = Get-ChildItem $cacheRoot -File -Filter "*.csxpack"
-    if ($manifest.schemaVersion -ne 1 -or $packs.Count -ne 4 -or
+    if ($manifest.schemaVersion -ne 2 -or $packs.Count -ne 4 -or
         $manifest.optimizedRecordCount -le 0) {
         throw "$runtime manifest validation failed."
     }

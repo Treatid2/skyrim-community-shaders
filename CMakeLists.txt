@@ -2038,11 +2038,19 @@ if(BUILD_CONTROLLER_TESTS)
         src/Utils/CryptoHash.cpp
     )
     target_compile_features(shader_cache_pack_test PRIVATE cxx_std_23)
+    if(MSVC)
+        target_compile_options(shader_cache_pack_test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(shader_cache_pack_test PRIVATE -UNDEBUG)
+    endif()
     target_include_directories(
         shader_cache_pack_test
         PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src"
     )
-    target_link_libraries(shader_cache_pack_test PRIVATE bcrypt.lib)
+    target_link_libraries(
+        shader_cache_pack_test
+        PRIVATE bcrypt.lib nlohmann_json::nlohmann_json
+    )
     add_test(NAME ShaderCachePack COMMAND shader_cache_pack_test)
     set_tests_properties(ShaderCachePack PROPERTIES LABELS "ControllerTests")
 

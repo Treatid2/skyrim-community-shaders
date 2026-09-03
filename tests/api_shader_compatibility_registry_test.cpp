@@ -1,7 +1,9 @@
 #include "Api/ShaderCompatibilityRegistry.h"
 
+#include <array>
 #include <cassert>
 #include <string>
+#include <vector>
 
 using namespace CSX;
 
@@ -35,11 +37,12 @@ int main()
 	static_assert(sizeof(ShaderCompatibilityAPI::Interface001) >= sizeof(void*) * 5);
 
 	Api::ShaderCompatibilityRegistry registry;
-	const ShaderCompatibilityAPI::Scope001 waterScopes[]{
-		{ .structSize = sizeof(ShaderCompatibilityAPI::Scope001), .kind = ShaderCompatibilityAPI::ScopeKind::kShaderFamily, .value = "Water" },
-		{ .structSize = sizeof(ShaderCompatibilityAPI::Scope001), .kind = ShaderCompatibilityAPI::ScopeKind::kShaderSource, .value = "Shaders/Water.hlsl" },
+	const ShaderCompatibilityAPI::Scope001 waterScope{
+		.structSize = sizeof(ShaderCompatibilityAPI::Scope001),
+		.kind = ShaderCompatibilityAPI::ScopeKind::kShaderFamily,
+		.value = "Water",
 	};
-	auto water = Registration("org.example.water", 2, waterScopes, 2);
+	auto water = Registration("org.example.water", 2, &waterScope, 1);
 	const auto first = registry.Register(water);
 	assert(first.status == ShaderCompatibilityAPI::Status::kSuccess);
 	assert(first.accepted && !first.idempotent && first.handle != 0);
@@ -63,6 +66,23 @@ int main()
 	assert(unrelatedSet.handles.empty());
 	assert(waterSet.digest != unrelatedSet.digest);
 
+	const ShaderCompatibilityAPI::Scope001 reservedScopes[]{
+		{
+			.structSize = sizeof(ShaderCompatibilityAPI::Scope001),
+			.kind = ShaderCompatibilityAPI::ScopeKind::kShaderSource,
+			.value = "Data\\Shaders\\Water.hlsl",
+		},
+		{
+			.structSize = sizeof(ShaderCompatibilityAPI::Scope001),
+			.kind = ShaderCompatibilityAPI::ScopeKind::kFeature,
+			.value = "HorizonFix",
+		},
+	};
+	for (const auto& scope : reservedScopes) {
+		auto unsupported = Registration("org.example.reserved", 1, &scope, 1);
+		assert(registry.Register(unsupported).status == ShaderCompatibilityAPI::Status::kInvalidScope);
+	}
+
 	registry.Freeze();
 	const auto snapshot = registry.GetSnapshot();
 	assert(snapshot.phase == ShaderCompatibilityAPI::Phase::kFrozen);
@@ -81,5 +101,10 @@ int main()
 
 	auto invalid = Registration("Not Stable", 0, &globalScope, 1);
 	assert(registry.Register(invalid).status == ShaderCompatibilityAPI::Status::kInvalidIdentity);
+
+	std::array<char, 129> unterminatedIdentity{};
+	unterminatedIdentity.fill('a');
+	auto unterminated = Registration(unterminatedIdentity.data(), 0, &globalScope, 1);
+	assert(registry.Register(unterminated).status == ShaderCompatibilityAPI::Status::kInvalidIdentity);
 	return 0;
 }

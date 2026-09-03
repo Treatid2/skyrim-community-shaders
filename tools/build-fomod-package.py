@@ -12,7 +12,10 @@ No game version, DLL, marker, settings file, or mod-manager state is inspected.
 from __future__ import annotations
 
 import argparse
+import configparser
+import importlib.util
 import json
+import re
 import shutil
 import sys
 import xml.etree.ElementTree as ET
@@ -26,13 +29,6 @@ FOMOD_DIRECTORY = "fomod"
 MODULE_CONFIG_FILE = "ModuleConfig.xml"
 INFO_FILE = "info.xml"
 MANIFEST_FILE = "Manifest.json"
-PACK_MANIFEST_FILE = "PackManifest.json"
-PACK_FILES = (
-    "Optimized.A.csxpack",
-    "Optimized.B.csxpack",
-    "Developer.A.csxpack",
-    "Developer.B.csxpack",
-)
 CACHE_INFO_FILE = "Info.ini"
 
 RUNTIME_FLAG = "CSXRuntime"
@@ -63,6 +59,31 @@ CACHE_VARIANTS = (
         "ShaderCache-SE-AE",
     ),
 )
+
+
+def load_shader_cache_contract():
+    """Load the canonical pack reader used by the cache build itself."""
+    tool_path = Path(__file__).with_name("build-shader-cache.py")
+    spec = importlib.util.spec_from_file_location(
+        "csx_build_shader_cache_contract", tool_path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load shader cache contract: {tool_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+SHADER_CACHE_CONTRACT = load_shader_cache_contract()
+PACK_MANIFEST_FILE = SHADER_CACHE_CONTRACT.PACK_MANIFEST_FILE_NAME
+PACK_FILES = SHADER_CACHE_CONTRACT.PACK_FILE_NAMES
+PACK_LANES = {
+    "Optimized.A.csxpack": 1,
+    "Optimized.B.csxpack": 1,
+    "Developer.A.csxpack": 2,
+    "Developer.B.csxpack": 2,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -216,17 +237,40 @@ def build_info(version: str) -> ET.ElementTree:
     return ET.ElementTree(root)
 
 
-def validate_cache_source(cache_directory: Path) -> None:
+def validate_cache_source(cache_directory: Path, expected_runtime: str) -> None:
     manifest_path = cache_directory / MANIFEST_FILE
     pack_manifest_path = cache_directory / PACK_MANIFEST_FILE
+    info_path = cache_directory / CACHE_INFO_FILE
     if not cache_directory.is_dir():
         raise SystemExit(f"missing shader cache directory: {cache_directory}")
-    if not (cache_directory / CACHE_INFO_FILE).is_file():
-        raise SystemExit(f"missing shader cache metadata: {cache_directory / CACHE_INFO_FILE}")
+    if not info_path.is_file():
+        raise SystemExit(f"missing shader cache metadata: {info_path}")
     if not manifest_path.is_file():
         raise SystemExit(f"missing shader cache manifest: {manifest_path}")
     if not pack_manifest_path.is_file():
         raise SystemExit(f"missing managed pack manifest: {pack_manifest_path}")
+    info = configparser.ConfigParser(interpolation=None)
+    try:
+        with info_path.open("r", encoding="utf-8-sig") as stream:
+            info.read_file(stream)
+    except (configparser.Error, OSError, UnicodeError) as exc:
+        raise SystemExit(f"invalid shader cache metadata {info_path}: {exc}") from exc
+    plugin_version = info.get("Cache", "PluginVersion", fallback=None)
+    shader_cache_abi = info.get("Cache", "ShaderCacheABI", fallback=None)
+    version_match = (
+        SHADER_CACHE_CONTRACT.CSX_PLUGIN_VERSION_PATTERN.fullmatch(plugin_version)
+        if plugin_version
+        else None
+    )
+    contract_runtime = "SE" if expected_runtime == RUNTIME_SE_AE else "VR"
+    if version_match is None or version_match.group("runtime") != contract_runtime:
+        raise SystemExit(
+            f"cache {cache_directory} plugin version does not identify "
+            f"runtime {contract_runtime}: {plugin_version!r}"
+        )
+    if not shader_cache_abi:
+        raise SystemExit(f"cache {cache_directory} has no ShaderCacheABI")
+
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -243,21 +287,54 @@ def validate_cache_source(cache_directory: Path) -> None:
         pack_manifest = json.loads(pack_manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise SystemExit(f"invalid managed pack manifest {pack_manifest_path}: {exc}") from exc
-    if (
-        not isinstance(pack_manifest, dict)
-        or pack_manifest.get("schema") != "csx.shader-cache.pack-manifest"
-        or pack_manifest.get("schemaVersion") != 1
-        or pack_manifest.get("formatVersion") != 1
-        or not isinstance(pack_manifest.get("compatibilityVariants"), list)
-        or "default" not in pack_manifest["compatibilityVariants"]
-    ):
-        raise SystemExit(f"unsupported managed pack manifest: {pack_manifest_path}")
-    missing_packs = [name for name in PACK_FILES if not (cache_directory / name).is_file()]
+    pack_set_id = pack_manifest.get("packSetId") if isinstance(pack_manifest, dict) else None
+    if not SHADER_CACHE_CONTRACT.valid_pack_set_id(pack_set_id):
+        raise SystemExit(
+            f"managed pack manifest does not match its runtime metadata: "
+            f"{pack_manifest_path}"
+        )
+
+    missing_packs = [
+        name for name in PACK_FILES if not (cache_directory / name).is_file()
+    ]
     if missing_packs:
         raise SystemExit(
             f"managed shader cache {cache_directory} is missing pack files: "
             + ", ".join(missing_packs)
         )
+
+    loose_blobs = sorted(
+        path
+        for path in cache_directory.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() in SHADER_CACHE_CONTRACT.CACHE_EXTENSIONS
+    )
+    if loose_blobs:
+        raise SystemExit(
+            f"managed shader cache {cache_directory} still contains loose compiled shaders: "
+            + ", ".join(str(path.relative_to(cache_directory)) for path in loose_blobs[:8])
+        )
+
+    pack_stats = {
+        name: SHADER_CACHE_CONTRACT.validate_shader_pack(
+            cache_directory / name,
+            PACK_LANES[name],
+            pack_set_id,
+        )
+        for name in PACK_FILES
+    }
+    try:
+        SHADER_CACHE_CONTRACT.validate_pack_manifest_contract(
+            pack_manifest,
+            contract_runtime,
+            shader_cache_abi,
+            pack_stats,
+        )
+    except SystemExit as exc:
+        raise SystemExit(
+            f"managed pack manifest disagrees with its pack files: "
+            f"{pack_manifest_path}: {exc}"
+        ) from exc
 
 
 def flag_pairs(element: ET.Element) -> tuple[tuple[str, str], ...]:
@@ -405,7 +482,7 @@ def validate_staged_package(output: Path, version: str) -> None:
         raise SystemExit("staged FOMOD is missing its AIO Core directory")
     for variant in CACHE_VARIANTS:
         cache_directory = output / variant.staging_directory / CACHE_DIRECTORY
-        validate_cache_source(cache_directory)
+        validate_cache_source(cache_directory, variant.runtime)
 
     fomod_directory = output / FOMOD_DIRECTORY
     validate_module_config(fomod_directory / MODULE_CONFIG_FILE)
@@ -446,7 +523,7 @@ def stage_package(
     sources: dict[CacheVariant, Path] = {}
     for variant in CACHE_VARIANTS:
         source = runtime_roots[variant.runtime] / CACHE_DIRECTORY
-        validate_cache_source(source)
+        validate_cache_source(source, variant.runtime)
         sources[variant] = source
 
     try:
