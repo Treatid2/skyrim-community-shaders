@@ -165,7 +165,6 @@ private:
 	bool inInterior = false;
 	bool inInteriorWithSun = false;
 	bool rainOnlySuppressionActive = false;
-	std::atomic<bool> vrImageSpaceCacheRefreshPending = false;
 	VolumetricLightingDescriptor runtimeDescriptor{};
 
 	struct VLData

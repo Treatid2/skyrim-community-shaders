@@ -30,6 +30,55 @@ file(READ
     "${PROJECT_ROOT}/src/Features/Upscaling/Streamline.cpp"
     _streamline_source
 )
+file(READ
+    "${PROJECT_ROOT}/src/Features/Upscaling/FidelityFX.cpp"
+    _fidelityfx_source
+)
+file(READ
+    "${PROJECT_ROOT}/docs/development/vr-render-scale-replacement-telemetry.md"
+    _replacement_telemetry_documentation
+)
+
+set(_schema_revision_receipt_text "{ \"schemaRevision\", 14 }")
+string(LENGTH "${_bridge}" _bridge_length_with_schema_receipts)
+string(REPLACE
+    "${_schema_revision_receipt_text}"
+    ""
+    _bridge_without_schema_receipts
+    "${_bridge}"
+)
+string(LENGTH "${_bridge_without_schema_receipts}" _bridge_length_without_schema_receipts)
+string(LENGTH "${_schema_revision_receipt_text}" _schema_revision_receipt_length)
+math(EXPR _schema_revision_receipt_count
+    "(${_bridge_length_with_schema_receipts} - ${_bridge_length_without_schema_receipts}) / ${_schema_revision_receipt_length}"
+)
+if(NOT _schema_revision_receipt_count EQUAL 2)
+    message(FATAL_ERROR
+        "Expected two render-scale schema-revision-14 receipt producers"
+    )
+endif()
+string(FIND
+    "${_bridge}"
+    "schema-revision-14"
+    _schema_revision_help_position
+)
+if(_schema_revision_help_position EQUAL -1)
+    message(FATAL_ERROR "Render-scale help does not advertise schema revision 14")
+endif()
+string(FIND
+    "${_replacement_telemetry_documentation}"
+    "schema revision 14"
+    _schema_revision_documentation_position
+)
+if(_schema_revision_documentation_position EQUAL -1)
+    message(FATAL_ERROR
+        "Replacement-telemetry documentation does not name schema revision 14"
+    )
+endif()
+string(FIND "${_bridge}" "schema-revision-12" _stale_schema_revision_position)
+if(NOT _stale_schema_revision_position EQUAL -1)
+    message(FATAL_ERROR "Stale render-scale schema revision 12 help remains")
+endif()
 
 foreach(_action IN ITEMS
     qualification_status
@@ -57,6 +106,35 @@ foreach(_action IN ITEMS
         message(FATAL_ERROR "Missing DevBench qualification handler: ${_action}")
     endif()
 endforeach()
+
+foreach(_task2_contract IN ITEMS
+	"DeferredDispatchAction::FailClosed"
+	"admittedExistingVendorProvider"
+	"submitStageVendorAdmissionExactProviderReady ="
+	"exactCurrentProviderReady"
+	"existingProvider.backend =="
+	"IsPublishedReplacementProven"
+	"std::addressof(controller.applied)"
+	"publishedReplacement"
+	"exactResourceContractMatches"
+)
+	string(FIND
+		"${_upscaling_source}\n${_fidelityfx_source}\n${_bridge}\n${_replacement_policy}"
+		"${_task2_contract}" _task2_contract_position)
+	if(_task2_contract_position EQUAL -1)
+		message(FATAL_ERROR
+			"Task 2 presentation contract is missing: ${_task2_contract}"
+		)
+	endif()
+endforeach()
+
+string(FIND "${_upscaling_source}" "admittedExistingDLSSProvider"
+	_dlss_only_admission_position)
+if(NOT _dlss_only_admission_position EQUAL -1)
+	message(FATAL_ERROR
+		"Deferred current-provider admission remains DLSS-specific"
+	)
+endif()
 
 string(REGEX MATCH
     "R\"json\\((\\{[^\r\n]*\\})\\)json\""
@@ -289,7 +367,8 @@ foreach(_required_behavior IN ITEMS
 	"gpu_performance_start_frame_mismatch"
 	"performance_telemetry_already_active"
 	"performance_telemetry_dispatch_frame_mismatch"
-	"cpuStartFrame != frame || gpuStartFrame != frame"
+	"cpuStartFrame != dispatchFrame ||"
+	"gpuStartFrame != dispatchFrame"
 	"result[\"performanceTelemetry\"]"
     "cpu_performance_session_id_unavailable"
     "GetVRRenderScaleCPUPerformanceSessionID()"
@@ -324,6 +403,7 @@ foreach(_required_behavior IN ITEMS
 	"sameObservation"
 	"replacementTimeline"
 	"schemaRevision"
+	"{ \"schemaRevision\", 14 }"
 	"presentationProof"
 	"exact_vendor_evaluation"
 	"exact_native_presentation"
@@ -354,7 +434,7 @@ foreach(_required_behavior IN ITEMS
 	"IsExactTargetProofKind"
 	"OptionalNonNegativeIntegerOrZero"
 	"TryRecordQualificationReplacementTimeline"
-	"exactStableAfterMutation"
+	"IsPublishedReplacementProven"
 	"presentationCycleAudit"
 	"eyeObservations"
 	"incompleteStereoCycles"
@@ -406,6 +486,86 @@ foreach(_required_behavior IN ITEMS
     if(_behavior_position EQUAL -1)
         message(FATAL_ERROR "Render-scale qualification behavior is missing: ${_required_behavior}")
     endif()
+endforeach()
+
+foreach(_required_explicit_frame_api IN ITEMS
+	"StartVRRenderScaleCPUPerformanceTelemetry(uint32_t a_startFrame) noexcept"
+	"StartVRRenderScaleGPUPerformanceTelemetry(uint32_t a_startFrame) noexcept"
+	"CurrentVRRenderScaleTelemetryFrame()"
+	"frameCountAtomic.load(std::memory_order_relaxed)"
+)
+	string(FIND "${_upscaling_header}\n${_upscaling_source}"
+		"${_required_explicit_frame_api}" _explicit_frame_api_position)
+	if(_explicit_frame_api_position EQUAL -1)
+		message(FATAL_ERROR
+			"Explicit telemetry frame API is missing: ${_required_explicit_frame_api}"
+		)
+	endif()
+endforeach()
+
+string(FIND "${_bridge}" "if (action == \"qualification_dispatch\")"
+	_qualification_dispatch_start)
+string(FIND "${_bridge}" "if (action == \"qualification_cancel\")"
+	_qualification_dispatch_end)
+if(_qualification_dispatch_start EQUAL -1 OR
+	_qualification_dispatch_end EQUAL -1 OR
+	_qualification_dispatch_end LESS_EQUAL _qualification_dispatch_start)
+	message(FATAL_ERROR "Qualification dispatch block was not found")
+endif()
+math(EXPR _qualification_dispatch_length
+	"${_qualification_dispatch_end} - ${_qualification_dispatch_start}")
+string(SUBSTRING "${_bridge}" ${_qualification_dispatch_start}
+	${_qualification_dispatch_length} _qualification_dispatch_block)
+foreach(_required_shared_frame_behavior IN ITEMS
+	"frameCountAtomic.load("
+	"const uint64_t observationTick = QueryQualificationTick()"
+	"dispatchPresentationEvidence[\"observationTick\"] = observationTick"
+	"dispatchPresentationEvidence[\"observationFrame\"] = observationFrame"
+	"const uint64_t dispatchTick = QueryQualificationTick()"
+	"dispatchPresentationEvidence[\"tick\"] = dispatchTick"
+	"dispatchPresentationEvidence[\"frame\"] = dispatchFrame"
+	"StartVRRenderScaleCPUPerformanceTelemetry(\n\t\t\t\t\t\t\t\tdispatchFrame)"
+	"StartVRRenderScaleGPUPerformanceTelemetry(\n\t\t\t\t\t\t\tdispatchFrame)"
+	"store.active->dispatchTick = dispatchTick"
+	"store.active->dispatchFrame = dispatchFrame"
+	"{ \"dispatchTick\", dispatchTick }"
+	"{ \"dispatchFrame\", dispatchFrame }"
+)
+	string(FIND "${_qualification_dispatch_block}"
+		"${_required_shared_frame_behavior}" _shared_frame_position)
+	if(_shared_frame_position EQUAL -1)
+		message(FATAL_ERROR
+			"Qualification dispatch does not share its frame boundary: ${_required_shared_frame_behavior}"
+		)
+	endif()
+endforeach()
+
+foreach(_forbidden_mixed_dispatch_boundary IN ITEMS
+	"dispatchPresentationEvidence[\"tick\"] = observationTick"
+	"dispatchPresentationEvidence[\"frame\"] = observationFrame"
+	"store.active->dispatchTick = observationTick"
+	"store.active->dispatchFrame = observationFrame"
+)
+	string(FIND "${_qualification_dispatch_block}"
+		"${_forbidden_mixed_dispatch_boundary}" _mixed_boundary_position)
+	if(NOT _mixed_boundary_position EQUAL -1)
+		message(FATAL_ERROR
+			"Qualification dispatch mixes observation and dispatch boundaries: ${_forbidden_mixed_dispatch_boundary}"
+		)
+	endif()
+endforeach()
+
+foreach(_forbidden_unbound_start IN ITEMS
+	"StartVRRenderScaleCPUPerformanceTelemetry();"
+	"StartVRRenderScaleGPUPerformanceTelemetry();"
+)
+	string(FIND "${_qualification_dispatch_block}"
+		"${_forbidden_unbound_start}" _unbound_start_position)
+	if(NOT _unbound_start_position EQUAL -1)
+		message(FATAL_ERROR
+			"Qualification dispatch uses an unbound telemetry start: ${_forbidden_unbound_start}"
+		)
+	endif()
 endforeach()
 
 string(FIND
@@ -523,6 +683,39 @@ foreach(_required_controller_behavior IN ITEMS
 	endif()
 endforeach()
 
+foreach(_required_vendor_presentation_evidence IN ITEMS
+	"captureSubmitStageVendorDispatchEvidence"
+	"applySubmitStageVendorDispatchEvidence"
+	"setVendorPresentationObservation(cachedEyeState)"
+	"captureSubmitStageVendorDispatchEvidence("
+	"submitStageVendorEyeState[eyeIndex])"
+	"ReplacementTelemetry::HasCoherentVendorDispatch"
+	".vendorDispatchProven = vendorDispatchProven"
+	"sharedFSRDispatchRequired"
+	".vendorDispatchFrame = published.vendorDispatchFrame"
+	".vendorDispatchSerial = published.vendorDispatchSerial"
+	".vendorRuntimeFallback = published.vendorRuntimeFallback"
+	"leftVendorDispatchFrame"
+	"rightVendorDispatchSerial"
+	"observationVendorDispatchProven"
+	".vendorDispatchProven = observationVendorDispatchProven"
+	"IsExistingProviderContractGenerationValid("
+	"MatchesPublishedReplacementProfile("
+	"MatchesTargetContractGeneration("
+	"target.renderScaleMode"
+)
+	string(FIND
+		"${_upscaling_source}\n${_bridge}"
+		"${_required_vendor_presentation_evidence}"
+		_vendor_presentation_evidence_position
+	)
+	if(_vendor_presentation_evidence_position EQUAL -1)
+		message(FATAL_ERROR
+			"Submit-stage vendor presentation evidence is incomplete: ${_required_vendor_presentation_evidence}"
+		)
+	endif()
+endforeach()
+
 foreach(_required_direct_menu_mapping IN ITEMS
 	"VRVendorRelatchPolicy::HasDirectMenuRequestAuthority("
 	"target->directMenuEdit,"
@@ -540,6 +733,48 @@ foreach(_required_direct_menu_mapping IN ITEMS
 	if(_direct_menu_mapping_position EQUAL -1)
 		message(FATAL_ERROR
 			"Direct-menu authority is not mapped through production code: ${_required_direct_menu_mapping}"
+		)
+	endif()
+endforeach()
+
+string(FIND "${_upscaling_source}" "const bool sameContract =" _same_contract_start)
+string(FIND "${_upscaling_source}" "const bool duplicate =" _duplicate_start)
+string(FIND "${_upscaling_source}" "const bool consecutive =" _consecutive_start)
+if(_same_contract_start EQUAL -1 OR _duplicate_start EQUAL -1 OR
+   _consecutive_start EQUAL -1 OR
+   _same_contract_start GREATER _duplicate_start OR
+   _duplicate_start GREATER _consecutive_start)
+	message(FATAL_ERROR "Presentation-history contract blocks are missing or reordered")
+endif()
+
+math(EXPR _same_contract_length "${_duplicate_start} - ${_same_contract_start}")
+string(SUBSTRING "${_upscaling_source}" ${_same_contract_start}
+	${_same_contract_length} _same_contract_block)
+foreach(_per_frame_dispatch_field IN ITEMS
+	"previous.vendorDispatchFrame"
+	"previous.vendorDispatchSerial"
+)
+	string(FIND "${_same_contract_block}" "${_per_frame_dispatch_field}"
+		_per_frame_dispatch_position)
+	if(NOT _per_frame_dispatch_position EQUAL -1)
+		message(FATAL_ERROR
+			"Per-frame dispatch identity resets presentation history: ${_per_frame_dispatch_field}"
+		)
+	endif()
+endforeach()
+
+math(EXPR _duplicate_length "${_consecutive_start} - ${_duplicate_start}")
+string(SUBSTRING "${_upscaling_source}" ${_duplicate_start}
+	${_duplicate_length} _duplicate_block)
+foreach(_required_duplicate_field IN ITEMS
+	"previous.vendorDispatchFrame == a_observation.vendorDispatchFrame"
+	"previous.vendorDispatchSerial == a_observation.vendorDispatchSerial"
+)
+	string(FIND "${_duplicate_block}" "${_required_duplicate_field}"
+		_required_duplicate_position)
+	if(_required_duplicate_position EQUAL -1)
+		message(FATAL_ERROR
+			"Duplicate presentation identity is incomplete: ${_required_duplicate_field}"
 		)
 	endif()
 endforeach()

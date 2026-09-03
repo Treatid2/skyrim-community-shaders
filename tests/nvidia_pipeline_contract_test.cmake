@@ -40,10 +40,21 @@ foreach(_required IN ITEMS
     "a_constants.minRelativeLinearDepthObjectSeparation"
     "frameGenerationQuarantinedByReflex.store(true"
     "EnsureReflexDisabledForFrameGeneration"
+    "IsDLSSRuntimeReady"
 )
     string(FIND "${_streamline}" "${_required}" _position)
     if(_position EQUAL -1)
         message(FATAL_ERROR "Streamline hardening is missing contract behavior: ${_required}")
+    endif()
+endforeach()
+
+foreach(_required IN ITEMS
+    "streamline.IsDLSSRuntimeReady()"
+    "fidelityFX.IsRuntimeUpscalerDispatchProofUsable(dispatchPath)"
+)
+    string(FIND "${_upscaling}" "${_required}" _position)
+    if(_position EQUAL -1)
+        message(FATAL_ERROR "Vendor dispatch proof is missing hard invalidation: ${_required}")
     endif()
 endforeach()
 
@@ -74,6 +85,7 @@ foreach(_required IN ITEMS
     "DispatchFrameGenerationProtected"
     "frameGenContextIndeterminate"
     "swapChainContextIndeterminate"
+    "IsRuntimeUpscalerDispatchProofUsable"
 )
     string(FIND "${_fidelityfx}" "${_required}" _position)
     if(_position EQUAL -1)

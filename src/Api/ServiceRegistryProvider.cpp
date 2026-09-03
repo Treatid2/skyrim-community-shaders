@@ -1,9 +1,9 @@
 #include "Api/ServiceRegistryProvider.h"
 
-#include "Api/ServiceRegistry.h"
-#include "Api/ShaderService.h"
-#include "Api/ShaderCompatibilityService.h"
 #include "Api/ScreenshotService.h"
+#include "Api/ServiceRegistry.h"
+#include "Api/ShaderCompatibilityService.h"
+#include "Api/ShaderService.h"
 #include "Api/UpscalingService.h"
 #include "BuildProvenance.h"
 

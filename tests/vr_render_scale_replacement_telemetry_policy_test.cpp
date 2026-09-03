@@ -12,7 +12,8 @@ namespace
 		PresentationDisposition a_disposition,
 		bool a_beforeMutation = true,
 		bool a_exactCurrent = true,
-		bool a_exactReplacement = false)
+		bool a_exactReplacement = false,
+		bool a_transitionCooldown = false)
 	{
 		return {
 			.valid = true,
@@ -36,6 +37,7 @@ namespace
 			.renderScaleMode = true,
 			.backend = 1,
 			.disposition = a_disposition,
+			.transitionCooldown = a_transitionCooldown,
 			.submitted = true,
 			.exactCurrent = a_exactCurrent,
 			.exactReplacement = a_exactReplacement,
@@ -189,11 +191,85 @@ namespace
 			return false;
 		stale = facts;
 		stale.replacementContractGeneration = 0;
-		if (OwnsMutationBoundary(stale))
+		if (!OwnsMutationBoundary(stale))
 			return false;
 		stale = facts;
 		stale.currentDeviceIdentity = 0x5678;
 		return !OwnsMutationBoundary(stale);
+	}
+
+	constexpr bool CoversGenerationCorrelation()
+	{
+		if (!MatchesTargetContractGeneration(false, 0, 0) ||
+			MatchesTargetContractGeneration(true, 0, 0) ||
+			!MatchesTargetContractGeneration(true, 8, 8) ||
+			MatchesTargetContractGeneration(true, 8, 9) ||
+			!MatchesMutationBoundaryGeneration(0, 8) ||
+			!MatchesMutationBoundaryGeneration(8, 8) ||
+			MatchesMutationBoundaryGeneration(8, 9)) {
+			return false;
+		}
+
+		PublishedReplacementProfileFacts facts{
+			.profileValid = true,
+			.requiresPublishedGeneration = false,
+			.observedTransitionEpoch = 17,
+			.expectedTransitionEpoch = 17,
+			.observedContractGeneration = 0,
+			.expectedContractGeneration = 0,
+			.observedMethod = 2,
+			.expectedMethod = 2,
+			.observedRenderWidth = 2016,
+			.observedRenderHeight = 2240,
+			.observedDisplayWidth = 2016,
+			.observedDisplayHeight = 2240,
+			.expectedRenderWidth = 2016,
+			.expectedRenderHeight = 2240,
+			.expectedDisplayWidth = 2016,
+			.expectedDisplayHeight = 2240,
+			.observedDeviceIdentity = 0x1234,
+			.currentDeviceIdentity = 0x1234,
+			.observedResourceRevision = 9,
+		};
+		if (!MatchesPublishedReplacementProfile(facts))
+			return false;
+		auto stale = facts;
+		stale.profileValid = false;
+		if (MatchesPublishedReplacementProfile(stale))
+			return false;
+		stale = facts;
+		stale.observedTransitionEpoch = 18;
+		if (MatchesPublishedReplacementProfile(stale))
+			return false;
+		stale = facts;
+		stale.observedMethod = 3;
+		if (MatchesPublishedReplacementProfile(stale))
+			return false;
+		stale = facts;
+		stale.observedRenderWidth = 2015;
+		if (MatchesPublishedReplacementProfile(stale))
+			return false;
+		stale = facts;
+		stale.observedDisplayHeight = 2239;
+		if (MatchesPublishedReplacementProfile(stale))
+			return false;
+		stale = facts;
+		stale.observedResourceRevision = 0;
+		if (MatchesPublishedReplacementProfile(stale))
+			return false;
+		facts.requiresPublishedGeneration = true;
+		if (MatchesPublishedReplacementProfile(facts))
+			return false;
+		facts.observedContractGeneration = 8;
+		facts.expectedContractGeneration = 8;
+		if (!MatchesPublishedReplacementProfile(facts))
+			return false;
+		facts.observedContractGeneration = 9;
+		if (MatchesPublishedReplacementProfile(facts))
+			return false;
+		facts.observedContractGeneration = 8;
+		facts.observedDeviceIdentity = 0x5678;
+		return !MatchesPublishedReplacementProfile(facts);
 	}
 
 	constexpr bool CoversProofKinds()
@@ -204,7 +280,7 @@ namespace
 			.publicationCurrent = true,
 			.exactDimensions = true,
 			.nativeDimensions = true,
-			.vendorBackendPresent = true,
+			.vendorDispatchProven = true,
 			.renderScaleDisabled = true,
 			.foveatedVendorDisabled = true,
 			.staleVendorGenerationAbsent = true,
@@ -216,7 +292,11 @@ namespace
 			return false;
 		}
 		facts.disposition = PresentationDisposition::ExactNative;
-		facts.vendorBackendPresent = false;
+		if (ClassifyPresentationProof(facts) !=
+			PresentationProofKind::ExactVendorEvaluation) {
+			return false;
+		}
+		facts.vendorDispatchProven = false;
 		if (ClassifyPresentationProof(facts) !=
 			PresentationProofKind::ExactNativePresentation) {
 			return false;
@@ -229,6 +309,85 @@ namespace
 		facts.completedOutputStronglyOwned = false;
 		return ClassifyPresentationProof(facts) ==
 		       PresentationProofKind::None;
+	}
+
+	constexpr bool CoversVendorDispatchProof()
+	{
+		VendorDispatchProofFacts facts{
+			.backendCoherent = true,
+			.dispatchFramesCurrent = true,
+			.runtimeFallbackCoherent = true,
+			.dlssBackend = true,
+		};
+		if (!HasCoherentVendorDispatch(facts))
+			return false;
+		facts.runtimeFallback = true;
+		if (HasCoherentVendorDispatch(facts))
+			return false;
+
+		facts = {
+			.backendCoherent = true,
+			.dispatchFramesCurrent = true,
+			.runtimeFallbackCoherent = true,
+			.fsrBackend = true,
+			.leftDispatchSerial = 41,
+			.rightDispatchSerial = 42,
+		};
+		if (!HasCoherentVendorDispatch(facts))
+			return false;
+		facts.sharedFSRDispatchRequired = true;
+		if (HasCoherentVendorDispatch(facts))
+			return false;
+		facts.rightDispatchSerial = facts.leftDispatchSerial;
+		if (!HasCoherentVendorDispatch(facts))
+			return false;
+		facts.dispatchFramesCurrent = false;
+		return !HasCoherentVendorDispatch(facts);
+	}
+
+	constexpr bool CoversPublishedReplacementProof()
+	{
+		constexpr std::uint32_t allFacts = (1u << 9) - 1u;
+		for (std::uint32_t bits = 0; bits <= allFacts; ++bits) {
+			const PublishedReplacementProofFacts facts{
+				.physicalMutationStarted = (bits & (1u << 0)) != 0,
+				.differsFromDispatch = (bits & (1u << 1)) != 0,
+				.observed = (bits & (1u << 2)) != 0,
+				.profileMatches = (bits & (1u << 3)) != 0,
+				.mutationBoundaryMatches = (bits & (1u << 4)) != 0,
+				.presentationPathMatches = (bits & (1u << 5)) != 0,
+				.resourceContractMatches = (bits & (1u << 6)) != 0,
+				.providerGenerationMatches = (bits & (1u << 7)) != 0,
+				.publicationCurrent = (bits & (1u << 8)) != 0,
+			};
+			if (IsPublishedReplacementProven(facts) != (bits == allFacts))
+				return false;
+		}
+		return true;
+	}
+
+	constexpr bool CoversVendorAuditIdentity()
+	{
+		auto left = Eye(0, 12, PresentationDisposition::ExactVendor);
+		auto right = Eye(1, 12, PresentationDisposition::ExactVendor);
+		left.vendorDispatchFrame = left.frame;
+		right.vendorDispatchFrame = right.frame;
+		left.vendorDispatchSerial = 41;
+		right.vendorDispatchSerial = 42;
+		left.vendorDispatchProven = true;
+		right.vendorDispatchProven = true;
+		if (!SameSubmittedIdentity(left, right))
+			return false;
+
+		left.sharedVendorDispatchRequired = true;
+		right.sharedVendorDispatchRequired = true;
+		if (SameSubmittedIdentity(left, right))
+			return false;
+		right.vendorDispatchSerial = left.vendorDispatchSerial;
+		if (!SameSubmittedIdentity(left, right))
+			return false;
+		right.vendorRuntimeFallback = true;
+		return !SameSubmittedIdentity(left, right);
 	}
 
 	constexpr bool CoversTargetProofKindRequirements()
@@ -344,7 +503,21 @@ namespace
 		       state.counters.firstPostMutationOldGenerationPresented.valid;
 	}
 
-	constexpr bool CoversStretchAfterMutation()
+	constexpr bool CoversProtectedStretchAfterMutation()
+	{
+		auto state = StartedAudit();
+		CompleteCycle completed{};
+		(void)ObserveEye(state, 3, 5,
+			Eye(0, 17, PresentationDisposition::PresentationStretch, false, false, false, true), completed);
+		(void)ObserveEye(state, 3, 5,
+			Eye(1, 17, PresentationDisposition::PresentationStretch, false, false, false, true), completed);
+		return completed.afterMutation &&
+		       state.counters.mixedOrUnprovenStereoPairsSubmitted == 1 &&
+		       state.counters.postMutationUnprovenStereoSubmitted == 0 &&
+		       !state.counters.firstPostMutationUnprovenStereoSubmitted.valid;
+	}
+
+	constexpr bool CoversUnprotectedStretchAfterMutation()
 	{
 		auto state = StartedAudit();
 		CompleteCycle completed{};
@@ -353,6 +526,7 @@ namespace
 		(void)ObserveEye(state, 3, 5,
 			Eye(1, 17, PresentationDisposition::PresentationStretch, false, false, false), completed);
 		return completed.afterMutation &&
+		       state.counters.mixedOrUnprovenStereoPairsSubmitted == 1 &&
 		       state.counters.postMutationUnprovenStereoSubmitted == 1 &&
 		       state.counters.firstPostMutationUnprovenStereoSubmitted.valid;
 	}
@@ -413,7 +587,11 @@ namespace
 	static_assert(CoversMutationExpectation());
 	static_assert(CoversAdmissions());
 	static_assert(CoversMutationBoundaryOwnership());
+	static_assert(CoversGenerationCorrelation());
 	static_assert(CoversProofKinds());
+	static_assert(CoversVendorDispatchProof());
+	static_assert(CoversPublishedReplacementProof());
+	static_assert(CoversVendorAuditIdentity());
 	static_assert(CoversTargetProofKindRequirements());
 	static_assert(CoversPartialAndCompleteCycles());
 	static_assert(CoversExactBoundaryClassification());
@@ -421,7 +599,8 @@ namespace
 	static_assert(CoversOutOfOrderPreBoundaryEye());
 	static_assert(CoversMixedSubmittedViolation());
 	static_assert(CoversOldGenerationAfterMutation());
-	static_assert(CoversStretchAfterMutation());
+	static_assert(CoversProtectedStretchAfterMutation());
+	static_assert(CoversUnprotectedStretchAfterMutation());
 	static_assert(CoversPreMutationViolations());
 	static_assert(CoversNewGenerationProof());
 	static_assert(CoversStaleOwnership());
