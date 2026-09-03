@@ -280,15 +280,6 @@ private:
 		D3D11_TEXTURE2D_DESC transparency{};
 		D3D11_TEXTURE2D_DESC output{};
 	};
-	struct RuntimeRegionValidationCache
-	{
-		// Strong resource references make pointer identity a stable descriptor key.
-		bool valid = false;
-		std::array<winrt::com_ptr<ID3D11Resource>, 6> resources{};
-		RuntimeRegionDescriptions descriptions{};
-	};
-	std::array<RuntimeRegionValidationCache, 2> runtimeRegionValidationCache{};
-
 	struct RuntimeDispatchPlan
 	{
 		bool valid = false;
@@ -323,7 +314,7 @@ private:
 	LifecycleResult EnsureRuntimeUpscalerInterop();
 	bool IsRuntimeUpscalerInteropReady() const;
 	LifecycleResult EnsureRuntimeCommandContexts();
-	LifecycleResult AcquireRuntimeCommandContext(RuntimeCommandContext*& a_commandContext, uint32_t a_requiredFreeContexts = 1);
+	LifecycleResult AcquireRuntimeCommandContext(RuntimeCommandContext*& a_commandContext, uint32_t a_requiredFreeContexts = 1, bool a_commandContextsReady = false);
 	void ResetRuntimeCommandContexts();
 	void ReleaseIdleRuntimeUpscalerInterop();
 	bool HasRuntimeUpscalerResources() const;

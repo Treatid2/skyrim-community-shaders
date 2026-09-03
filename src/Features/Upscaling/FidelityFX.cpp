@@ -1163,8 +1163,6 @@ void FidelityFX::ResetRuntimeUpscalerTracking(bool a_invalidateProviderCache)
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	devBenchSuccessfulDispatch = {};
 #endif
-	runtimeRegionValidationCache = {};
-
 	if (!a_invalidateProviderCache)
 		return;
 
@@ -1671,14 +1669,16 @@ FidelityFX::LifecycleResult FidelityFX::EnsureRuntimeCommandContexts()
 	return LifecycleResult::Ready;
 }
 
-FidelityFX::LifecycleResult FidelityFX::AcquireRuntimeCommandContext(RuntimeCommandContext*& a_commandContext, uint32_t a_requiredFreeContexts)
+FidelityFX::LifecycleResult FidelityFX::AcquireRuntimeCommandContext(RuntimeCommandContext*& a_commandContext, uint32_t a_requiredFreeContexts, bool a_commandContextsReady)
 {
 	a_commandContext = nullptr;
 	if (!runtimeD3D12Fence)
 		return LifecycleResult::Pending;
-	const auto ensureResult = EnsureRuntimeCommandContexts();
-	if (ensureResult != LifecycleResult::Ready)
-		return ensureResult;
+	if (!a_commandContextsReady) {
+		const auto ensureResult = EnsureRuntimeCommandContexts();
+		if (ensureResult != LifecycleResult::Ready)
+			return ensureResult;
+	}
 
 	const uint64_t completedValue = runtimeD3D12Fence->GetCompletedValue();
 	if (completedValue == std::numeric_limits<uint64_t>::max()) {
@@ -2836,8 +2836,7 @@ FidelityFX::LifecycleResult FidelityFX::EnsureRuntimeUpscalerSharedResources(uin
 		if (IsRuntimeUpscalerInteropReady())
 			return LifecycleResult::Ready;
 
-		// Preserve interop repair when an invariant is unexpectedly missing;
-		// stable frames avoid the second command-context scan.
+		// Preserve interop repair when an invariant is unexpectedly missing.
 		return EnsureRuntimeUpscalerInterop();
 	}
 
@@ -2966,40 +2965,14 @@ FidelityFX::LifecycleResult FidelityFX::DispatchRuntimeUpscalerBatch(std::span<c
 		}
 		seenContext[region.contextIndex] = true;
 
-		const std::array<ID3D11Resource*, 6> resources{
-			region.color,
-			region.depth,
-			region.motionVectors,
-			region.reactiveMask,
-			region.transparencyCompositionMask,
-			region.output,
-		};
-		auto& cache = runtimeRegionValidationCache[region.contextIndex];
-		const bool cacheMatches =
-			cache.valid &&
-			cache.resources[0].get() == region.color &&
-			cache.resources[1].get() == region.depth &&
-			cache.resources[2].get() == region.motionVectors &&
-			cache.resources[3].get() == region.reactiveMask &&
-			cache.resources[4].get() == region.transparencyCompositionMask &&
-			cache.resources[5].get() == region.output;
-
 		auto& desc = descriptions[regionIndex];
-		if (cacheMatches) {
-			desc = cache.descriptions;
-		} else {
-			if (!TryGetTexture2DDesc(region.color, desc.color) ||
-				!TryGetTexture2DDesc(region.depth, desc.depth) ||
-				!TryGetTexture2DDesc(region.motionVectors, desc.motion) ||
-				!TryGetTexture2DDesc(region.reactiveMask, desc.reactive) ||
-				!TryGetTexture2DDesc(region.transparencyCompositionMask, desc.transparency) ||
-				!TryGetTexture2DDesc(region.output, desc.output)) {
-				return LifecycleResult::Pending;
-			}
-			for (size_t resourceIndex = 0; resourceIndex < resources.size(); ++resourceIndex)
-				cache.resources[resourceIndex].copy_from(resources[resourceIndex]);
-			cache.descriptions = desc;
-			cache.valid = true;
+		if (!TryGetTexture2DDesc(region.color, desc.color) ||
+			!TryGetTexture2DDesc(region.depth, desc.depth) ||
+			!TryGetTexture2DDesc(region.motionVectors, desc.motion) ||
+			!TryGetTexture2DDesc(region.reactiveMask, desc.reactive) ||
+			!TryGetTexture2DDesc(region.transparencyCompositionMask, desc.transparency) ||
+			!TryGetTexture2DDesc(region.output, desc.output)) {
+			return LifecycleResult::Pending;
 		}
 		if (region.renderWidth > desc.color.Width || region.renderHeight > desc.color.Height ||
 			region.renderWidth > desc.depth.Width || region.renderHeight > desc.depth.Height ||
@@ -3061,7 +3034,9 @@ FidelityFX::LifecycleResult FidelityFX::DispatchRuntimeUpscalerBatch(std::span<c
 	uint32_t requiredFreeContexts = 1;
 	if (a_regions.size() == 1 && globals::game::isVR && a_regions[0].contextIndex == 0)
 		requiredFreeContexts = runtimeUpscalerContextCount;
-	const auto acquireResult = AcquireRuntimeCommandContext(commandContext, requiredFreeContexts);
+	// A ready shared-resource result proves the complete interop pool. Carry that
+	// proof into acquisition so the stable path does not scan it a second time.
+	const auto acquireResult = AcquireRuntimeCommandContext(commandContext, requiredFreeContexts, true);
 	if (acquireResult != LifecycleResult::Ready)
 		return acquireResult;
 
