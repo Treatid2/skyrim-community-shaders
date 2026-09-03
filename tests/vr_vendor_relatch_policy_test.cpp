@@ -1714,6 +1714,65 @@ namespace
 		       DoesPendingVendorResetInvalidateProvider(true, 0, 0);
 	}
 
+	constexpr bool CoversVendorResetServiceOwnership()
+	{
+		VendorResetServiceAdmission state{
+			.currentMethod = true,
+			.resetPending = true,
+			.resetGeneration = 7,
+			.providerGeneration = 7,
+		};
+		auto decision = SelectVendorResetService(state);
+		if (!decision.resetOwnsProvider || !decision.workPending ||
+			!decision.claimReset || !decision.mutateProvider) {
+			return false;
+		}
+
+		state.resetGeneration = 8;
+		decision = SelectVendorResetService(state);
+		if (decision.resetOwnsProvider || decision.workPending ||
+			decision.claimReset || decision.mutateProvider) {
+			return false;
+		}
+
+		state.providerGeneration = 0;
+		decision = SelectVendorResetService(state);
+		if (decision.resetOwnsProvider || decision.workPending)
+			return false;
+
+		state.resetGeneration = 0;
+		decision = SelectVendorResetService(state);
+		if (!decision.resetOwnsProvider || !decision.claimReset)
+			return false;
+
+		state = {
+			.includeInactiveProvider = true,
+			.resetPending = true,
+			.resetGeneration = 11,
+			.providerGeneration = 11,
+		};
+		decision = SelectVendorResetService(state);
+		if (!decision.workPending || !decision.claimReset ||
+			!decision.mutateProvider) {
+			return false;
+		}
+
+		state.retainInactiveProvider = true;
+		decision = SelectVendorResetService(state);
+		if (!decision.resetOwnsProvider || decision.workPending ||
+			decision.claimReset || decision.mutateProvider) {
+			return false;
+		}
+
+		state = {
+			.currentMethod = true,
+			.runtimeGenerationMismatch = true,
+		};
+		decision = SelectVendorResetService(state);
+		return !decision.resetOwnsProvider && decision.workPending &&
+		       !decision.claimReset && decision.mutateProvider;
+	}
+
 	constexpr bool CoversDLSSReadinessTiers()
 	{
 		DLSSProviderReadiness state{
@@ -3566,6 +3625,7 @@ namespace
 	static_assert(CoversInitialRelatchPacing());
 	static_assert(CoversStereoDispatchContractIdentity());
 	static_assert(CoversPendingVendorResetOwnership());
+	static_assert(CoversVendorResetServiceOwnership());
 	static_assert(CoversDLSSReadinessTiers());
 	static_assert(CoversDLSSSlotRecycleOwnership());
 	static_assert(CoversSynchronousVendorLifecycleRebind());

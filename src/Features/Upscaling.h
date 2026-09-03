@@ -1924,10 +1924,16 @@ public:
 	uint32_t GetActiveVRRenderScaleContractGeneration() const;
 	uint32_t GetVRVendorEvaluationContractGeneration(
 		UpscaleMethod a_upscaleMethod) const;
+	bool PendingVendorRuntimeResetInvalidatesProvider(
+		UpscaleMethod a_upscaleMethod,
+		uint32_t a_providerGeneration) const;
 	bool IsVendorRuntimeReadyForActiveContract(UpscaleMethod a_upscaleMethod) const;
 	void MarkVendorRuntimeResourcesDirty(UpscaleMethod a_upscaleMethod, uint32_t a_generation = 0);
 	void MarkVendorRuntimeResourcesReady(UpscaleMethod a_upscaleMethod, uint32_t a_generation = 0);
 	void ClearVendorRuntimeResourcesDirty(UpscaleMethod a_upscaleMethod, bool a_clearRuntimeGeneration = false);
+	bool TryClaimPendingVendorRuntimeReset(
+		UpscaleMethod a_upscaleMethod,
+		uint32_t a_expectedGeneration);
 
 	struct JitterCB
 	{
@@ -2970,6 +2976,7 @@ public:
 	std::atomic<bool> pendingFSRReset{ false };
 	std::atomic<uint32_t> pendingDLSSResetGeneration{ 0 };
 	std::atomic<uint32_t> pendingFSRResetGeneration{ 0 };
+	mutable std::mutex vendorRuntimeResetMutex;
 	uint32_t vrDLSSRuntimeResourceGeneration = 0;
 	uint32_t vrFSRRuntimeResourceGeneration = 0;
 	std::atomic<uint32_t> vrMainPassVendorDispatchCompletedFrame{ 0 };

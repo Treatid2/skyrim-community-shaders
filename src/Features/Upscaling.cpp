@@ -2147,7 +2147,7 @@ namespace
 		const bool recoveryOrigin =
 			IsVRRenderScaleRecoveryOrigin(a_origin);
 		const auto providerBlocks = [&](Upscaling::UpscaleMethod a_providerMethod,
-										bool a_resetPending,
+										uint32_t a_providerGeneration,
 										const Upscaling::VRVendorRuntimeLifecycleSnapshot& a_lifecycle) {
 			return VRVendorRelatchPolicy::ShouldDeferProviderRetirementSuccessor({
 				.recoveryOrigin = recoveryOrigin,
@@ -2155,7 +2155,10 @@ namespace
 				.stableProfileValid = controller.stable.valid,
 				.stableUsesProvider =
 					controller.stable.method == a_providerMethod,
-				.resetPending = a_resetPending,
+				.resetPending =
+					a_upscaling.PendingVendorRuntimeResetInvalidatesProvider(
+						a_providerMethod,
+						a_providerGeneration),
 				.lifecycleRetiring =
 					IsVRVendorLifecycleRetiring(a_lifecycle.phase),
 			});
@@ -2163,11 +2166,11 @@ namespace
 
 		return providerBlocks(
 				   Upscaling::UpscaleMethod::kFSR,
-				   a_upscaling.pendingFSRReset.load(std::memory_order_acquire),
+				   a_upscaling.vrFSRRuntimeResourceGeneration,
 				   controller.fsrLifecycle) ||
 		       providerBlocks(
 				   Upscaling::UpscaleMethod::kDLSS,
-				   a_upscaling.pendingDLSSReset.load(std::memory_order_acquire),
+				   a_upscaling.vrDLSSRuntimeResourceGeneration,
 				   controller.dlssLifecycle);
 	}
 
@@ -5842,9 +5845,13 @@ namespace
 			return false;
 		}
 
-		return configuredMethod == Upscaling::UpscaleMethod::kDLSS ?
-		           !a_upscaling.pendingDLSSReset.load(std::memory_order_acquire) :
-		           !a_upscaling.pendingFSRReset.load(std::memory_order_acquire);
+		const uint32_t providerGeneration =
+			configuredMethod == Upscaling::UpscaleMethod::kDLSS ?
+				a_upscaling.vrDLSSRuntimeResourceGeneration :
+				a_upscaling.vrFSRRuntimeResourceGeneration;
+		return !a_upscaling.PendingVendorRuntimeResetInvalidatesProvider(
+			configuredMethod,
+			providerGeneration);
 	}
 
 	bool IsVRFixedVendorPostLoadResetNoOp(const Upscaling& a_upscaling)
@@ -5907,17 +5914,25 @@ namespace
 		const bool activeRuntimeGenerationMismatch = !a_upscaling.IsVendorRuntimeReadyForActiveContract(a_upscaleMethod);
 		const bool terminalInactiveFSRReset =
 			ShouldRetainInactiveFSROwnership(a_upscaling, a_upscaleMethod);
+		const bool dlssResetInvalidatesProvider =
+			a_upscaling.PendingVendorRuntimeResetInvalidatesProvider(
+				Upscaling::UpscaleMethod::kDLSS,
+				a_upscaling.vrDLSSRuntimeResourceGeneration);
+		const bool fsrResetInvalidatesProvider =
+			a_upscaling.PendingVendorRuntimeResetInvalidatesProvider(
+				Upscaling::UpscaleMethod::kFSR,
+				a_upscaling.vrFSRRuntimeResourceGeneration);
 		switch (a_upscaleMethod) {
 		case Upscaling::UpscaleMethod::kDLSS:
 			return activeRuntimeGenerationMismatch ||
-			       a_upscaling.pendingDLSSReset.load(std::memory_order_acquire) ||
+			       dlssResetInvalidatesProvider ||
 			       (includeInactiveVendorReset &&
 					   !terminalInactiveFSRReset &&
-					   a_upscaling.pendingFSRReset.load(std::memory_order_acquire));
+					   fsrResetInvalidatesProvider);
 		case Upscaling::UpscaleMethod::kFSR:
 			return activeRuntimeGenerationMismatch ||
-			       a_upscaling.pendingFSRReset.load(std::memory_order_acquire) ||
-			       (includeInactiveVendorReset && a_upscaling.pendingDLSSReset.load(std::memory_order_acquire));
+			       fsrResetInvalidatesProvider ||
+			       (includeInactiveVendorReset && dlssResetInvalidatesProvider);
 		default:
 			return false;
 		}
@@ -18709,9 +18724,8 @@ bool Upscaling::CanDispatchExistingVRVendorEvaluation(
 	                      IsCommonVendorResourceContractCurrent(a_upscaleMethod);
 	if (a_upscaleMethod == UpscaleMethod::kDLSS) {
 		const bool resetInvalidatesProvider =
-			VRVendorRelatchPolicy::DoesPendingVendorResetInvalidateProvider(
-				pendingDLSSReset.load(std::memory_order_acquire),
-				pendingDLSSResetGeneration.load(std::memory_order_acquire),
+			PendingVendorRuntimeResetInvalidatesProvider(
+				UpscaleMethod::kDLSS,
 				provider.contractGeneration);
 		resourcesReady = resourcesReady &&
 		                 VRVendorRelatchPolicy::IsExactExistingDLSSDispatchReady({
@@ -18745,9 +18759,8 @@ bool Upscaling::CanDispatchExistingVRVendorEvaluation(
 				2u,
 				runtimeVersion);
 		const bool resetInvalidatesProvider =
-			VRVendorRelatchPolicy::DoesPendingVendorResetInvalidateProvider(
-				pendingFSRReset.load(std::memory_order_acquire),
-				pendingFSRResetGeneration.load(std::memory_order_acquire),
+			PendingVendorRuntimeResetInvalidatesProvider(
+				UpscaleMethod::kFSR,
 				provider.contractGeneration);
 		const bool providerContextsMatch =
 			hostProvider ?
@@ -21211,11 +21224,20 @@ uint32_t Upscaling::GetVRUpscalingApplyBlockReasonsForAPI() const
 		pendingFSRReset.load(std::memory_order_acquire) &&
 		(fidelityFX.IsHostFSRStateQuarantined() ||
 			IsSameTerminalFSRResourceRequest(*this));
+	const bool dlssResetBlocksRelatch =
+		PendingVendorRuntimeResetInvalidatesProvider(
+			UpscaleMethod::kDLSS,
+			vrDLSSRuntimeResourceGeneration);
+	const bool fsrResetBlocksRelatch =
+		PendingVendorRuntimeResetInvalidatesProvider(
+			UpscaleMethod::kFSR,
+			vrFSRRuntimeResourceGeneration) &&
+		!terminalFSRReset;
 	const bool relatchPending =
 		pendingPerfModeRenderTargetRecreate.load(std::memory_order_acquire) ||
 		perfModeRenderTargetRecreateInProgress.load(std::memory_order_acquire) ||
-		pendingDLSSReset.load(std::memory_order_acquire) ||
-		(pendingFSRReset.load(std::memory_order_acquire) && !terminalFSRReset);
+		dlssResetBlocksRelatch ||
+		fsrResetBlocksRelatch;
 	const bool transitionPending =
 		HasPendingVRUpscalingTransition() ||
 		pendingVRFpsStabilizerSyncFrame.load(std::memory_order_acquire) != 0 ||
@@ -25200,9 +25222,7 @@ bool Upscaling::ApplyPendingPerfModeRenderTargetRecreate(const char* a_caller)
 		return false;
 	}
 	auto hasPendingVendorReset = [&]() {
-		return !IsVendorRuntimeReadyForActiveContract(relatchUpscaleMethod) ||
-		       pendingDLSSReset.load(std::memory_order_acquire) ||
-		       pendingFSRReset.load(std::memory_order_acquire) ||
+		return HasPendingVRVendorRuntimeReset(*this, relatchUpscaleMethod) ||
 		       (relatchUpscaleMethod != UpscaleMethod::kFSR && fidelityFX.HasFSRResourcesPendingTeardown());
 	};
 	const auto getAuthoritativeInactivePhysicalProfile = [&]() -> const VRRenderScaleProfileSnapshot* {
@@ -26048,8 +26068,6 @@ bool Upscaling::ApplyPendingPerfModeRenderTargetRecreate(const char* a_caller)
 	SampleVRRenderScaleMemory(true, "before relatch");
 	bool completedLowPeakNativeRestore = false;
 	try {
-		const bool pendingDLSSResetForRelatch = pendingDLSSReset.load(std::memory_order_acquire);
-		const bool pendingFSRResetForRelatch = pendingFSRReset.load(std::memory_order_acquire);
 		// An active physical contract is the sole previous-owner authority, including
 		// an explicit non-vendor result. Only an inactive physical contract may fall
 		// back to the applied, then stable, inactive contract; requested/applying are
@@ -26071,6 +26089,38 @@ bool Upscaling::ApplyPendingPerfModeRenderTargetRecreate(const char* a_caller)
 		const UpscaleMethod previousVendorMethod = resolvePreviousVendorMethod();
 		const bool previousVendorWasDLSS = previousVendorMethod == UpscaleMethod::kDLSS;
 		const bool previousVendorWasFSR = previousVendorMethod == UpscaleMethod::kFSR;
+		const bool dlssResetPendingForRelatch =
+			pendingDLSSReset.load(std::memory_order_acquire);
+		const bool fsrResetPendingForRelatch =
+			pendingFSRReset.load(std::memory_order_acquire);
+		const uint32_t dlssResetGenerationForRelatch =
+			dlssResetPendingForRelatch ?
+				pendingDLSSResetGeneration.load(std::memory_order_acquire) :
+				0u;
+		const uint32_t fsrResetGenerationForRelatch =
+			fsrResetPendingForRelatch ?
+				pendingFSRResetGeneration.load(std::memory_order_acquire) :
+				0u;
+		const bool pendingDLSSResetForRelatch =
+			VRVendorRelatchPolicy::DoesPendingVendorResetInvalidateProvider(
+				dlssResetPendingForRelatch,
+				dlssResetGenerationForRelatch,
+				vrDLSSRuntimeResourceGeneration) ||
+			(relatchUpscaleMethod == UpscaleMethod::kDLSS &&
+				VRVendorRelatchPolicy::DoesPendingVendorResetInvalidateProvider(
+					dlssResetPendingForRelatch,
+					dlssResetGenerationForRelatch,
+					relatchContractGeneration));
+		const bool pendingFSRResetForRelatch =
+			VRVendorRelatchPolicy::DoesPendingVendorResetInvalidateProvider(
+				fsrResetPendingForRelatch,
+				fsrResetGenerationForRelatch,
+				vrFSRRuntimeResourceGeneration) ||
+			(relatchUpscaleMethod == UpscaleMethod::kFSR &&
+				VRVendorRelatchPolicy::DoesPendingVendorResetInvalidateProvider(
+					fsrResetPendingForRelatch,
+					fsrResetGenerationForRelatch,
+					relatchContractGeneration));
 		const bool previousBootWasActiveDLSS =
 			previousBootSnapshot.valid &&
 			previousBootSnapshot.active &&
@@ -36809,7 +36859,9 @@ Upscaling::VRVendorResourceResetResult Upscaling::ResetVRVendorRuntimeResources(
 		!retainQuarantinedFSRResources &&
 		(a_destroyFSRResources ||
 			(a_includePendingFSRReset &&
-				pendingFSRReset.load(std::memory_order_acquire)));
+				PendingVendorRuntimeResetInvalidatesProvider(
+					UpscaleMethod::kFSR,
+					vrFSRRuntimeResourceGeneration)));
 	if (a_destroyDLSSResources)
 		RecordVRVendorRuntimeLifecycle(UpscaleMethod::kDLSS, VRVendorRuntimeLifecyclePhase::Destroying, 0, "vendor reset");
 	if (destroyFSRResources)
@@ -36973,6 +37025,14 @@ bool Upscaling::ApplyPendingVendorRuntimeReset(UpscaleMethod a_upscaleMethod, co
 
 	const bool dlssResetPending = pendingDLSSReset.load(std::memory_order_acquire);
 	const bool fsrResetPending = pendingFSRReset.load(std::memory_order_acquire);
+	const uint32_t pendingDLSSResetContractGeneration =
+		dlssResetPending ?
+			pendingDLSSResetGeneration.load(std::memory_order_acquire) :
+			0u;
+	const uint32_t pendingFSRResetContractGeneration =
+		fsrResetPending ?
+			pendingFSRResetGeneration.load(std::memory_order_acquire) :
+			0u;
 	const bool currentMethodDLSS = a_upscaleMethod == UpscaleMethod::kDLSS;
 	const bool currentMethodFSR = a_upscaleMethod == UpscaleMethod::kFSR;
 	const uint32_t activeContractGeneration =
@@ -37000,18 +37060,33 @@ bool Upscaling::ApplyPendingVendorRuntimeReset(UpscaleMethod a_upscaleMethod, co
 	};
 	const bool activeGenerationMismatch =
 		activeContractGeneration != 0 &&
-		((currentMethodDLSS && vrDLSSRuntimeResourceGeneration != 0 && vrDLSSRuntimeResourceGeneration != activeContractGeneration) ||
-			(currentMethodFSR && vrFSRRuntimeResourceGeneration != 0 && vrFSRRuntimeResourceGeneration != activeContractGeneration));
+		((currentMethodDLSS &&
+			 vrDLSSRuntimeResourceGeneration != activeContractGeneration) ||
+			(currentMethodFSR &&
+				vrFSRRuntimeResourceGeneration != activeContractGeneration));
 	const bool includeInactiveVendorReset = ShouldIncludeInactiveVRVendorReset(*this, a_upscaleMethod);
-	const bool activeResetPending =
-		activeGenerationMismatch ||
-		(currentMethodDLSS && dlssResetPending) ||
-		(currentMethodFSR && fsrResetPending);
-	const bool inactiveResetPending =
-		includeInactiveVendorReset &&
-		((currentMethodDLSS && fsrResetPending && !retainTerminalInactiveFSRResources) ||
-			(currentMethodFSR && dlssResetPending));
-	if (!activeResetPending && !inactiveResetPending)
+	const auto dlssResetDecision =
+		VRVendorRelatchPolicy::SelectVendorResetService({
+			.currentMethod = currentMethodDLSS,
+			.includeInactiveProvider = includeInactiveVendorReset,
+			.runtimeGenerationMismatch =
+				currentMethodDLSS && activeGenerationMismatch,
+			.resetPending = dlssResetPending,
+			.resetGeneration = pendingDLSSResetContractGeneration,
+			.providerGeneration = vrDLSSRuntimeResourceGeneration,
+		});
+	const auto fsrResetDecision =
+		VRVendorRelatchPolicy::SelectVendorResetService({
+			.currentMethod = currentMethodFSR,
+			.includeInactiveProvider = includeInactiveVendorReset,
+			.retainInactiveProvider = retainTerminalInactiveFSRResources,
+			.runtimeGenerationMismatch =
+				currentMethodFSR && activeGenerationMismatch,
+			.resetPending = fsrResetPending,
+			.resetGeneration = pendingFSRResetContractGeneration,
+			.providerGeneration = vrFSRRuntimeResourceGeneration,
+		});
+	if (!dlssResetDecision.workPending && !fsrResetDecision.workPending)
 		return true;
 
 	if (IsUpscalingLoadTransitionContextActive(*this)) {
@@ -37027,8 +37102,6 @@ bool Upscaling::ApplyPendingVendorRuntimeReset(UpscaleMethod a_upscaleMethod, co
 	bool retireFSR = false;
 	bool rebuildDLSS = false;
 	bool rebuildFSR = false;
-	const uint32_t pendingDLSSResetContractGeneration = pendingDLSSResetGeneration.load(std::memory_order_acquire);
-	const uint32_t pendingFSRResetContractGeneration = pendingFSRResetGeneration.load(std::memory_order_acquire);
 	const auto areCurrentFSRResourcesCompatible = [&]() {
 		if (runtimeResolutionPlan.finalOutputSize.x <= 0.0f ||
 			runtimeResolutionPlan.finalOutputSize.y <= 0.0f ||
@@ -37054,10 +37127,11 @@ bool Upscaling::ApplyPendingVendorRuntimeReset(UpscaleMethod a_upscaleMethod, co
 	static bool loggedVendorResetDeferral = false;
 	try {
 		retireFSR =
-			includeInactiveVendorReset &&
 			!currentMethodFSR &&
-			!retainTerminalInactiveFSRResources &&
-			pendingFSRReset.exchange(false, std::memory_order_relaxed);
+			fsrResetDecision.claimReset &&
+			TryClaimPendingVendorRuntimeReset(
+				UpscaleMethod::kFSR,
+				pendingFSRResetContractGeneration);
 		if (retireFSR) {
 			RecordVRVendorRuntimeLifecycle(UpscaleMethod::kFSR, VRVendorRuntimeLifecyclePhase::Destroying, pendingFSRResetContractGeneration, "inactive runtime retirement");
 			logger::debug("[Upscaling] Retiring {}inactive FSR resources before {} runtime reset", context, magic_enum::enum_name(a_upscaleMethod));
@@ -37116,7 +37190,12 @@ bool Upscaling::ApplyPendingVendorRuntimeReset(UpscaleMethod a_upscaleMethod, co
 			retireFSR = false;
 		}
 
-		retireDLSS = includeInactiveVendorReset && !currentMethodDLSS && pendingDLSSReset.exchange(false, std::memory_order_relaxed);
+		retireDLSS =
+			!currentMethodDLSS &&
+			dlssResetDecision.claimReset &&
+			TryClaimPendingVendorRuntimeReset(
+				UpscaleMethod::kDLSS,
+				pendingDLSSResetContractGeneration);
 		if (retireDLSS) {
 			RecordVRVendorRuntimeLifecycle(UpscaleMethod::kDLSS, VRVendorRuntimeLifecyclePhase::Destroying, pendingDLSSResetContractGeneration, "inactive runtime retirement");
 			logger::debug("[Upscaling] Retiring {}inactive DLSS resources before {} runtime reset", context, magic_enum::enum_name(a_upscaleMethod));
@@ -37161,10 +37240,22 @@ bool Upscaling::ApplyPendingVendorRuntimeReset(UpscaleMethod a_upscaleMethod, co
 			retireDLSS = false;
 		}
 
-		const bool pendingDLSSResetClaimed = currentMethodDLSS && pendingDLSSReset.exchange(false, std::memory_order_relaxed);
-		const bool pendingFSRResetClaimed = currentMethodFSR && pendingFSRReset.exchange(false, std::memory_order_relaxed);
-		rebuildDLSS = currentMethodDLSS && (activeGenerationMismatch || pendingDLSSResetClaimed);
-		rebuildFSR = currentMethodFSR && (activeGenerationMismatch || pendingFSRResetClaimed);
+		const bool pendingDLSSResetClaimed =
+			currentMethodDLSS &&
+			dlssResetDecision.claimReset &&
+			TryClaimPendingVendorRuntimeReset(
+				UpscaleMethod::kDLSS,
+				pendingDLSSResetContractGeneration);
+		const bool pendingFSRResetClaimed =
+			currentMethodFSR &&
+			fsrResetDecision.claimReset &&
+			TryClaimPendingVendorRuntimeReset(
+				UpscaleMethod::kFSR,
+				pendingFSRResetContractGeneration);
+		rebuildDLSS = currentMethodDLSS &&
+		              (activeGenerationMismatch || pendingDLSSResetClaimed);
+		rebuildFSR = currentMethodFSR &&
+		             (activeGenerationMismatch || pendingFSRResetClaimed);
 		if (!rebuildDLSS && !rebuildFSR)
 			return true;
 
@@ -37657,6 +37748,10 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 			2u,
 			GetRuntimeFSR4Enabled());
 	};
+	const bool pendingFSRResetInvalidatesCurrentProvider =
+		PendingVendorRuntimeResetInvalidatesProvider(
+			UpscaleMethod::kFSR,
+			vrFSRRuntimeResourceGeneration);
 	const bool vrFSRQualityChangeCanPreserveResources =
 		fsrQualityModeChanged &&
 		previousUpscaleMode == UpscaleMethod::kFSR &&
@@ -37664,7 +37759,7 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 		!fsrRuntimePathChanged &&
 		!fsrRuntimeFsr4ConfiguredChanged &&
 		!fsrRuntimeVersionChanged &&
-		!pendingFSRReset.load(std::memory_order_acquire) &&
+		!pendingFSRResetInvalidatesCurrentProvider &&
 		canPreserveFSRResourcesForCurrentVRPlan();
 	const bool runtimeFailureFallbackCanPreserveHostFSR =
 		VRVendorRelatchPolicy::CanReuseHostFSRAfterRuntimeFailure({
@@ -37674,7 +37769,7 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 			.runtimeFailureLatched =
 				fidelityFX.IsRuntimeUpscalerFailureLatched(),
 			.fsrResetPending =
-				pendingFSRReset.load(std::memory_order_acquire),
+				pendingFSRResetInvalidatesCurrentProvider,
 			.postLoadResetPending =
 				postLoadRuntimeResetPending.load(std::memory_order_acquire),
 			.primaryDeviceLost = IsSubmitStageDeviceLost(),
@@ -38171,15 +38266,21 @@ bool Upscaling::EnsureResourcesCurrent(UpscaleMethod a_upscalemethod)
 	const bool retainTerminalInactiveFSRResources =
 		ShouldRetainInactiveFSROwnership(*this, a_upscalemethod);
 	const bool pendingFSRResetBlocksStableCheck =
-		pendingFSRReset.load(std::memory_order_acquire) &&
+		PendingVendorRuntimeResetInvalidatesProvider(
+			UpscaleMethod::kFSR,
+			vrFSRRuntimeResourceGeneration) &&
 		!retainTerminalInactiveFSRResources;
+	const bool pendingDLSSResetBlocksStableCheck =
+		PendingVendorRuntimeResetInvalidatesProvider(
+			UpscaleMethod::kDLSS,
+			vrDLSSRuntimeResourceGeneration);
 	const bool fsrResourcesNeedRetirement =
 		a_upscalemethod != UpscaleMethod::kFSR &&
 		fidelityFX.HasFSRResourcesPendingTeardown() &&
 		!retainTerminalInactiveFSRResources;
 	if (resourceCheckStable &&
 		resourceCheckStableMethod == a_upscalemethod &&
-		!pendingDLSSReset.load(std::memory_order_acquire) &&
+		!pendingDLSSResetBlocksStableCheck &&
 		!pendingFSRResetBlocksStableCheck &&
 		!fsrResourcesNeedRetirement &&
 		!pendingPerfModeRenderTargetRecreate.load(std::memory_order_acquire) &&
@@ -54070,6 +54171,33 @@ uint32_t Upscaling::GetVRVendorEvaluationContractGeneration(
 	});
 }
 
+bool Upscaling::PendingVendorRuntimeResetInvalidatesProvider(
+	UpscaleMethod a_upscaleMethod,
+	uint32_t a_providerGeneration) const
+{
+	const auto invalidatesProvider = [&](const std::atomic<bool>& a_pending,
+										 const std::atomic<uint32_t>& a_generation) {
+		const bool pending = a_pending.load(std::memory_order_acquire);
+		return VRVendorRelatchPolicy::DoesPendingVendorResetInvalidateProvider(
+			pending,
+			pending ? a_generation.load(std::memory_order_acquire) : 0u,
+			a_providerGeneration);
+	};
+
+	switch (a_upscaleMethod) {
+	case UpscaleMethod::kDLSS:
+		return invalidatesProvider(
+			pendingDLSSReset,
+			pendingDLSSResetGeneration);
+	case UpscaleMethod::kFSR:
+		return invalidatesProvider(
+			pendingFSRReset,
+			pendingFSRResetGeneration);
+	default:
+		return false;
+	}
+}
+
 bool Upscaling::IsVendorRuntimeReadyForActiveContract(UpscaleMethod a_upscaleMethod) const
 {
 	if (!globals::game::isVR || !IsVRRenderScaleModeLatched())
@@ -54083,14 +54211,18 @@ bool Upscaling::IsVendorRuntimeReadyForActiveContract(UpscaleMethod a_upscaleMet
 	case UpscaleMethod::kDLSS:
 		return VRVendorRelatchPolicy::IsDLSSLifecycleReady({
 			.resetInvalidatesProvider =
-				pendingDLSSReset.load(std::memory_order_acquire),
+				PendingVendorRuntimeResetInvalidatesProvider(
+					UpscaleMethod::kDLSS,
+					vrDLSSRuntimeResourceGeneration),
 			.generationValid = generation != 0,
 			.generationMatches =
 				vrDLSSRuntimeResourceGeneration == generation,
 			.runtimeReady = streamline.IsDLSSRuntimeReady(),
 		});
 	case UpscaleMethod::kFSR:
-		return !pendingFSRReset.load(std::memory_order_acquire) &&
+		return !PendingVendorRuntimeResetInvalidatesProvider(
+				   UpscaleMethod::kFSR,
+				   vrFSRRuntimeResourceGeneration) &&
 		       vrFSRRuntimeResourceGeneration == generation;
 	default:
 		return true;
@@ -54103,17 +54235,20 @@ void Upscaling::MarkVendorRuntimeResourcesDirty(UpscaleMethod a_upscaleMethod, u
 		a_generation != 0 ?
 			a_generation :
 			GetVRVendorEvaluationContractGeneration(a_upscaleMethod);
-	switch (a_upscaleMethod) {
-	case UpscaleMethod::kDLSS:
-		pendingDLSSResetGeneration.store(generation, std::memory_order_release);
-		pendingDLSSReset.store(true, std::memory_order_release);
-		break;
-	case UpscaleMethod::kFSR:
-		pendingFSRResetGeneration.store(generation, std::memory_order_release);
-		pendingFSRReset.store(true, std::memory_order_release);
-		break;
-	default:
-		break;
+	{
+		const std::scoped_lock lock(vendorRuntimeResetMutex);
+		switch (a_upscaleMethod) {
+		case UpscaleMethod::kDLSS:
+			pendingDLSSResetGeneration.store(generation, std::memory_order_release);
+			pendingDLSSReset.store(true, std::memory_order_release);
+			break;
+		case UpscaleMethod::kFSR:
+			pendingFSRResetGeneration.store(generation, std::memory_order_release);
+			pendingFSRReset.store(true, std::memory_order_release);
+			break;
+		default:
+			break;
+		}
 	}
 	RecordVRVendorRuntimeLifecycle(a_upscaleMethod, VRVendorRuntimeLifecyclePhase::Dirty, generation, "resources dirty");
 }
@@ -54124,40 +54259,82 @@ void Upscaling::MarkVendorRuntimeResourcesReady(UpscaleMethod a_upscaleMethod, u
 		a_generation != 0 ?
 			a_generation :
 			GetVRVendorEvaluationContractGeneration(a_upscaleMethod);
-	switch (a_upscaleMethod) {
-	case UpscaleMethod::kDLSS:
-		vrDLSSRuntimeResourceGeneration = generation;
-		pendingDLSSResetGeneration.store(0, std::memory_order_release);
-		pendingDLSSReset.store(false, std::memory_order_release);
-		break;
-	case UpscaleMethod::kFSR:
-		vrFSRRuntimeResourceGeneration = generation;
-		pendingFSRResetGeneration.store(0, std::memory_order_release);
-		pendingFSRReset.store(false, std::memory_order_release);
-		break;
-	default:
-		break;
+	{
+		const std::scoped_lock lock(vendorRuntimeResetMutex);
+		const auto publishReady = [&](std::atomic<bool>& a_pending,
+									  std::atomic<uint32_t>& a_resetGeneration,
+									  uint32_t& a_runtimeGeneration) {
+			a_runtimeGeneration = generation;
+			const bool pending = a_pending.load(std::memory_order_relaxed);
+			const uint32_t resetGeneration =
+				pending ? a_resetGeneration.load(std::memory_order_relaxed) : 0u;
+			if (VRVendorRelatchPolicy::DoesPendingVendorResetInvalidateProvider(
+					pending,
+					resetGeneration,
+					generation)) {
+				a_resetGeneration.store(0, std::memory_order_release);
+				a_pending.store(false, std::memory_order_release);
+			}
+		};
+
+		switch (a_upscaleMethod) {
+		case UpscaleMethod::kDLSS:
+			publishReady(
+				pendingDLSSReset,
+				pendingDLSSResetGeneration,
+				vrDLSSRuntimeResourceGeneration);
+			break;
+		case UpscaleMethod::kFSR:
+			publishReady(
+				pendingFSRReset,
+				pendingFSRResetGeneration,
+				vrFSRRuntimeResourceGeneration);
+			break;
+		default:
+			break;
+		}
 	}
 	RecordVRVendorRuntimeLifecycle(a_upscaleMethod, VRVendorRuntimeLifecyclePhase::Ready, generation, "resources ready");
 }
 
 void Upscaling::ClearVendorRuntimeResourcesDirty(UpscaleMethod a_upscaleMethod, bool a_clearRuntimeGeneration)
 {
-	switch (a_upscaleMethod) {
-	case UpscaleMethod::kDLSS:
-		if (a_clearRuntimeGeneration)
-			vrDLSSRuntimeResourceGeneration = 0;
-		pendingDLSSResetGeneration.store(0, std::memory_order_release);
-		pendingDLSSReset.store(false, std::memory_order_release);
-		break;
-	case UpscaleMethod::kFSR:
-		if (a_clearRuntimeGeneration)
-			vrFSRRuntimeResourceGeneration = 0;
-		pendingFSRResetGeneration.store(0, std::memory_order_release);
-		pendingFSRReset.store(false, std::memory_order_release);
-		break;
-	default:
-		break;
+	{
+		const std::scoped_lock lock(vendorRuntimeResetMutex);
+		const auto clearOwnedReset = [&](std::atomic<bool>& a_pending,
+										 std::atomic<uint32_t>& a_resetGeneration,
+										 uint32_t& a_runtimeGeneration) {
+			const uint32_t runtimeGeneration = a_runtimeGeneration;
+			const bool pending = a_pending.load(std::memory_order_relaxed);
+			const uint32_t resetGeneration =
+				pending ? a_resetGeneration.load(std::memory_order_relaxed) : 0u;
+			if (VRVendorRelatchPolicy::DoesPendingVendorResetInvalidateProvider(
+					pending,
+					resetGeneration,
+					runtimeGeneration)) {
+				a_resetGeneration.store(0, std::memory_order_release);
+				a_pending.store(false, std::memory_order_release);
+			}
+			if (a_clearRuntimeGeneration)
+				a_runtimeGeneration = 0;
+		};
+
+		switch (a_upscaleMethod) {
+		case UpscaleMethod::kDLSS:
+			clearOwnedReset(
+				pendingDLSSReset,
+				pendingDLSSResetGeneration,
+				vrDLSSRuntimeResourceGeneration);
+			break;
+		case UpscaleMethod::kFSR:
+			clearOwnedReset(
+				pendingFSRReset,
+				pendingFSRResetGeneration,
+				vrFSRRuntimeResourceGeneration);
+			break;
+		default:
+			break;
+		}
 	}
 	const uint32_t runtimeGeneration =
 		a_upscaleMethod == UpscaleMethod::kDLSS ? vrDLSSRuntimeResourceGeneration :
@@ -54174,6 +54351,34 @@ void Upscaling::ClearVendorRuntimeResourcesDirty(UpscaleMethod a_upscaleMethod, 
 			VRVendorRuntimeLifecyclePhase::Ready,
 		runtimeGeneration,
 		"resources cleared");
+}
+
+bool Upscaling::TryClaimPendingVendorRuntimeReset(
+	UpscaleMethod a_upscaleMethod,
+	uint32_t a_expectedGeneration)
+{
+	const std::scoped_lock lock(vendorRuntimeResetMutex);
+	const auto tryClaim = [&](std::atomic<bool>& a_pending,
+							  std::atomic<uint32_t>& a_generation) {
+		if (!a_pending.load(std::memory_order_acquire) ||
+			a_generation.load(std::memory_order_acquire) !=
+				a_expectedGeneration) {
+			return false;
+		}
+
+		a_generation.store(0, std::memory_order_release);
+		a_pending.store(false, std::memory_order_release);
+		return true;
+	};
+
+	switch (a_upscaleMethod) {
+	case UpscaleMethod::kDLSS:
+		return tryClaim(pendingDLSSReset, pendingDLSSResetGeneration);
+	case UpscaleMethod::kFSR:
+		return tryClaim(pendingFSRReset, pendingFSRResetGeneration);
+	default:
+		return false;
+	}
 }
 
 void Upscaling::RecordVRVendorRuntimeLifecycle(UpscaleMethod a_upscaleMethod, VRVendorRuntimeLifecyclePhase a_phase, uint32_t a_generation, const char* a_reason)
@@ -54566,6 +54771,16 @@ void Upscaling::PreparePendingVRRenderScaleTransition(
 		VRVendorRelatchPolicy::HasDirectMenuRequestAuthority(
 			a_request.directMenuEdit,
 			a_request.requestID);
+	const uint32_t requestProviderGeneration =
+		a_request.method == UpscaleMethod::kDLSS ?
+			vrDLSSRuntimeResourceGeneration :
+		a_request.method == UpscaleMethod::kFSR ?
+			vrFSRRuntimeResourceGeneration :
+			0u;
+	const bool providerResetPending =
+		PendingVendorRuntimeResetInvalidatesProvider(
+			a_request.method,
+			requestProviderGeneration);
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	const uint64_t preparationBeginQpc =
 		QueryVRRenderScalePresentationQpc();
@@ -54622,10 +54837,7 @@ void Upscaling::PreparePendingVRRenderScaleTransition(
 			admissionReasonMask,
 			VRRenderScalePreparationReason::PostLoadReset);
 	}
-	if ((a_request.method == UpscaleMethod::kDLSS &&
-			pendingDLSSReset.load(std::memory_order_acquire)) ||
-		(a_request.method == UpscaleMethod::kFSR &&
-			pendingFSRReset.load(std::memory_order_acquire))) {
+	if (providerResetPending) {
 		AddVRRenderScalePreparationReason(
 			admissionReasonMask,
 			VRRenderScalePreparationReason::ProviderReset);
@@ -54655,10 +54867,7 @@ void Upscaling::PreparePendingVRRenderScaleTransition(
 		perfMode.trueHMDEyeWidth && perfMode.trueHMDEyeHeight &&
 		!IsSubmitStageDeviceLost() &&
 		!postLoadRuntimeResetPending.load(std::memory_order_acquire) &&
-		!(a_request.method == UpscaleMethod::kDLSS &&
-			pendingDLSSReset.load(std::memory_order_acquire)) &&
-		!(a_request.method == UpscaleMethod::kFSR &&
-			pendingFSRReset.load(std::memory_order_acquire)) &&
+		!providerResetPending &&
 		!shaderCacheBusy;
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	const uint64_t admissionEndQpc = QueryVRRenderScalePresentationQpc();

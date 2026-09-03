@@ -1006,4 +1006,43 @@ foreach(_required_streamline_behavior IN ITEMS
     endif()
 endforeach()
 
+foreach(_required_vendor_reset_ownership IN ITEMS
+    "PendingVendorRuntimeResetInvalidatesProvider("
+    "VRVendorRelatchPolicy::SelectVendorResetService({"
+    ".resetGeneration = pendingDLSSResetContractGeneration"
+    ".providerGeneration = vrDLSSRuntimeResourceGeneration"
+    ".resetGeneration = pendingFSRResetContractGeneration"
+    ".providerGeneration = vrFSRRuntimeResourceGeneration"
+    "TryClaimPendingVendorRuntimeReset("
+    "const std::scoped_lock lock(vendorRuntimeResetMutex);"
+)
+    string(FIND
+        "${_upscaling_source}"
+        "${_required_vendor_reset_ownership}"
+        _vendor_reset_ownership_position
+    )
+    if(_vendor_reset_ownership_position EQUAL -1)
+        message(FATAL_ERROR
+            "Generation-qualified vendor reset ownership is missing: ${_required_vendor_reset_ownership}"
+        )
+    endif()
+endforeach()
+
+string(FIND
+    "${_upscaling_source}"
+    "pendingDLSSReset.exchange(false"
+    _unqualified_dlss_reset_claim_position
+)
+string(FIND
+    "${_upscaling_source}"
+    "pendingFSRReset.exchange(false"
+    _unqualified_fsr_reset_claim_position
+)
+if(NOT _unqualified_dlss_reset_claim_position EQUAL -1 OR
+   NOT _unqualified_fsr_reset_claim_position EQUAL -1)
+    message(FATAL_ERROR
+        "Vendor reset claims must not consume an unqualified pending Boolean"
+    )
+endif()
+
 message(STATUS "Render-scale DevBench qualification contract is coherent")

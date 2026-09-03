@@ -1384,6 +1384,48 @@ namespace VRVendorRelatchPolicy
 				   a_resetGeneration == a_providerGeneration);
 	}
 
+	struct VendorResetServiceAdmission
+	{
+		bool currentMethod = false;
+		bool includeInactiveProvider = false;
+		bool retainInactiveProvider = false;
+		bool runtimeGenerationMismatch = false;
+		bool resetPending = false;
+		std::uint32_t resetGeneration = 0;
+		std::uint32_t providerGeneration = 0;
+	};
+
+	struct VendorResetServiceDecision
+	{
+		bool resetOwnsProvider = false;
+		bool workPending = false;
+		bool claimReset = false;
+		bool mutateProvider = false;
+	};
+
+	[[nodiscard]] constexpr VendorResetServiceDecision SelectVendorResetService(
+		const VendorResetServiceAdmission& a_state) noexcept
+	{
+		const bool resetOwnsProvider =
+			DoesPendingVendorResetInvalidateProvider(
+				a_state.resetPending,
+				a_state.resetGeneration,
+				a_state.providerGeneration);
+		const bool serviceReset =
+			resetOwnsProvider &&
+			(a_state.currentMethod ||
+				(a_state.includeInactiveProvider &&
+					!a_state.retainInactiveProvider));
+		const bool repairGeneration =
+			a_state.currentMethod && a_state.runtimeGenerationMismatch;
+		return {
+			.resetOwnsProvider = resetOwnsProvider,
+			.workPending = repairGeneration || serviceReset,
+			.claimReset = serviceReset,
+			.mutateProvider = repairGeneration || serviceReset,
+		};
+	}
+
 	struct DLSSProviderReadiness
 	{
 		bool resetInvalidatesProvider = false;
