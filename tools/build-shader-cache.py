@@ -413,6 +413,7 @@ def validate_shader_pack(
             or record_reserved
             or record_reserved2
             or sequence == 0
+            or sequence == 0xFFFFFFFFFFFFFFFF
             or not logical_size
             or not exact_size
             or not bytecode_size
@@ -537,6 +538,24 @@ def validate_pack_manifest_contract(
         if lane != expected_lane:
             raise SystemExit(
                 f"managed pack manifest has the wrong lane for {file_name}"
+            )
+
+    def adjacent_generations(first: int, second: int) -> bool:
+        return abs(first - second) == 1
+
+    for first, second in (
+        ("Optimized.A.csxpack", "Optimized.B.csxpack"),
+        ("Developer.A.csxpack", "Developer.B.csxpack"),
+    ):
+        first_generation = manifest_count(
+            manifest_files[first]["generation"], f"{first}.generation"
+        )
+        second_generation = manifest_count(
+            manifest_files[second]["generation"], f"{second}.generation"
+        )
+        if not adjacent_generations(first_generation, second_generation):
+            raise SystemExit(
+                f"managed pack manifest has ambiguous A/B baseline generations: {first}, {second}"
             )
 
     if (

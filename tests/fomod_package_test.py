@@ -275,6 +275,10 @@ class FomodPackageTests(unittest.TestCase):
                 "ambiguous generation",
                 lambda manifest: manifest["files"]["Optimized.B.csxpack"].__setitem__("generation", 1),
             ),
+            (
+                "nonadjacent baseline generations",
+                lambda manifest: manifest["files"]["Optimized.B.csxpack"].__setitem__("generation", 3),
+            ),
         )
         for name, mutate in mutations:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:

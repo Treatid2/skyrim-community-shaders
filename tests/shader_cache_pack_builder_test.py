@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import struct
 import subprocess
 import sys
 import tempfile
@@ -130,6 +131,19 @@ def main() -> int:
         assert optimized_b["generation"] == 0 and optimized_b["recordCount"] == 0
         assert developer_a["generation"] == 1 and developer_a["recordCount"] == 0
         assert developer_b["generation"] == 0 and developer_b["recordCount"] == 0
+
+        sequence_pack = root / "sequence-domain.csxpack"
+        sequence_bytes = bytearray((standard / "Optimized.A.csxpack").read_bytes())
+        struct.pack_into("<Q", sequence_bytes, 96, 0xFFFFFFFFFFFFFFFE)
+        sequence_pack.write_bytes(sequence_bytes)
+        assert builder.validate_shader_pack(sequence_pack, 1)["recordCount"] == 3
+        struct.pack_into("<Q", sequence_bytes, 96, 0xFFFFFFFFFFFFFFFF)
+        sequence_pack.write_bytes(sequence_bytes)
+        try:
+            builder.validate_shader_pack(sequence_pack, 1)
+            raise AssertionError("exhausted record sequence was accepted")
+        except SystemExit:
+            pass
         manifest = json.loads(
             (standard / "PackManifest.json").read_text(encoding="utf-8")
         )
@@ -232,6 +246,12 @@ def main() -> int:
             except SystemExit:
                 accepted = False
             assert accepted is case["accepted"], case["name"]
+        accepted_cases = sum(case["accepted"] for case in corpus["cases"])
+        print(
+            "validated shared managed-pack corpus: "
+            f"{len(corpus['cases'])} cases "
+            f"({accepted_cases} accepted, {len(corpus['cases']) - accepted_cases} rejected)"
+        )
         try:
             builder.write_shader_pack(
                 root / "zero.csxpack",

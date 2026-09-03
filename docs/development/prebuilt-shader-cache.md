@@ -623,6 +623,20 @@ when active-generation superseded bytes and fragmentation cross their bounded
 thresholds. It writes current logical records into the inactive file at a
 higher generation and leaves the old generation searchable as fallback.
 
+Initial runtime admission is non-mutating. Every shipped A/B member must already
+contain a valid header; zero-byte placeholders, directories, reparse points,
+unreadable files, and same-object aliases are rejected without modifying any
+peer. On Windows, the writer lease requires physical identity for each member
+and retains non-delete-sharing identity handles so admitted paths cannot be
+replaced while the lease is active. The four optimized/developer members must
+resolve to four distinct file identities, and any whole-layout rejection
+releases all provisional lane ownership.
+
+Schema-2 installation baselines require adjacent A/B generations. Later runtime
+compaction or reset may produce a larger actual generation gap. Record sequences
+are valid only from 1 through `UINT64_MAX-1`; zero and `UINT64_MAX` are reserved.
+The Python archive/FOMOD validator and C++ runtime enforce the same rules.
+
 If any managed file is missing, the whole pack feature is unavailable and CSX
 retains the previous loose-cache behavior. `Manifest.json` remains part of that
 compatibility path. An explicit clear resets existing pack files in place;

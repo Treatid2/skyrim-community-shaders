@@ -627,13 +627,23 @@ namespace SIE
 
 					bool manifestFilesValid = false;
 					if (optimizedOpen && developerOpen) {
+						const auto optimizedIdentities = packs.optimized->GetFileIdentityKeys();
+						const auto developerIdentities = packs.developer->GetFileIdentityKeys();
+						const std::array identities{
+							optimizedIdentities[0], optimizedIdentities[1],
+							developerIdentities[0], developerIdentities[1]
+						};
 						const auto optimizedStates = packs.optimized->GetFileStates();
 						const auto developerStates = packs.developer->GetFileStates();
 						const std::array states{
 							optimizedStates[0], optimizedStates[1], developerStates[0], developerStates[1]
 						};
-						manifestFilesValid = Util::ShaderCachePack::ValidateManifestFileStates(
-							*contract, states, &manifestError);
+						manifestFilesValid = Util::ShaderCachePack::ValidateDistinctFileIdentities(
+												 identities, &manifestError) &&
+						                     Util::ShaderCachePack::ValidateManifestFileStates(
+												 *contract, states, &manifestError);
+					} else {
+						manifestError = "one or more managed shader pack lanes failed read-only admission";
 					}
 					packs.optimizedAvailable.store(manifestFilesValid, std::memory_order_release);
 					packs.developerAvailable.store(manifestFilesValid, std::memory_order_release);
@@ -644,6 +654,8 @@ namespace SIE
 						logger::error(
 							"Managed shader pack layout is not fully valid; retaining legacy loose-cache fallback: {}",
 							manifestError);
+						packs.optimized.reset();
+						packs.developer.reset();
 					}
 
 					logger::info(

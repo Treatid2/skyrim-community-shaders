@@ -94,6 +94,9 @@ namespace Util::ShaderCachePack
 		const ManifestContract& a_contract,
 		const std::array<PackFileState, 4>& a_files,
 		std::string* a_error = nullptr);
+	bool ValidateDistinctFileIdentities(
+		const std::array<std::string, 4>& a_identities,
+		std::string* a_error = nullptr);
 
 	// A complete, readable managed pack set is authoritative. A miss in that
 	// set means the exact shader contract must be compiled; consulting a legacy
@@ -150,7 +153,15 @@ namespace Util::ShaderCachePack
 		Store& operator=(const Store&) = delete;
 
 		bool Open(std::string* a_error = nullptr);
+		/**
+		 * Explicitly bootstrap an isolated pair whose existing members are both
+		 * zero-byte files. Runtime managed-layout admission must use Open(), which
+		 * is strictly non-mutating.
+		 */
+		bool InitializeEmptyFilesAndOpen(std::string* a_error = nullptr);
+		void Close();
 		std::array<PackFileState, 2> GetFileStates() const;
+		std::array<std::string, 2> GetFileIdentityKeys() const;
 		std::optional<Entry> Find(std::string_view a_exactKey, std::string* a_error = nullptr) const;
 		bool Append(const Entry& a_entry, std::string* a_error = nullptr);
 		/** Durably commits all records appended since the previous checkpoint. */
@@ -195,9 +206,11 @@ namespace Util::ShaderCachePack
 		PackSetId packSetId{};
 		bool opened = false;
 		std::string leaseKey;
+		std::array<std::string, 2> fileIdentityKeys{};
 		bool leaseOwned = false;
 #ifdef _WIN32
 		void* leaseHandle = nullptr;
+		std::array<void*, 2> fileIdentityHandles{};
 #endif
 		ScannedFile active;
 		ScannedFile fallback;
@@ -206,7 +219,7 @@ namespace Util::ShaderCachePack
 		std::unordered_map<std::string, RecordLocation> activeLiveByLogical;
 		Stats stats;
 
-		bool OpenLocked(std::string* a_error);
+		bool OpenLocked(bool a_allowEmptyInitialization, std::string* a_error);
 		bool AcquireWriterLease(std::string* a_error);
 		void ReleaseWriterLease() noexcept;
 		bool Scan(const std::filesystem::path& a_path, ScannedFile& a_output, std::string* a_error) const;

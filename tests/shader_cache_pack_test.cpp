@@ -252,6 +252,12 @@ int main(int argc, char** argv)
 	static_assert(ClassifyValidatedLayout(LayoutState::Complete, false, true) == LayoutState::PartialOrInvalid);
 	static_assert(ClassifyValidatedLayout(LayoutState::Complete, true, false) == LayoutState::PartialOrInvalid);
 	static_assert(ClassifyValidatedLayout(LayoutState::PartialOrInvalid, true, true) == LayoutState::PartialOrInvalid);
+	{
+		std::string identityError;
+		assert(ValidateDistinctFileIdentities({ "a", "b", "c", "d" }, &identityError));
+		assert(!ValidateDistinctFileIdentities({ "a", "b", "a", "d" }, &identityError));
+		assert(!identityError.empty());
+	}
 
 	for (std::uint32_t mask = 0; mask < 32; ++mask) {
 		std::array<bool, 5> present{};
@@ -430,6 +436,20 @@ int main(int argc, char** argv)
 	// Fixed names alone do not make a managed layout authoritative. Every member
 	// must be an openable regular pack file satisfying its manifest baseline.
 	{
+		const auto emptyRoot = root / "read-only-empty-layout";
+		std::filesystem::create_directories(emptyRoot);
+		const auto first = emptyRoot / "Optimized.A.csxpack";
+		const auto second = emptyRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		std::string layoutError;
+		Store readOnly(first, second, Lane::Optimized, TestPackSetId());
+		assert(!readOnly.Open(&layoutError));
+		assert(std::filesystem::file_size(first) == 0);
+		assert(std::filesystem::file_size(second) == 0);
+		assert(readOnly.InitializeEmptyFilesAndOpen(&layoutError));
+	}
+	{
 		const auto invalidLayoutRoot = root / "invalid-layout";
 		std::filesystem::create_directories(invalidLayoutRoot);
 		const auto directoryMember = invalidLayoutRoot / "Optimized.A.csxpack";
@@ -451,11 +471,10 @@ int main(int argc, char** argv)
 		std::ofstream(regularMember, std::ios::binary).close();
 		std::string layoutError;
 		Store malformedLayout(malformedMember, regularMember, Lane::Optimized, TestPackSetId());
-		assert(malformedLayout.Open(&layoutError));
-		const auto contract = ParseManifestContract(MakePackManifest(), "VR", "test-abi", &layoutError);
-		assert(contract);
-		assert(!ValidateOptimizedStore(malformedLayout, *contract, &layoutError));
+		assert(!malformedLayout.Open(&layoutError));
 		assert(!layoutError.empty());
+		assert(std::filesystem::file_size(malformedMember) == 3);
+		assert(std::filesystem::file_size(regularMember) == 0);
 	}
 #ifdef _WIN32
 	{
@@ -468,7 +487,7 @@ int main(int argc, char** argv)
 		{
 			std::string setupError;
 			Store setup(first, second, Lane::Optimized, TestPackSetId());
-			assert(setup.Open(&setupError));
+			assert(setup.InitializeEmptyFilesAndOpen(&setupError));
 		}
 		const HANDLE blocker = CreateFileW(
 			first.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -495,7 +514,7 @@ int main(int argc, char** argv)
 		{
 			std::string setupError;
 			Store setup(first, second, Lane::Optimized, TestPackSetId());
-			assert(setup.Open(&setupError));
+			assert(setup.InitializeEmptyFilesAndOpen(&setupError));
 		}
 		PackSetId otherSet = TestPackSetId();
 		otherSet.back() = std::byte{ 0x7f };
@@ -532,7 +551,7 @@ int main(int argc, char** argv)
 		std::ofstream(second, std::ios::binary).close();
 		std::string mutationError;
 		Store mutation(first, second, Lane::Optimized, TestPackSetId());
-		assert(mutation.Open(&mutationError));
+		assert(mutation.InitializeEmptyFilesAndOpen(&mutationError));
 		assert(mutation.Append(MakeEntry("logical", "exact", 0x71), &mutationError));
 		assert(mutation.Checkpoint(&mutationError));
 		const char changed = 'X';
@@ -554,7 +573,7 @@ int main(int argc, char** argv)
 		std::string overflowError;
 		{
 			Store writer(first, second, Lane::Optimized, TestPackSetId());
-			assert(writer.Open(&overflowError));
+			assert(writer.InitializeEmptyFilesAndOpen(&overflowError));
 			assert(writer.Append(MakeEntry("logical", "exact", 0x72), &overflowError));
 			assert(writer.Checkpoint(&overflowError));
 		}
@@ -564,6 +583,42 @@ int main(int argc, char** argv)
 		assert(reader.Open(&overflowError));
 		assert(reader.GetStats().corruptTailBytes > 0);
 		assert(!reader.Find("exact", &overflowError));
+	}
+
+	// Sequence zero and UINT64_MAX are reserved. The largest usable sequence is
+	// visible in both readers; the exhausted sentinel is an invalid tail.
+	{
+		const auto sequenceRoot = root / "record-sequence-domain";
+		std::filesystem::create_directories(sequenceRoot);
+		const auto first = sequenceRoot / "Optimized.A.csxpack";
+		const auto second = sequenceRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		std::string sequenceError;
+		{
+			Store writer(first, second, Lane::Optimized, TestPackSetId());
+			assert(writer.InitializeEmptyFilesAndOpen(&sequenceError));
+			assert(writer.Append(MakeEntry("sequence", "sequence-exact", 0x74), &sequenceError));
+			assert(writer.Checkpoint(&sequenceError));
+		}
+		const auto activePath = ActivePack(first, second);
+		const auto maximumUsable = (std::numeric_limits<std::uint64_t>::max)() - 1;
+		Overwrite(activePath, 96, maximumUsable);
+		{
+			Store reader(first, second, Lane::Optimized, TestPackSetId());
+			assert(reader.Open(&sequenceError));
+			assert(reader.GetStats().recordCount == 1);
+		}
+		const auto exhausted = (std::numeric_limits<std::uint64_t>::max)();
+		Overwrite(activePath, 96, exhausted);
+		{
+			Store reader(first, second, Lane::Optimized, TestPackSetId());
+			sequenceError.clear();
+			assert(reader.Open(&sequenceError));
+			assert(reader.GetStats().recordCount == 0);
+			assert(reader.GetStats().corruptTailBytes > 0);
+			assert(!sequenceError.empty());
+		}
 	}
 
 	// A nonzero pack-set identity is also the cross-process writer lease key.
@@ -577,7 +632,7 @@ int main(int argc, char** argv)
 		const auto setID = TestPackSetId();
 		std::string leaseError;
 		Store owner(first, second, Lane::Optimized, setID);
-		assert(owner.Open(&leaseError));
+		assert(owner.InitializeEmptyFilesAndOpen(&leaseError));
 		const auto firstSize = std::filesystem::file_size(first);
 		const auto secondSize = std::filesystem::file_size(second);
 		Store contender(first, second, Lane::Optimized, setID);
@@ -589,6 +644,12 @@ int main(int argc, char** argv)
 		assert(!wrongLane.Open(&leaseError));
 		assert(std::filesystem::file_size(first) == firstSize);
 		assert(std::filesystem::file_size(second) == secondSize);
+#ifdef _WIN32
+		std::error_code replacementError;
+		std::filesystem::rename(first, leaseRoot / "displaced.csxpack", replacementError);
+		assert(replacementError);
+		assert(std::filesystem::exists(first));
+#endif
 		bool threadOpened = true;
 		std::jthread contenderThread([&] {
 			std::string threadError;
@@ -618,6 +679,30 @@ int main(int argc, char** argv)
 #endif
 	}
 
+#ifdef _WIN32
+	// A/B slot names must represent two distinct physical files. Exact-path and
+	// hard-link aliases fail before initialization and release provisional guards.
+	{
+		const auto topologyRoot = root / "same-object-a-b";
+		std::filesystem::create_directories(topologyRoot);
+		const auto first = topologyRoot / "Optimized.A.csxpack";
+		const auto alias = topologyRoot / "Optimized.B.csxpack";
+		const auto independent = topologyRoot / "Independent.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(independent, std::ios::binary).close();
+		assert(CreateHardLinkW(alias.c_str(), first.c_str(), nullptr));
+		std::string topologyError;
+		Store exactAlias(first, first, Lane::Optimized, TestPackSetId());
+		assert(!exactAlias.InitializeEmptyFilesAndOpen(&topologyError));
+		assert(std::filesystem::file_size(first) == 0);
+		Store hardLinkAlias(first, alias, Lane::Optimized, TestPackSetId());
+		assert(!hardLinkAlias.InitializeEmptyFilesAndOpen(&topologyError));
+		assert(std::filesystem::file_size(first) == 0);
+		Store recoveredTopology(first, independent, Lane::Optimized, TestPackSetId());
+		assert(recoveredTopology.InitializeEmptyFilesAndOpen(&topologyError));
+	}
+#endif
+
 	// Equal readable generations are ambiguous rather than an arbitrary A/B tie.
 	{
 		const auto ambiguousRoot = root / "ambiguous-generation";
@@ -629,7 +714,7 @@ int main(int argc, char** argv)
 		std::string ambiguousError;
 		{
 			Store writer(first, second, Lane::Optimized, TestPackSetId());
-			assert(writer.Open(&ambiguousError));
+			assert(writer.InitializeEmptyFilesAndOpen(&ambiguousError));
 			assert(writer.Append(MakeEntry("logical", "exact", 0x73), &ambiguousError));
 			assert(writer.Checkpoint(&ambiguousError));
 			assert(writer.Compact(&ambiguousError));
@@ -657,7 +742,7 @@ int main(int argc, char** argv)
 		std::ofstream(second, std::ios::binary).close();
 		auto owner = std::make_unique<Store>(first, second, Lane::Optimized, TestPackSetId());
 		std::string releaseError;
-		assert(owner->Open(&releaseError));
+		assert(owner->InitializeEmptyFilesAndOpen(&releaseError));
 		std::jthread releaser([owned = std::move(owner)]() mutable { owned.reset(); });
 		releaser.join();
 		assert(RunLeaseProbe(argv[0], first, second, true) == 0);
@@ -670,6 +755,11 @@ int main(int argc, char** argv)
 		const auto ready = abandonedRoot / "ready";
 		std::ofstream(first, std::ios::binary).close();
 		std::ofstream(second, std::ios::binary).close();
+		{
+			std::string setupError;
+			Store setup(first, second, Lane::Optimized, TestPackSetId());
+			assert(setup.InitializeEmptyFilesAndOpen(&setupError));
+		}
 		TerminateLeaseHolder(argv[0], first, second, ready, abandonedRoot / "holder-temp");
 		std::string leaseError;
 		Store recoveredLease(first, second, Lane::Optimized, TestPackSetId());
@@ -685,7 +775,7 @@ int main(int argc, char** argv)
 	std::string error;
 	{
 		Store store(a, b, Lane::Optimized, TestPackSetId());
-		assert(store.Open(&error));
+		assert(store.InitializeEmptyFilesAndOpen(&error));
 		assert(store.Append(MakeEntry("water|provider=1", "water|source=old|provider=1", 0x11), &error));
 		assert(store.Append(MakeEntry("water|provider=1", "water|source=new|provider=1", 0x22), &error));
 		assert(store.Append(MakeEntry("water|provider=2", "water|source=new|provider=2", 0x33), &error));
@@ -776,25 +866,17 @@ int main(int argc, char** argv)
 		std::string resetError;
 		{
 			Store degraded(first, second, Lane::Optimized, TestPackSetId());
-			assert(degraded.Open(&resetError));
+			assert(degraded.InitializeEmptyFilesAndOpen(&resetError));
 			assert(degraded.Append(MakeEntry("reset", "reset-exact", 0x60), &resetError));
 			assert(degraded.Checkpoint(&resetError));
 
-			const HANDLE cleanupBlocker = CreateFileW(
-				first.c_str(),
-				GENERIC_READ,
-				FILE_SHARE_READ,
-				nullptr,
-				OPEN_EXISTING,
-				FILE_ATTRIBUTE_NORMAL,
-				nullptr);
-			assert(cleanupBlocker != INVALID_HANDLE_VALUE);
+			assert(SetFileAttributesW(first.c_str(), FILE_ATTRIBUTE_READONLY));
 			resetError.clear();
 			assert(degraded.Reset(&resetError) == ResetDisposition::CommittedDegraded);
 			assert(!resetError.empty());
 			assert(degraded.GetStats().available);
 			assert(!degraded.Find("reset-exact", &resetError));
-			CloseHandle(cleanupBlocker);
+			assert(SetFileAttributesW(first.c_str(), FILE_ATTRIBUTE_NORMAL));
 		}
 
 		resetError.clear();
@@ -805,14 +887,18 @@ int main(int argc, char** argv)
 	}
 #endif
 
-	// A vanished backing file is an ordinary cache-lane failure, not an
-	// exception escaping through shader compilation.
-	std::filesystem::remove(ActivePack(a, b));
+	// The retained physical-identity guards prevent a backing path from being
+	// replaced while the writer lease is active. Once closed, a missing member
+	// fails the next read-only admission without mutating its peer.
+	const auto guardedPath = ActivePack(a, b);
+	std::error_code guardedRemoveError;
+	assert(!std::filesystem::remove(guardedPath, guardedRemoveError));
+	assert(guardedRemoveError);
+	recovered.Close();
+	assert(std::filesystem::remove(guardedPath));
 	error.clear();
-	assert(!recovered.Find("water|source=reset|provider=1", &error));
-	assert(!error.empty());
-	error.clear();
-	assert(!recovered.Compact(&error));
+	Store missingMember(a, b, Lane::Optimized, TestPackSetId());
+	assert(!missingMember.Open(&error));
 	assert(!error.empty());
 
 	// One failed lane must not disable an independent healthy lane.
@@ -828,13 +914,15 @@ int main(int argc, char** argv)
 	Store healthyLane(optimizedA, optimizedB, Lane::Optimized, TestPackSetId());
 	Store incompleteLane(developerA, developerB, Lane::Developer, TestPackSetId());
 	error.clear();
-	assert(healthyLane.Open(&error));
+	assert(healthyLane.InitializeEmptyFilesAndOpen(&error));
 	error.clear();
 	assert(!incompleteLane.Open(&error));
 	assert(!error.empty());
 	assert(healthyLane.Append(MakeEntry("healthy", "healthy-exact", 0x61), &error));
 	assert(healthyLane.Checkpoint(&error));
 	assert(healthyLane.Find("healthy-exact", &error));
+	healthyLane.Close();
+	incompleteLane.Close();
 
 	std::filesystem::remove_all(root);
 	return 0;
