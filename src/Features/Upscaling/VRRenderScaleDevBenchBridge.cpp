@@ -6397,7 +6397,7 @@ namespace
 			"mutating it. milestone defaults to strict for backward compatibility; "
 			"presentation and cleanup expose their independent first-observed "
 			"timestamps, signed presentation-to-cleanup deltas, and cleanup tail "
-			"without changing strict qualification. The schema-revision-12 "
+			"without changing strict qualification. The schema-revision-14 "
 			"terminal receipt retains the immutable dispatch, blocked and last "
 			"pre-mutation, first physical mutation, first post-mutation, first "
 			"proven new-generation, exact owner-bound no-mutation proof, and "

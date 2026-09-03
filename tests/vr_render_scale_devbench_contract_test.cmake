@@ -34,6 +34,51 @@ file(READ
     "${PROJECT_ROOT}/src/Features/Upscaling/FidelityFX.cpp"
     _fidelityfx_source
 )
+file(READ
+    "${PROJECT_ROOT}/docs/development/vr-render-scale-replacement-telemetry.md"
+    _replacement_telemetry_documentation
+)
+
+set(_schema_revision_receipt_text "{ \"schemaRevision\", 14 }")
+string(LENGTH "${_bridge}" _bridge_length_with_schema_receipts)
+string(REPLACE
+    "${_schema_revision_receipt_text}"
+    ""
+    _bridge_without_schema_receipts
+    "${_bridge}"
+)
+string(LENGTH "${_bridge_without_schema_receipts}" _bridge_length_without_schema_receipts)
+string(LENGTH "${_schema_revision_receipt_text}" _schema_revision_receipt_length)
+math(EXPR _schema_revision_receipt_count
+    "(${_bridge_length_with_schema_receipts} - ${_bridge_length_without_schema_receipts}) / ${_schema_revision_receipt_length}"
+)
+if(NOT _schema_revision_receipt_count EQUAL 2)
+    message(FATAL_ERROR
+        "Expected two render-scale schema-revision-14 receipt producers"
+    )
+endif()
+string(FIND
+    "${_bridge}"
+    "schema-revision-14"
+    _schema_revision_help_position
+)
+if(_schema_revision_help_position EQUAL -1)
+    message(FATAL_ERROR "Render-scale help does not advertise schema revision 14")
+endif()
+string(FIND
+    "${_replacement_telemetry_documentation}"
+    "schema revision 14"
+    _schema_revision_documentation_position
+)
+if(_schema_revision_documentation_position EQUAL -1)
+    message(FATAL_ERROR
+        "Replacement-telemetry documentation does not name schema revision 14"
+    )
+endif()
+string(FIND "${_bridge}" "schema-revision-12" _stale_schema_revision_position)
+if(NOT _stale_schema_revision_position EQUAL -1)
+    message(FATAL_ERROR "Stale render-scale schema revision 12 help remains")
+endif()
 
 foreach(_action IN ITEMS
     qualification_status
