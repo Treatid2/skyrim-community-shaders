@@ -80,6 +80,24 @@ namespace
 
 	std::string CanonicalLeasePath(const std::filesystem::path& a_path)
 	{
+#ifdef _WIN32
+		const HANDLE file = CreateFileW(
+			a_path.c_str(), FILE_READ_ATTRIBUTES,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+			nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+		if (file != INVALID_HANDLE_VALUE) {
+			BY_HANDLE_FILE_INFORMATION information{};
+			if (GetFileInformationByHandle(file, &information)) {
+				CloseHandle(file);
+				return std::format(
+					"file-id:{:08x}:{:08x}{:08x}",
+					information.dwVolumeSerialNumber,
+					information.nFileIndexHigh,
+					information.nFileIndexLow);
+			}
+			CloseHandle(file);
+		}
+#endif
 		std::error_code error;
 		auto canonical = std::filesystem::weakly_canonical(a_path, error);
 		if (error) {
@@ -99,11 +117,11 @@ namespace
 
 	std::string BuildWriterLeaseKey(
 		const std::filesystem::path& a_pathA,
-		const std::filesystem::path& a_pathB,
-		Util::ShaderCachePack::Lane a_lane)
+		const std::filesystem::path& a_pathB)
 	{
-		return CanonicalLeasePath(a_pathA) + '|' + CanonicalLeasePath(a_pathB) + '|' +
-		       std::to_string(static_cast<std::uint32_t>(a_lane));
+		std::array paths{ CanonicalLeasePath(a_pathA), CanonicalLeasePath(a_pathB) };
+		std::ranges::sort(paths);
+		return paths[0] + '|' + paths[1];
 	}
 
 	std::optional<std::uint64_t> ReadUnsigned(const nlohmann::json& a_value)
@@ -283,10 +301,15 @@ namespace Util::ShaderCachePack
 			return std::nullopt;
 		};
 		try {
+			const auto schemaVersionValue = a_manifest.find("schemaVersion");
+			const auto formatVersionValue = a_manifest.find("formatVersion");
+			const auto schemaVersion = schemaVersionValue == a_manifest.end() ? std::nullopt : ReadUnsigned(*schemaVersionValue);
+			const auto formatVersion = formatVersionValue == a_manifest.end() ? std::nullopt : ReadUnsigned(*formatVersionValue);
 			if (!a_manifest.is_object() ||
 				a_manifest.value("schema", std::string{}) != "csx.shader-cache.pack-manifest" ||
-				a_manifest.value("schemaVersion", 0) != 2 ||
-				a_manifest.value("formatVersion", 0) != kFormatVersion ||
+				!schemaVersion || *schemaVersion != 2 ||
+				!formatVersion || *formatVersion != kFormatVersion ||
+				a_manifest.value("fileStateSemantics", std::string{}) != "installation-baseline-v1" ||
 				a_manifest.value("hashAlgorithm", std::string{}) != "sha256" ||
 				a_manifest.value("runtime", std::string{}) != a_expectedRuntime ||
 				a_manifest.value("shaderCacheABI", std::string{}) != a_expectedShaderCacheABI) {
@@ -334,16 +357,17 @@ namespace Util::ShaderCachePack
 				std::string_view name;
 				Lane lane;
 				std::uint64_t* laneTotal;
-				std::uint64_t generation = 0;
+				std::size_t contractIndex;
 			};
 			std::uint64_t optimizedFileTotal = 0;
 			std::uint64_t developerFileTotal = 0;
 			std::array<ExpectedFile, 4> expected{ {
-				{ "Optimized.A.csxpack", Lane::Optimized, &optimizedFileTotal },
-				{ "Optimized.B.csxpack", Lane::Optimized, &optimizedFileTotal },
-				{ "Developer.A.csxpack", Lane::Developer, &developerFileTotal },
-				{ "Developer.B.csxpack", Lane::Developer, &developerFileTotal },
+				{ "Optimized.A.csxpack", Lane::Optimized, &optimizedFileTotal, 0 },
+				{ "Optimized.B.csxpack", Lane::Optimized, &optimizedFileTotal, 1 },
+				{ "Developer.A.csxpack", Lane::Developer, &developerFileTotal, 2 },
+				{ "Developer.B.csxpack", Lane::Developer, &developerFileTotal, 3 },
 			} };
+			std::array<ManifestContract::FileBaseline, 4> fileBaselines{};
 			for (auto& expectedFile : expected) {
 				const auto file = files->find(expectedFile.name);
 				if (file == files->end() || !file->is_object() || file->size() != 3)
@@ -361,14 +385,18 @@ namespace Util::ShaderCachePack
 					*recordCount > (std::numeric_limits<std::uint64_t>::max)() - *expectedFile.laneTotal) {
 					return reject("managed shader pack manifest file entry has invalid lane, generation, or record count");
 				}
-				expectedFile.generation = *generation;
+				fileBaselines[expectedFile.contractIndex] = {
+					.lane = expectedFile.lane,
+					.generation = *generation,
+					.recordCount = *recordCount,
+				};
 				*expectedFile.laneTotal += *recordCount;
 			}
 			auto adjacentGenerations = [](std::uint64_t a_first, std::uint64_t a_second) {
 				return a_first > a_second ? a_first - a_second == 1 : a_second - a_first == 1;
 			};
-			if (!adjacentGenerations(expected[0].generation, expected[1].generation) ||
-				!adjacentGenerations(expected[2].generation, expected[3].generation)) {
+			if (!adjacentGenerations(fileBaselines[0].generation, fileBaselines[1].generation) ||
+				!adjacentGenerations(fileBaselines[2].generation, fileBaselines[3].generation)) {
 				return reject("managed shader pack manifest has ambiguous A/B generations");
 			}
 			if (optimizedFileTotal != *optimizedRecordCount || developerFileTotal != *developerRecordCount)
@@ -380,12 +408,41 @@ namespace Util::ShaderCachePack
 				.packSetId = *packSetId,
 				.optimizedRecordCount = *optimizedRecordCount,
 				.developerRecordCount = *developerRecordCount,
+				.files = fileBaselines,
 			};
 		} catch (const std::exception& e) {
 			return reject(std::string("managed shader pack manifest validation failed: ") + e.what());
 		} catch (...) {
 			return reject("managed shader pack manifest validation failed");
 		}
+	}
+
+	bool ValidateManifestFileStates(
+		const ManifestContract& a_contract,
+		const std::array<PackFileState, 4>& a_files,
+		std::string* a_error)
+	{
+		for (std::size_t index = 0; index < a_files.size(); ++index) {
+			const auto& baseline = a_contract.files[index];
+			const auto& actual = a_files[index];
+			if (!actual.valid || actual.lane != baseline.lane || actual.packSetId != a_contract.packSetId) {
+				SetError(a_error, std::format("managed shader pack file {} has invalid identity, lane, or contents", index));
+				return false;
+			}
+			if (actual.generation < baseline.generation ||
+				(actual.generation == baseline.generation && actual.recordCount < baseline.recordCount)) {
+				SetError(a_error, std::format("managed shader pack file {} regresses below its manifest installation baseline", index));
+				return false;
+			}
+		}
+		if (a_files[0].generation == a_files[1].generation ||
+			a_files[2].generation == a_files[3].generation) {
+			SetError(a_error, "managed shader pack A/B generations are equal and therefore ambiguous");
+			return false;
+		}
+		if (a_error)
+			a_error->clear();
+		return true;
 	}
 
 	Store::Store(
@@ -410,7 +467,7 @@ namespace Util::ShaderCachePack
 			return false;
 		}
 
-		leaseKey = BuildWriterLeaseKey(pathA, pathB, lane);
+		leaseKey = BuildWriterLeaseKey(pathA, pathB);
 		{
 			std::lock_guard registryLock(g_writerLeaseRegistryMutex);
 			if (!g_writerLeaseRegistry.insert(leaseKey).second) {
@@ -422,28 +479,24 @@ namespace Util::ShaderCachePack
 
 #ifdef _WIN32
 		const auto digest = CryptoHash::Sha256Hex(leaseKey);
-		std::error_code error;
-		const auto leasePath =
-			std::filesystem::temp_directory_path(error) /
-			("CSX.ShaderCachePack." + digest + ".lock");
-		if (error) {
-			std::lock_guard registryLock(g_writerLeaseRegistryMutex);
-			g_writerLeaseRegistry.erase(leaseKey);
-			leaseKey.clear();
-			SetError(a_error, "failed to resolve managed shader pack writer-lease directory");
-			return false;
-		}
-		leaseHandle = CreateFileW(
-			leasePath.c_str(),
-			GENERIC_READ | GENERIC_WRITE,
-			FILE_SHARE_READ,
-			nullptr,
-			OPEN_ALWAYS,
-			FILE_ATTRIBUTE_TEMPORARY,
-			nullptr);
+		const auto leaseName = std::wstring(L"\\\\.\\pipe\\CSX.ShaderCachePack.") +
+		                       std::wstring(digest.begin(), digest.end());
+		// The pipe is never connected. FILE_FLAG_FIRST_PIPE_INSTANCE turns its
+		// machine-wide kernel name into a handle-owned lease: another process
+		// cannot create the same instance, CloseHandle is thread-agnostic, and
+		// Windows reclaims it if the owner terminates.
+		SetLastError(ERROR_SUCCESS);
+		leaseHandle = CreateNamedPipeW(
+			leaseName.c_str(),
+			PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+			PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+			1, 1, 1, 0, nullptr);
+		const auto leaseError = GetLastError();
 		if (leaseHandle == INVALID_HANDLE_VALUE) {
-			SetError(a_error, "managed shader pack writer lease is held by another process");
 			leaseHandle = nullptr;
+			SetError(a_error, std::format(
+								  "managed shader pack writer lease is held or unavailable (Windows error {})",
+								  leaseError));
 			std::lock_guard registryLock(g_writerLeaseRegistryMutex);
 			g_writerLeaseRegistry.erase(leaseKey);
 			leaseKey.clear();
@@ -452,6 +505,23 @@ namespace Util::ShaderCachePack
 #endif
 		leaseOwned = true;
 		return true;
+	}
+
+	std::array<PackFileState, 2> Store::GetFileStates() const
+	{
+		std::shared_lock lock(mutex);
+		auto state = [&](const ScannedFile& a_file) {
+			return PackFileState{
+				.packSetId = packSetId,
+				.lane = lane,
+				.valid = a_file.valid,
+				.generation = a_file.generation,
+				.recordCount = a_file.records.size(),
+			};
+		};
+		const auto& fileA = active.path == pathA ? active : fallback;
+		const auto& fileB = active.path == pathB ? active : fallback;
+		return { state(fileA), state(fileB) };
 	}
 
 	void Store::ReleaseWriterLease() noexcept
@@ -616,14 +686,19 @@ namespace Util::ShaderCachePack
 	{
 		try {
 			std::unique_lock lock(mutex);
-			return OpenLocked(a_error);
+			const bool result = OpenLocked(a_error);
+			if (!result)
+				ReleaseWriterLease();
+			return result;
 		} catch (const std::exception& e) {
 			SetError(a_error, e.what());
 			opened = false;
+			ReleaseWriterLease();
 			return false;
 		} catch (...) {
 			SetError(a_error, "unknown shader pack open failure");
 			opened = false;
+			ReleaseWriterLease();
 			return false;
 		}
 	}
@@ -661,13 +736,33 @@ namespace Util::ShaderCachePack
 			return false;
 		}
 		if (!a.valid && !b.valid) {
-			ScannedFile* empty = a.exists && a.fileSize == 0 ? &a : (b.exists && b.fileSize == 0 ? &b : nullptr);
-			if (!empty || !InitializeEmpty(*empty, 1, a_error)) {
-				if (!empty)
+			ScannedFile* emptyA = a.exists && a.fileSize == 0 ? &a : nullptr;
+			ScannedFile* emptyB = b.exists && b.fileSize == 0 ? &b : nullptr;
+			if (!emptyA && !emptyB) {
+				SetError(a_error, std::format("both managed pack generations are invalid (A='{}', B='{}')", a.diagnostic, b.diagnostic));
+				opened = false;
+				return false;
+			}
+			if (emptyA && !InitializeEmpty(*emptyA, 1, a_error)) {
+				opened = false;
+				return false;
+			}
+			if (emptyB && !InitializeEmpty(*emptyB, emptyA ? 0 : 1, a_error)) {
+				if (!emptyA)
 					SetError(a_error, std::format("both managed pack generations are invalid (A='{}', B='{}')", a.diagnostic, b.diagnostic));
 				opened = false;
 				return false;
 			}
+		}
+		if (a.valid && !b.valid && b.exists && b.fileSize == 0 &&
+			!InitializeEmpty(b, a.generation == 0 ? 1 : a.generation - 1, a_error)) {
+			opened = false;
+			return false;
+		}
+		if (b.valid && !a.valid && a.exists && a.fileSize == 0 &&
+			!InitializeEmpty(a, b.generation == 0 ? 1 : b.generation - 1, a_error)) {
+			opened = false;
+			return false;
 		}
 		std::string degraded;
 		if (!a.diagnostic.empty())

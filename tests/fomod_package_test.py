@@ -44,6 +44,7 @@ class FomodPackageTests(unittest.TestCase):
                     "schema": "csx.shader-cache.pack-manifest",
                     "schemaVersion": 2,
                     "formatVersion": 1,
+                    "fileStateSemantics": "installation-baseline-v1",
                     "hashAlgorithm": "sha256",
                     "packSetId": pack_set_id,
                     "runtime": contract_runtime,

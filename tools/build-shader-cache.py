@@ -435,6 +435,8 @@ def validate_shader_pack(
         records += 1
         offset += total_size
     return {
+        "lane": lane,
+        "valid": True,
         "generation": generation,
         "recordCount": records,
         "packSetId": pack_set_id.hex(),
@@ -458,12 +460,34 @@ def validate_pack_manifest_contract(
     """Validate the canonical manifest/file contract used by all packagers."""
     if not isinstance(pack_manifest, dict):
         raise SystemExit("managed pack manifest must be an object")
+
+    # JSON booleans and floats are not version integers even though Python's
+    # ordinary equality would make True == 1 and 2.0 == 2.
+    def manifest_count(value: object, label: str) -> int:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            or value > 0xFFFFFFFFFFFFFFFF
+        ):
+            raise SystemExit(
+                f"managed pack manifest {label} must be a nonnegative integer"
+            )
+        return value
+
     pack_set_id = pack_manifest.get("packSetId")
     variants = pack_manifest.get("compatibilityVariants")
+    schema_version = manifest_count(
+        pack_manifest.get("schemaVersion"), "schemaVersion"
+    )
+    format_version = manifest_count(
+        pack_manifest.get("formatVersion"), "formatVersion"
+    )
     if (
         pack_manifest.get("schema") != "csx.shader-cache.pack-manifest"
-        or pack_manifest.get("schemaVersion") != PACK_MANIFEST_SCHEMA_VERSION
-        or pack_manifest.get("formatVersion") != PACK_FORMAT_VERSION
+        or schema_version != PACK_MANIFEST_SCHEMA_VERSION
+        or format_version != PACK_FORMAT_VERSION
+        or pack_manifest.get("fileStateSemantics") != "installation-baseline-v1"
         or pack_manifest.get("hashAlgorithm") != "sha256"
         or pack_manifest.get("runtime") != expected_runtime
         or pack_manifest.get("shaderCacheABI") != expected_shader_cache_abi
@@ -478,15 +502,6 @@ def validate_pack_manifest_contract(
 
     if set(pack_stats) != set(PACK_FILE_NAMES):
         raise SystemExit("managed pack validation requires exactly four fixed pack files")
-
-    # bool is an int subclass in Python; reject it explicitly so package admission
-    # matches the runtime JSON contract rather than accepting false as zero.
-    def manifest_count(value: object, label: str) -> int:
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise SystemExit(
-                f"managed pack manifest {label} must be a nonnegative integer"
-            )
-        return value
 
     optimized_count = manifest_count(
         pack_manifest.get("optimizedRecordCount"), "optimizedRecordCount"
@@ -524,40 +539,61 @@ def validate_pack_manifest_contract(
                 f"managed pack manifest has the wrong lane for {file_name}"
             )
 
-    expected_files = {
-        file_name: {
-            "lane": 1 if file_name.startswith("Optimized") else 2,
-            "generation": stats["generation"],
-            "recordCount": stats["recordCount"],
-        }
-        for file_name, stats in pack_stats.items()
-    }
     if (
-        manifest_files != expected_files
-        or optimized_count
+        optimized_count
         != sum(
-            int(pack_stats[name]["recordCount"])
+            manifest_count(
+                manifest_files[name]["recordCount"], f"{name}.recordCount"
+            )
             for name in PACK_FILE_NAMES
             if name.startswith("Optimized")
         )
         or developer_count
         != sum(
-            int(pack_stats[name]["recordCount"])
+            manifest_count(
+                manifest_files[name]["recordCount"], f"{name}.recordCount"
+            )
             for name in PACK_FILE_NAMES
             if name.startswith("Developer")
         )
     ):
         raise SystemExit("managed pack manifest disagrees with its pack files")
+    for file_name, stats in pack_stats.items():
+        expected_lane = 1 if file_name.startswith("Optimized") else 2
+        actual_lane = manifest_count(
+            stats.get("lane", expected_lane), f"actual {file_name}.lane"
+        )
+        actual_generation = manifest_count(
+            stats.get("generation"), f"actual {file_name}.generation"
+        )
+        actual_record_count = manifest_count(
+            stats.get("recordCount"), f"actual {file_name}.recordCount"
+        )
+        baseline = manifest_files[file_name]
+        baseline_generation = manifest_count(
+            baseline["generation"], f"{file_name}.generation"
+        )
+        baseline_record_count = manifest_count(
+            baseline["recordCount"], f"{file_name}.recordCount"
+        )
+        if stats.get("valid", True) is not True or actual_lane != expected_lane:
+            raise SystemExit("managed pack manifest disagrees with its pack files")
+        if stats.get("packSetId") != pack_set_id:
+            raise SystemExit("managed pack manifest disagrees with its pack files")
+        if actual_generation < baseline_generation or (
+            actual_generation == baseline_generation
+            and actual_record_count < baseline_record_count
+        ):
+            raise SystemExit("managed pack manifest disagrees with its pack files")
     for first, second in (
         ("Optimized.A.csxpack", "Optimized.B.csxpack"),
         ("Developer.A.csxpack", "Developer.B.csxpack"),
     ):
-        if abs(
-            int(pack_stats[first]["generation"])
-            - int(pack_stats[second]["generation"])
-        ) != 1:
+        if int(pack_stats[first]["generation"]) == int(
+            pack_stats[second]["generation"]
+        ):
             raise SystemExit(
-                f"managed cache lane has invalid A/B generations: {first}, {second}"
+                f"managed cache lane has ambiguous A/B generations: {first}, {second}"
             )
     return pack_manifest
 
@@ -710,6 +746,7 @@ def build_managed_shader_packs(
         "schema": "csx.shader-cache.pack-manifest",
         "schemaVersion": PACK_MANIFEST_SCHEMA_VERSION,
         "formatVersion": PACK_FORMAT_VERSION,
+        "fileStateSemantics": "installation-baseline-v1",
         "hashAlgorithm": "sha256",
         "packSetId": pack_set_id,
         "runtime": runtime,

@@ -50,6 +50,7 @@ namespace
 			{ "schema", "csx.shader-cache.pack-manifest" },
 			{ "schemaVersion", 2 },
 			{ "formatVersion", 1 },
+			{ "fileStateSemantics", "installation-baseline-v1" },
 			{ "hashAlgorithm", "sha256" },
 			{ "packSetId", "53000000000000000000000000000000" },
 			{ "runtime", "VR" },
@@ -67,12 +68,45 @@ namespace
 		};
 	}
 
+	bool ValidateOptimizedStore(
+		const Store& a_store,
+		const ManifestContract& a_contract,
+		std::string* a_error)
+	{
+		const auto optimized = a_store.GetFileStates();
+		std::array<PackFileState, 4> states{
+			optimized[0],
+			optimized[1],
+			PackFileState{ a_contract.packSetId, Lane::Developer, true, a_contract.files[2].generation, a_contract.files[2].recordCount },
+			PackFileState{ a_contract.packSetId, Lane::Developer, true, a_contract.files[3].generation, a_contract.files[3].recordCount },
+		};
+		return ValidateManifestFileStates(a_contract, states, a_error);
+	}
+
 #ifdef _WIN32
+	std::optional<std::wstring> ReadEnvironmentVariable(const wchar_t* a_name)
+	{
+		const DWORD required = GetEnvironmentVariableW(a_name, nullptr, 0);
+		if (required == 0)
+			return std::nullopt;
+		std::wstring value(required, L'\0');
+		const DWORD written = GetEnvironmentVariableW(a_name, value.data(), required);
+		assert(written + 1 == required);
+		value.resize(written);
+		return value;
+	}
+
+	void RestoreEnvironmentVariable(const wchar_t* a_name, const std::optional<std::wstring>& a_value)
+	{
+		assert(SetEnvironmentVariableW(a_name, a_value ? a_value->c_str() : nullptr));
+	}
+
 	int RunLeaseProbe(
 		const std::filesystem::path& a_executable,
 		const std::filesystem::path& a_first,
 		const std::filesystem::path& a_second,
-		bool a_expectOpen)
+		bool a_expectOpen,
+		const std::filesystem::path& a_childTemp = {})
 	{
 		auto quote = [](const std::filesystem::path& a_value) {
 			return L"\"" + a_value.wstring() + L"\"";
@@ -83,7 +117,48 @@ namespace
 		STARTUPINFOW startup{};
 		startup.cb = sizeof(startup);
 		PROCESS_INFORMATION process{};
+		const auto originalTemp = ReadEnvironmentVariable(L"TEMP");
+		const auto originalTmp = ReadEnvironmentVariable(L"TMP");
+		if (!a_childTemp.empty()) {
+			std::filesystem::create_directories(a_childTemp);
+			assert(SetEnvironmentVariableW(L"TEMP", a_childTemp.c_str()));
+			assert(SetEnvironmentVariableW(L"TMP", a_childTemp.c_str()));
+		}
 		assert(CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process));
+		RestoreEnvironmentVariable(L"TEMP", originalTemp);
+		RestoreEnvironmentVariable(L"TMP", originalTmp);
+		assert(WaitForSingleObject(process.hProcess, 30000) == WAIT_OBJECT_0);
+		DWORD exitCode = 1;
+		assert(GetExitCodeProcess(process.hProcess, &exitCode));
+		CloseHandle(process.hThread);
+		CloseHandle(process.hProcess);
+		return static_cast<int>(exitCode);
+	}
+
+	int RunLeaseMutationProbe(
+		const std::filesystem::path& a_executable,
+		const std::filesystem::path& a_first,
+		const std::filesystem::path& a_second,
+		std::string_view a_operation,
+		const std::filesystem::path& a_childTemp)
+	{
+		auto quote = [](const std::filesystem::path& a_value) {
+			return L"\"" + a_value.wstring() + L"\"";
+		};
+		const std::wstring operation(a_operation.begin(), a_operation.end());
+		std::wstring command = quote(a_executable) + L" --lease-mutation-probe " +
+		                       quote(a_first) + L" " + quote(a_second) + L" " + operation;
+		STARTUPINFOW startup{};
+		startup.cb = sizeof(startup);
+		PROCESS_INFORMATION process{};
+		const auto originalTemp = ReadEnvironmentVariable(L"TEMP");
+		const auto originalTmp = ReadEnvironmentVariable(L"TMP");
+		std::filesystem::create_directories(a_childTemp);
+		assert(SetEnvironmentVariableW(L"TEMP", a_childTemp.c_str()));
+		assert(SetEnvironmentVariableW(L"TMP", a_childTemp.c_str()));
+		assert(CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process));
+		RestoreEnvironmentVariable(L"TEMP", originalTemp);
+		RestoreEnvironmentVariable(L"TMP", originalTmp);
 		assert(WaitForSingleObject(process.hProcess, 30000) == WAIT_OBJECT_0);
 		DWORD exitCode = 1;
 		assert(GetExitCodeProcess(process.hProcess, &exitCode));
@@ -96,7 +171,8 @@ namespace
 		const std::filesystem::path& a_executable,
 		const std::filesystem::path& a_first,
 		const std::filesystem::path& a_second,
-		const std::filesystem::path& a_ready)
+		const std::filesystem::path& a_ready,
+		const std::filesystem::path& a_childTemp = {})
 	{
 		auto quote = [](const std::filesystem::path& a_value) {
 			return L"\"" + a_value.wstring() + L"\"";
@@ -106,7 +182,16 @@ namespace
 		STARTUPINFOW startup{};
 		startup.cb = sizeof(startup);
 		PROCESS_INFORMATION process{};
+		const auto originalTemp = ReadEnvironmentVariable(L"TEMP");
+		const auto originalTmp = ReadEnvironmentVariable(L"TMP");
+		if (!a_childTemp.empty()) {
+			std::filesystem::create_directories(a_childTemp);
+			assert(SetEnvironmentVariableW(L"TEMP", a_childTemp.c_str()));
+			assert(SetEnvironmentVariableW(L"TMP", a_childTemp.c_str()));
+		}
 		assert(CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process));
+		RestoreEnvironmentVariable(L"TEMP", originalTemp);
+		RestoreEnvironmentVariable(L"TMP", originalTmp);
 		for (unsigned attempt = 0; attempt < 500 && !std::filesystem::exists(a_ready); ++attempt)
 			Sleep(10);
 		assert(std::filesystem::exists(a_ready));
@@ -163,6 +248,10 @@ int main(int argc, char** argv)
 	static_assert(!ShouldReadLooseBlob(true, true));
 	static_assert(ClassifyLayoutMembers({ false, false, false, false, false }) == LayoutState::Absent);
 	static_assert(ClassifyLayoutMembers({ true, true, true, true, true }) == LayoutState::Complete);
+	static_assert(ClassifyValidatedLayout(LayoutState::Complete, true, true) == LayoutState::Complete);
+	static_assert(ClassifyValidatedLayout(LayoutState::Complete, false, true) == LayoutState::PartialOrInvalid);
+	static_assert(ClassifyValidatedLayout(LayoutState::Complete, true, false) == LayoutState::PartialOrInvalid);
+	static_assert(ClassifyValidatedLayout(LayoutState::PartialOrInvalid, true, true) == LayoutState::PartialOrInvalid);
 
 	for (std::uint32_t mask = 0; mask < 32; ++mask) {
 		std::array<bool, 5> present{};
@@ -181,6 +270,23 @@ int main(int argc, char** argv)
 		const bool opened = external.Open(&error);
 		const bool expected = std::string_view(argv[4]) == "open";
 		return opened == expected ? 0 : 1;
+	}
+	if (argc == 5 && std::string_view(argv[1]) == "--lease-mutation-probe") {
+		std::string error;
+		Store external(argv[2], argv[3], Lane::Optimized, TestPackSetId());
+		const auto operation = std::string_view(argv[4]);
+		bool mutationSucceeded = false;
+		if (operation == "append")
+			mutationSucceeded = external.Append(MakeEntry("blocked", "blocked-exact", 0x7f), &error);
+		else if (operation == "checkpoint")
+			mutationSucceeded = external.Checkpoint(&error);
+		else if (operation == "compact")
+			mutationSucceeded = external.Compact(&error);
+		else if (operation == "reset")
+			mutationSucceeded = external.Reset(&error) != ResetDisposition::FailedBeforeCommit;
+		else
+			return 2;
+		return !mutationSucceeded && !error.empty() ? 0 : 1;
 	}
 #ifdef _WIN32
 	if (argc == 5 && std::string_view(argv[1]) == "--lease-hold") {
@@ -210,7 +316,11 @@ int main(int argc, char** argv)
 	{
 		std::string manifestError;
 		const auto valid = MakePackManifest();
-		assert(ParseManifestContract(valid, "VR", "test-abi", &manifestError));
+		const auto contract = ParseManifestContract(valid, "VR", "test-abi", &manifestError);
+		assert(contract);
+		assert(contract->files[0].lane == Lane::Optimized);
+		assert(contract->files[0].generation == 1);
+		assert(contract->files[0].recordCount == 3);
 		auto expectRejected = [&](nlohmann::json manifest) {
 			manifestError.clear();
 			assert(!ParseManifestContract(manifest, "VR", "test-abi", &manifestError));
@@ -226,6 +336,12 @@ int main(int argc, char** argv)
 		auto wrongCountType = valid;
 		wrongCountType["optimizedRecordCount"] = "3";
 		expectRejected(std::move(wrongCountType));
+		auto booleanSchemaVersion = valid;
+		booleanSchemaVersion["schemaVersion"] = true;
+		expectRejected(std::move(booleanSchemaVersion));
+		auto floatingFormatVersion = valid;
+		floatingFormatVersion["formatVersion"] = 1.0;
+		expectRejected(std::move(floatingFormatVersion));
 		auto missingFile = valid;
 		missingFile["files"].erase("Developer.B.csxpack");
 		expectRejected(std::move(missingFile));
@@ -241,6 +357,153 @@ int main(int argc, char** argv)
 		auto duplicateVariant = valid;
 		duplicateVariant["compatibilityVariants"].push_back("default");
 		expectRejected(std::move(duplicateVariant));
+	}
+
+	// One data corpus is evaluated by this runtime-unit test and the Python
+	// archive/FOMOD validator test so admission decisions cannot drift silently.
+	{
+		const auto corpusPath = std::filesystem::path(__FILE__).parent_path() / "data" /
+		                        "shader_cache_pack_contract_cases.json";
+		std::ifstream corpusStream(corpusPath);
+		assert(corpusStream);
+		nlohmann::json corpus;
+		corpusStream >> corpus;
+		assert(corpus["schemaVersion"] == 1);
+		auto unescapePointerToken = [](std::string value) {
+			for (std::size_t index = 0; (index = value.find("~1", index)) != std::string::npos;)
+				value.replace(index, 2, "/");
+			for (std::size_t index = 0; (index = value.find("~0", index)) != std::string::npos;)
+				value.replace(index, 2, "~");
+			return value;
+		};
+		auto fileIndex = [](std::string_view a_name) -> std::size_t {
+			if (a_name == "Optimized.A.csxpack")
+				return 0;
+			if (a_name == "Optimized.B.csxpack")
+				return 1;
+			if (a_name == "Developer.A.csxpack")
+				return 2;
+			assert(a_name == "Developer.B.csxpack");
+			return 3;
+		};
+		for (const auto& testCase : corpus["cases"]) {
+			auto manifest = MakePackManifest();
+			for (const auto& [pointer, value] : testCase.value("manifestOverrides", nlohmann::json::object()).items())
+				manifest[nlohmann::json::json_pointer(pointer)] = value;
+			for (const auto& pointerValue : testCase.value("manifestRemovals", nlohmann::json::array())) {
+				const auto pointer = pointerValue.get<std::string>();
+				const auto separator = pointer.find_last_of('/');
+				assert(separator != std::string::npos);
+				auto& parent = separator == 0 ? manifest : manifest.at(nlohmann::json::json_pointer(pointer.substr(0, separator)));
+				parent.erase(unescapePointerToken(pointer.substr(separator + 1)));
+			}
+
+			std::string diagnostic;
+			const auto contract = ParseManifestContract(manifest, "VR", "test-abi", &diagnostic);
+			bool accepted = false;
+			if (contract) {
+				std::array<PackFileState, 4> states{
+					PackFileState{ TestPackSetId(), Lane::Optimized, true, 1, 3 },
+					PackFileState{ TestPackSetId(), Lane::Optimized, true, 0, 0 },
+					PackFileState{ TestPackSetId(), Lane::Developer, true, 1, 0 },
+					PackFileState{ TestPackSetId(), Lane::Developer, true, 0, 0 },
+				};
+				for (const auto& [name, overrides] : testCase.value("fileOverrides", nlohmann::json::object()).items()) {
+					auto& state = states[fileIndex(name)];
+					if (const auto found = overrides.find("packSetId"); found != overrides.end())
+						state.packSetId = ParsePackSetId(found->get_ref<const std::string&>());
+					if (const auto found = overrides.find("lane"); found != overrides.end())
+						state.lane = static_cast<Lane>(found->get<std::uint32_t>());
+					if (const auto found = overrides.find("valid"); found != overrides.end())
+						state.valid = found->get<bool>();
+					if (const auto found = overrides.find("generation"); found != overrides.end())
+						state.generation = found->get<std::uint64_t>();
+					if (const auto found = overrides.find("recordCount"); found != overrides.end())
+						state.recordCount = found->get<std::uint64_t>();
+				}
+				accepted = ValidateManifestFileStates(*contract, states, &diagnostic);
+			}
+			assert(accepted == testCase["accepted"].get<bool>());
+		}
+	}
+
+	// Fixed names alone do not make a managed layout authoritative. Every member
+	// must be an openable regular pack file satisfying its manifest baseline.
+	{
+		const auto invalidLayoutRoot = root / "invalid-layout";
+		std::filesystem::create_directories(invalidLayoutRoot);
+		const auto directoryMember = invalidLayoutRoot / "Optimized.A.csxpack";
+		const auto regularMember = invalidLayoutRoot / "Optimized.B.csxpack";
+		std::filesystem::create_directories(directoryMember);
+		std::ofstream(regularMember, std::ios::binary).close();
+		std::string layoutError;
+		Store directoryLayout(directoryMember, regularMember, Lane::Optimized, TestPackSetId());
+		assert(!directoryLayout.Open(&layoutError));
+		assert(!layoutError.empty());
+		assert(std::filesystem::file_size(regularMember) == 0);
+	}
+	{
+		const auto invalidLayoutRoot = root / "malformed-layout";
+		std::filesystem::create_directories(invalidLayoutRoot);
+		const auto malformedMember = invalidLayoutRoot / "Optimized.A.csxpack";
+		const auto regularMember = invalidLayoutRoot / "Optimized.B.csxpack";
+		std::ofstream(malformedMember, std::ios::binary).write("bad", 3);
+		std::ofstream(regularMember, std::ios::binary).close();
+		std::string layoutError;
+		Store malformedLayout(malformedMember, regularMember, Lane::Optimized, TestPackSetId());
+		assert(malformedLayout.Open(&layoutError));
+		const auto contract = ParseManifestContract(MakePackManifest(), "VR", "test-abi", &layoutError);
+		assert(contract);
+		assert(!ValidateOptimizedStore(malformedLayout, *contract, &layoutError));
+		assert(!layoutError.empty());
+	}
+#ifdef _WIN32
+	{
+		const auto unreadableRoot = root / "unreadable-layout";
+		std::filesystem::create_directories(unreadableRoot);
+		const auto first = unreadableRoot / "Optimized.A.csxpack";
+		const auto second = unreadableRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		{
+			std::string setupError;
+			Store setup(first, second, Lane::Optimized, TestPackSetId());
+			assert(setup.Open(&setupError));
+		}
+		const HANDLE blocker = CreateFileW(
+			first.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+		assert(blocker != INVALID_HANDLE_VALUE);
+		const auto secondSize = std::filesystem::file_size(second);
+		std::string unreadableError;
+		Store unreadable(first, second, Lane::Optimized, TestPackSetId());
+		assert(!unreadable.Open(&unreadableError));
+		assert(!unreadableError.empty());
+		assert(std::filesystem::file_size(second) == secondSize);
+		CloseHandle(blocker);
+		std::string repairedError;
+		Store repaired(first, second, Lane::Optimized, TestPackSetId());
+		assert(repaired.Open(&repairedError));
+	}
+#endif
+	{
+		const auto mismatchRoot = root / "header-mismatch-layout";
+		std::filesystem::create_directories(mismatchRoot);
+		const auto first = mismatchRoot / "Optimized.A.csxpack";
+		const auto second = mismatchRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		{
+			std::string setupError;
+			Store setup(first, second, Lane::Optimized, TestPackSetId());
+			assert(setup.Open(&setupError));
+		}
+		PackSetId otherSet = TestPackSetId();
+		otherSet.back() = std::byte{ 0x7f };
+		std::string mismatchError;
+		Store wrongIdentity(first, second, Lane::Optimized, otherSet);
+		assert(!wrongIdentity.Open(&mismatchError));
+		Store wrongLane(first, second, Lane::Developer, TestPackSetId());
+		assert(!wrongLane.Open(&mismatchError));
 	}
 
 	// The reserved zero identity is rejected before either fixed file is mutated.
@@ -315,9 +578,17 @@ int main(int argc, char** argv)
 		std::string leaseError;
 		Store owner(first, second, Lane::Optimized, setID);
 		assert(owner.Open(&leaseError));
+		const auto firstSize = std::filesystem::file_size(first);
+		const auto secondSize = std::filesystem::file_size(second);
 		Store contender(first, second, Lane::Optimized, setID);
 		assert(!contender.Open(&leaseError));
 		assert(!leaseError.empty());
+		Store reversed(second, first, Lane::Optimized, setID);
+		assert(!reversed.Open(&leaseError));
+		Store wrongLane(first, second, Lane::Developer, setID);
+		assert(!wrongLane.Open(&leaseError));
+		assert(std::filesystem::file_size(first) == firstSize);
+		assert(std::filesystem::file_size(second) == secondSize);
 		bool threadOpened = true;
 		std::jthread contenderThread([&] {
 			std::string threadError;
@@ -331,7 +602,19 @@ int main(int argc, char** argv)
 		contenderThread.join();
 		assert(!threadOpened);
 #ifdef _WIN32
-		assert(RunLeaseProbe(argv[0], first, second, false) == 0);
+		assert(RunLeaseProbe(argv[0], second, first, false, leaseRoot / "alternate-temp") == 0);
+		const auto aliasFirst = leaseRoot / "Optimized.A.alias.csxpack";
+		const auto aliasSecond = leaseRoot / "Optimized.B.alias.csxpack";
+		assert(CreateHardLinkW(aliasFirst.c_str(), first.c_str(), nullptr));
+		assert(CreateHardLinkW(aliasSecond.c_str(), second.c_str(), nullptr));
+		assert(RunLeaseProbe(argv[0], aliasFirst, aliasSecond, false) == 0);
+		for (const auto operation : { "append", "checkpoint", "compact", "reset" }) {
+			assert(RunLeaseMutationProbe(
+					   argv[0], second, first, operation,
+					   leaseRoot / (std::string("mutation-temp-") + operation)) == 0);
+			assert(std::filesystem::file_size(first) == firstSize);
+			assert(std::filesystem::file_size(second) == secondSize);
+		}
 #endif
 	}
 
@@ -361,9 +644,23 @@ int main(int argc, char** argv)
 		const auto leaseRoot = root / "lease";
 		assert(RunLeaseProbe(
 				   argv[0],
-				   leaseRoot / "Optimized.A.csxpack",
 				   leaseRoot / "Optimized.B.csxpack",
+				   leaseRoot / "Optimized.A.csxpack",
 				   true) == 0);
+	}
+	{
+		const auto releaseRoot = root / "cross-thread-release";
+		std::filesystem::create_directories(releaseRoot);
+		const auto first = releaseRoot / "Optimized.A.csxpack";
+		const auto second = releaseRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		auto owner = std::make_unique<Store>(first, second, Lane::Optimized, TestPackSetId());
+		std::string releaseError;
+		assert(owner->Open(&releaseError));
+		std::jthread releaser([owned = std::move(owner)]() mutable { owned.reset(); });
+		releaser.join();
+		assert(RunLeaseProbe(argv[0], first, second, true) == 0);
 	}
 	{
 		const auto abandonedRoot = root / "abandoned-lease";
@@ -373,7 +670,7 @@ int main(int argc, char** argv)
 		const auto ready = abandonedRoot / "ready";
 		std::ofstream(first, std::ios::binary).close();
 		std::ofstream(second, std::ios::binary).close();
-		TerminateLeaseHolder(argv[0], first, second, ready);
+		TerminateLeaseHolder(argv[0], first, second, ready, abandonedRoot / "holder-temp");
 		std::string leaseError;
 		Store recoveredLease(first, second, Lane::Optimized, TestPackSetId());
 		assert(recoveredLease.Open(&leaseError));
@@ -393,6 +690,16 @@ int main(int argc, char** argv)
 		assert(store.Append(MakeEntry("water|provider=1", "water|source=new|provider=1", 0x22), &error));
 		assert(store.Append(MakeEntry("water|provider=2", "water|source=new|provider=2", 0x33), &error));
 		assert(store.Checkpoint(&error));
+		const auto contract = ParseManifestContract(MakePackManifest(), "VR", "test-abi", &error);
+		assert(contract);
+		assert(ValidateOptimizedStore(store, *contract, &error));
+		auto swappedManifest = MakePackManifest();
+		std::swap(
+			swappedManifest["files"]["Optimized.A.csxpack"],
+			swappedManifest["files"]["Optimized.B.csxpack"]);
+		const auto swappedContract = ParseManifestContract(swappedManifest, "VR", "test-abi", &error);
+		assert(swappedContract);
+		assert(!ValidateOptimizedStore(store, *swappedContract, &error));
 
 		auto old = store.Find("water|source=old|provider=1", &error);
 		auto current = store.Find("water|source=new|provider=1", &error);
@@ -419,6 +726,11 @@ int main(int argc, char** argv)
 	// Compaction retains the latest exact record per logical/compatibility key in
 	// the new generation while the previous generation remains searchable.
 	assert(recovered.Compact(&error));
+	{
+		const auto contract = ParseManifestContract(MakePackManifest(), "VR", "test-abi", &error);
+		assert(contract);
+		assert(ValidateOptimizedStore(recovered, *contract, &error));
+	}
 	const auto compacted = recovered.GetStats();
 	assert(compacted.activeGeneration == 2);
 	assert(compacted.recordCount == 2);
@@ -440,6 +752,11 @@ int main(int argc, char** argv)
 	// Reset first commits a new generation barrier, so a failed cleanup cannot
 	// make any record from the prior generation visible again.
 	assert(recovered.Reset(&error) == ResetDisposition::Complete);
+	{
+		const auto contract = ParseManifestContract(MakePackManifest(), "VR", "test-abi", &error);
+		assert(contract);
+		assert(ValidateOptimizedStore(recovered, *contract, &error));
+	}
 	assert(recovered.GetStats().activeGeneration == 5);
 	assert(!recovered.Find("water|source=newest|provider=1", &error));
 	assert(recovered.Append(MakeEntry("water|provider=1", "water|source=reset|provider=1", 0x55), &error));

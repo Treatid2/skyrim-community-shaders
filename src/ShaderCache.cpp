@@ -607,22 +607,10 @@ namespace SIE
 						packPaths[0], packPaths[1], Util::ShaderCachePack::Lane::Optimized, contract->packSetId);
 					packs.developer = std::make_unique<Util::ShaderCachePack::Store>(
 						packPaths[2], packPaths[3], Util::ShaderCachePack::Lane::Developer, contract->packSetId);
-					packs.layoutState = Util::ShaderCachePack::LayoutState::Complete;
-
 					auto openLane = [&](Util::ShaderCachePack::Store& a_store,
-										std::atomic_bool& a_available,
-										std::string_view a_name,
-										std::uint64_t a_expectedCount) {
+										std::string_view a_name) {
 						std::string diagnostic;
-						bool opened = a_store.Open(&diagnostic);
-						if (opened) {
-							const auto stats = a_store.GetStats();
-							if (stats.activeGeneration == 1 && stats.recordCount < a_expectedCount) {
-								opened = false;
-								diagnostic = std::format("{} pack contains fewer records than its manifest contract", a_name);
-							}
-						}
-						a_available.store(opened, std::memory_order_release);
+						const bool opened = a_store.Open(&diagnostic);
 						if (!opened)
 							logger::warn("{} managed shader pack unavailable: {}", a_name, diagnostic);
 						else if (!diagnostic.empty())
@@ -632,14 +620,31 @@ namespace SIE
 
 					const bool optimizedOpen = openLane(
 						*packs.optimized,
-						packs.optimizedAvailable,
-						"Optimized",
-						contract->optimizedRecordCount);
+						"Optimized");
 					const bool developerOpen = openLane(
 						*packs.developer,
-						packs.developerAvailable,
-						"Developer",
-						contract->developerRecordCount);
+						"Developer");
+
+					bool manifestFilesValid = false;
+					if (optimizedOpen && developerOpen) {
+						const auto optimizedStates = packs.optimized->GetFileStates();
+						const auto developerStates = packs.developer->GetFileStates();
+						const std::array states{
+							optimizedStates[0], optimizedStates[1], developerStates[0], developerStates[1]
+						};
+						manifestFilesValid = Util::ShaderCachePack::ValidateManifestFileStates(
+							*contract, states, &manifestError);
+					}
+					packs.optimizedAvailable.store(manifestFilesValid, std::memory_order_release);
+					packs.developerAvailable.store(manifestFilesValid, std::memory_order_release);
+
+					packs.layoutState = Util::ShaderCachePack::ClassifyValidatedLayout(
+						memberState, manifestFilesValid, manifestFilesValid);
+					if (packs.layoutState != Util::ShaderCachePack::LayoutState::Complete) {
+						logger::error(
+							"Managed shader pack layout is not fully valid; retaining legacy loose-cache fallback: {}",
+							manifestError);
+					}
 
 					logger::info(
 						"Managed shader pack layout initialized (optimized={}, developer={})",

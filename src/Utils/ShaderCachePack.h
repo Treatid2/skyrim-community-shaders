@@ -48,11 +48,40 @@ namespace Util::ShaderCachePack
 		return LayoutState::PartialOrInvalid;
 	}
 
+	constexpr LayoutState ClassifyValidatedLayout(
+		LayoutState a_memberState,
+		bool a_optimizedValid,
+		bool a_developerValid)
+	{
+		if (a_memberState == LayoutState::Absent)
+			return LayoutState::Absent;
+		return a_memberState == LayoutState::Complete && a_optimizedValid && a_developerValid ?
+		           LayoutState::Complete :
+		           LayoutState::PartialOrInvalid;
+	}
+
 	struct ManifestContract
 	{
+		struct FileBaseline
+		{
+			Lane lane = Lane::Optimized;
+			std::uint64_t generation = 0;
+			std::uint64_t recordCount = 0;
+		};
+
 		PackSetId packSetId{};
 		std::uint64_t optimizedRecordCount = 0;
 		std::uint64_t developerRecordCount = 0;
+		std::array<FileBaseline, 4> files{};
+	};
+
+	struct PackFileState
+	{
+		PackSetId packSetId{};
+		Lane lane = Lane::Optimized;
+		bool valid = false;
+		std::uint64_t generation = 0;
+		std::uint64_t recordCount = 0;
 	};
 
 	bool IsValidPackSetId(const PackSetId& a_packSetId);
@@ -60,6 +89,10 @@ namespace Util::ShaderCachePack
 		const nlohmann::json& a_manifest,
 		std::string_view a_expectedRuntime,
 		std::string_view a_expectedShaderCacheABI,
+		std::string* a_error = nullptr);
+	bool ValidateManifestFileStates(
+		const ManifestContract& a_contract,
+		const std::array<PackFileState, 4>& a_files,
 		std::string* a_error = nullptr);
 
 	// A complete, readable managed pack set is authoritative. A miss in that
@@ -117,6 +150,7 @@ namespace Util::ShaderCachePack
 		Store& operator=(const Store&) = delete;
 
 		bool Open(std::string* a_error = nullptr);
+		std::array<PackFileState, 2> GetFileStates() const;
 		std::optional<Entry> Find(std::string_view a_exactKey, std::string* a_error = nullptr) const;
 		bool Append(const Entry& a_entry, std::string* a_error = nullptr);
 		/** Durably commits all records appended since the previous checkpoint. */
