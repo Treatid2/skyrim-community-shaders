@@ -1897,6 +1897,70 @@ namespace
 		       afterSuccessor.generation == successorGeneration;
 	}
 
+	bool CoversPreBoundVendorResetFailureIdentity()
+	{
+		const auto successorWinsBeforeFailureAdmission = [](
+															 std::uint32_t a_failedGeneration,
+															 bool a_latchCommonFailure) {
+			constexpr std::uint32_t successorGeneration = 8;
+			std::mutex resetMutex;
+			std::atomic<std::uint32_t> evaluationGeneration{
+				a_failedGeneration
+			};
+			std::atomic<bool> resetPending{ false };
+			std::atomic<std::uint32_t> resetGeneration{ 0 };
+			bool staleLifecycleCommitted = false;
+			bool staleFSRKeyLatched = false;
+			bool staleCommonKeyLatched = false;
+			bool successorServiced = false;
+
+			// The result retains the generation selected when its operation began.
+			const std::uint32_t operationGeneration =
+				evaluationGeneration.load(std::memory_order_acquire);
+			{
+				const std::scoped_lock lock(resetMutex);
+				evaluationGeneration.store(
+					successorGeneration,
+					std::memory_order_release);
+				resetGeneration.store(
+					successorGeneration,
+					std::memory_order_release);
+				resetPending.store(true, std::memory_order_release);
+			}
+
+			const bool staleAccepted = TryCommitVendorResetFailure(
+				resetMutex,
+				resetPending,
+				resetGeneration,
+				operationGeneration,
+				[&]() {
+					staleLifecycleCommitted = true;
+					staleFSRKeyLatched = true;
+					staleCommonKeyLatched = a_latchCommonFailure;
+				});
+			const bool successorPreserved =
+				!staleAccepted && !staleLifecycleCommitted &&
+				!staleFSRKeyLatched && !staleCommonKeyLatched &&
+				resetPending.load(std::memory_order_acquire) &&
+				resetGeneration.load(std::memory_order_acquire) ==
+					successorGeneration &&
+				evaluationGeneration.load(std::memory_order_acquire) ==
+					successorGeneration;
+			const bool successorAccepted = TryCommitVendorResetFailure(
+				resetMutex,
+				resetPending,
+				resetGeneration,
+				successorGeneration,
+				[&]() { successorServiced = true; });
+
+			return successorPreserved && successorAccepted &&
+			       successorServiced;
+		};
+
+		return successorWinsBeforeFailureAdmission(0, false) &&
+		       successorWinsBeforeFailureAdmission(7, true);
+	}
+
 	constexpr bool CoversVendorResetServiceOwnership()
 	{
 		VendorResetServiceAdmission state{
@@ -3852,7 +3916,8 @@ namespace
 int main()
 {
 	return CoversVendorResetFailureCommitTransaction() &&
-	               CoversPostFailureVendorResetIdentity() ?
+	               CoversPostFailureVendorResetIdentity() &&
+	               CoversPreBoundVendorResetFailureIdentity() ?
 	           0 :
 	           1;
 }

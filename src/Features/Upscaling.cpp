@@ -37590,14 +37590,14 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 	const bool retainTerminalInactiveFSRResources =
 		ShouldRetainInactiveFSROwnership(*this, a_upscalemethod);
 	const auto acceptFSRResourceLifecycleResult =
-		[&](FidelityFX::LifecycleResult a_result, const char* a_reason) {
+		[&](FidelityFX::LifecycleResult a_result,
+			uint32_t a_operationGeneration,
+			const char* a_reason) {
 			if (a_result == FidelityFX::LifecycleResult::Ready)
 				return true;
 
-			const uint32_t generation =
-				GetVRVendorEvaluationContractGeneration(UpscaleMethod::kFSR);
 			(void)TryCommitFSRRuntimeResetFailure(
-				generation,
+				a_operationGeneration,
 				a_result == FidelityFX::LifecycleResult::Pending ?
 					VRVendorRuntimeLifecyclePhase::WaitingForDrain :
 					VRVendorRuntimeLifecyclePhase::Failed,
@@ -37924,6 +37924,8 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 					if (vrFSRQualityChangeCanPreserveResources) {
 						RequestHistoryReset();
 					} else {
+						const uint32_t destroyGeneration =
+							GetVRVendorEvaluationContractGeneration(UpscaleMethod::kFSR);
 						const auto destroyResult = fidelityFX.DestroyFSRResources();
 #ifdef DEVBENCH_BRIDGE_ENABLED
 						if (globals::game::isVR &&
@@ -37937,6 +37939,7 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 #endif
 						if (!acceptFSRResourceLifecycleResult(
 								destroyResult,
+								destroyGeneration,
 								"quality-change FSR resource teardown")) {
 							return false;
 						}
@@ -37945,9 +37948,12 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 						fsrResourcesDestroyedForQuality = true;
 					}
 					if (a_upscalemethod == UpscaleMethod::kFSR && !vrFSRQualityChangeCanPreserveResources) {
+						const uint32_t createGeneration =
+							GetVRVendorEvaluationContractGeneration(UpscaleMethod::kFSR);
 						const auto createResult = createFSRResourcesWhenSafe();
 						if (!acceptFSRResourceLifecycleResult(
 								createResult,
+								createGeneration,
 								"quality-change FSR resource creation"))
 							return false;
 						fsrResourcesRecreatedForQuality = true;
@@ -38007,10 +38013,15 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 					fsrResourcesRetainedAfterTerminalFailure = true;
 				} else if (previousUpscaleMode == UpscaleMethod::kFSR && !fsrResourcesDestroyedForQuality) {
 					auto pollResult = FidelityFX::LifecycleResult::Ready;
-					if (renderScaleTransitionRelevant)
+					uint32_t pollGeneration = 0;
+					if (renderScaleTransitionRelevant) {
+						pollGeneration =
+							GetVRVendorEvaluationContractGeneration(UpscaleMethod::kFSR);
 						pollResult = fidelityFX.PollFSRResourceTeardownReady("upscale method FSR resource teardown");
+					}
 					if (!acceptFSRResourceLifecycleResult(
 							pollResult,
+							pollGeneration,
 							"upscale-method FSR resource drain")) {
 						return false;
 					}
@@ -38018,6 +38029,8 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 					const bool hadFSRResources =
 						globals::game::isVR && fidelityFX.HasFSRResources();
 #endif
+					const uint32_t destroyGeneration =
+						GetVRVendorEvaluationContractGeneration(UpscaleMethod::kFSR);
 					const auto destroyResult = fidelityFX.DestroyFSRResources(!renderScaleTransitionRelevant);
 #ifdef DEVBENCH_BRIDGE_ENABLED
 					if (hadFSRResources &&
@@ -38031,6 +38044,7 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 #endif
 					if (!acceptFSRResourceLifecycleResult(
 							destroyResult,
+							destroyGeneration,
 							"upscale-method FSR resource teardown")) {
 						return false;
 					}
@@ -38046,9 +38060,12 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 			DestroyUpscalingTextureResources(a_upscalemethod);
 
 			if (a_upscalemethod == UpscaleMethod::kFSR && !fsrResourcesRecreatedForQuality) {
+				const uint32_t createGeneration =
+					GetVRVendorEvaluationContractGeneration(UpscaleMethod::kFSR);
 				const auto createResult = createFSRResourcesWhenSafe();
 				if (!acceptFSRResourceLifecycleResult(
 						createResult,
+						createGeneration,
 						"upscale-method FSR resource creation"))
 					return false;
 				fsrResourcesRecreatedForQuality = true;
@@ -38065,6 +38082,8 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 		// host context and reset its history while the runtime path falls back.
 		if (!upscaleModeChanged && fsrRuntimePathChanged && a_upscalemethod == UpscaleMethod::kFSR && !fsrResourcesRecreatedForQuality) {
 			if (!runtimeFailureFallbackCanPreserveHostFSR) {
+				const uint32_t destroyGeneration =
+					GetVRVendorEvaluationContractGeneration(UpscaleMethod::kFSR);
 				const auto destroyResult = fidelityFX.DestroyFSRResources();
 #ifdef DEVBENCH_BRIDGE_ENABLED
 				if (globals::game::isVR &&
@@ -38078,12 +38097,16 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 #endif
 				if (!acceptFSRResourceLifecycleResult(
 						destroyResult,
+						destroyGeneration,
 						"runtime-path FSR resource teardown")) {
 					return false;
 				}
+				const uint32_t createGeneration =
+					GetVRVendorEvaluationContractGeneration(UpscaleMethod::kFSR);
 				const auto createResult = createFSRResourcesWhenSafe();
 				if (!acceptFSRResourceLifecycleResult(
 						createResult,
+						createGeneration,
 						"runtime-path FSR resource creation"))
 					return false;
 				fsrResourcesRecreatedForQuality = true;
@@ -38091,16 +38114,22 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 			RequestHistoryReset();
 		} else if (!upscaleModeChanged && (fsrRuntimeFsr4ConfiguredChanged || fsrRuntimeVersionChanged) && a_upscalemethod == UpscaleMethod::kFSR && !fsrResourcesRecreatedForQuality) {
 			if (fsrRuntimeFsr4ConfiguredChanged || !fidelityFX.IsRuntimeFsr4FailureLatched()) {
+				const uint32_t resetGeneration =
+					GetVRVendorEvaluationContractGeneration(UpscaleMethod::kFSR);
 				const auto resetResult = fidelityFX.ResetRuntimeUpscalerResources(true);
 				if (!acceptFSRResourceLifecycleResult(
 						resetResult,
+						resetGeneration,
 						"runtime-provider FSR resource reset")) {
 					return false;
 				}
 				if (globals::game::isVR && !canPreserveFSRResourcesForCurrentVRPlan()) {
+					const uint32_t createGeneration =
+						GetVRVendorEvaluationContractGeneration(UpscaleMethod::kFSR);
 					const auto createResult = createFSRResourcesWhenSafe();
 					if (!acceptFSRResourceLifecycleResult(
 							createResult,
+							createGeneration,
 							"runtime-provider FSR compatible resource creation")) {
 						return false;
 					}
@@ -38164,12 +38193,14 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 			return false;
 		}
 
+		const uint32_t commonResourceOperationGeneration =
+			a_upscalemethod == UpscaleMethod::kFSR ?
+				GetVRVendorEvaluationContractGeneration(UpscaleMethod::kFSR) :
+				0u;
 		const auto latchMissingCommonFailure = [&](const char* a_reason) {
 			if (a_upscalemethod == UpscaleMethod::kFSR) {
-				const uint32_t generation =
-					GetVRVendorEvaluationContractGeneration(UpscaleMethod::kFSR);
 				(void)TryCommitFSRRuntimeResetFailure(
-					generation,
+					commonResourceOperationGeneration,
 					VRVendorRuntimeLifecyclePhase::Failed,
 					a_reason,
 					true,
