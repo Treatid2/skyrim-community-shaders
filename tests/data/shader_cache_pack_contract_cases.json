@@ -21,6 +21,42 @@
             }
         },
         {
+            "name": "near-maximum-adjacent-installation-baseline",
+            "accepted": true,
+            "manifestOverrides": {
+                "/files/Optimized.A.csxpack/generation": 18446744073709551615,
+                "/files/Optimized.B.csxpack/generation": 18446744073709551614
+            },
+            "fileOverrides": {
+                "Optimized.A.csxpack": { "generation": 18446744073709551615 },
+                "Optimized.B.csxpack": { "generation": 18446744073709551614 }
+            }
+        },
+        {
+            "name": "nonadjacent-ascending-installation-baseline",
+            "accepted": false,
+            "manifestOverrides": {
+                "/files/Optimized.A.csxpack/generation": 1,
+                "/files/Optimized.B.csxpack/generation": 3
+            },
+            "fileOverrides": {
+                "Optimized.A.csxpack": { "generation": 1 },
+                "Optimized.B.csxpack": { "generation": 3 }
+            }
+        },
+        {
+            "name": "nonadjacent-descending-installation-baseline",
+            "accepted": false,
+            "manifestOverrides": {
+                "/files/Optimized.A.csxpack/generation": 3,
+                "/files/Optimized.B.csxpack/generation": 1
+            },
+            "fileOverrides": {
+                "Optimized.A.csxpack": { "generation": 3 },
+                "Optimized.B.csxpack": { "generation": 1 }
+            }
+        },
+        {
             "name": "boolean-schema-version",
             "accepted": false,
             "manifestOverrides": { "/schemaVersion": true }

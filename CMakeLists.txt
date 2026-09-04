@@ -2038,6 +2038,10 @@ if(BUILD_CONTROLLER_TESTS)
         src/Utils/CryptoHash.cpp
     )
     target_compile_features(shader_cache_pack_test PRIVATE cxx_std_23)
+    target_compile_definitions(
+        shader_cache_pack_test
+        PRIVATE CSX_SHADER_CACHE_PACK_TESTING=1
+    )
     if(MSVC)
         target_compile_options(shader_cache_pack_test PRIVATE /UNDEBUG)
     else()

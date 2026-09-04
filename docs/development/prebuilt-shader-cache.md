@@ -623,11 +623,54 @@ when active-generation superseded bytes and fragmentation cross their bounded
 thresholds. It writes current logical records into the inactive file at a
 higher generation and leaves the old generation searchable as fallback.
 
+Initial runtime admission is non-mutating. Every shipped A/B member must already
+contain a valid header; zero-byte placeholders, directories, reparse points in
+any path component,
+unreadable files, and same-object aliases are rejected without modifying any
+peer. On Windows, the writer lease requires physical identity for each member,
+resolves relative names once, and retains non-delete-sharing parent and final
+file handles so admitted paths cannot be rebound or replaced while the lease is
+active. The four optimized/developer members must
+resolve to four distinct file identities, and any whole-layout rejection
+releases all provisional lane ownership. The same release applies when direct
+append or reset performs lazy admission and that admission rejects or throws.
+Explicit zero-byte bootstrap verifies both truncation and durable flush during
+ordinary or exceptional rollback and reports whether the original empty state
+was restored or could not be established. Rollback remains armed until the
+initialized pair has completed Store admission and index publication.
+
+Schema-2 installation baselines require adjacent A/B generations. Later runtime
+compaction or reset may produce a larger actual generation gap. Record sequences
+are valid only from 1 through `UINT64_MAX-1`; zero and `UINT64_MAX` are reserved.
+The Python archive/FOMOD validator and C++ runtime enforce the same rules.
+
 If any managed file is missing, the whole pack feature is unavailable and CSX
 retains the previous loose-cache behavior. `Manifest.json` remains part of that
 compatibility path. An explicit clear resets existing pack files in place;
 normal source, feature, and external-contract changes never rotate or blanket
 delete the managed cache.
+
+A reset barrier becomes authoritative before superseded-file cleanup. If the
+empty generation reopens successfully but cleanup fails, the Store remains
+available with a degraded-cleanup diagnostic. If the first or final reopen
+fails, the Store clears all pre-reset indexes and statistics, releases its
+writer ownership, and the runtime quarantines that lane while compiling from
+source. Initialization also reports its mutation phase to reset: failure before
+opening the target for truncation is non-mutating, while any failure or exception
+after that boundary is commit-uncertain (or known durable), invalidates the
+pre-reset Store, and releases its path and writer ownership.
+
+Explicit zero-byte bootstrap arms rollback before initializing the first member.
+Rollback attempts and verifies both members independently under a nonthrowing
+recovery boundary; optional diagnostic construction happens only afterward and
+cannot pre-empt physical restoration.
+
+Once reset has reopened its higher empty generation, a cleanup-only failure or
+exception retains that generation as available authority and excludes the
+uncertain superseded member. Conversely, any compaction failure after inactive-
+member mutation withdraws Store authority and releases ownership before return;
+the lane then falls back to source compilation rather than exposing stale
+fallback locations or statistics.
 
 Users can still compile local variants when:
 

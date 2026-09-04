@@ -73,7 +73,9 @@ file. Before the main menu, fragmentation-based compaction rewrites the latest
 record for every logical shader identity into the inactive file, durably commits
 it, and selects its higher generation; the prior file remains a searchable
 fallback generation. Fragmentation is measured only within the active file, so
-the intentional fallback generation does not cause endless compaction.
+the intentional fallback generation does not cause endless compaction. If
+inactive-member mutation cannot complete, the Store withdraws its authority and
+releases ownership before the caller quarantines that lane.
 
 The managed layout is authoritative only when the manifest and all four fixed
 files are present and the manifest passes the same strict identity, runtime,
@@ -84,18 +86,32 @@ open successfully, their headers and identities validate, and their per-file
 state satisfies the manifest contract. A partial, unreadable, non-file,
 malformed, or otherwise invalid layout is diagnosed explicitly and also retains
 the loose fallback until the installation is repaired or cleared; one fragment
-never silently suppresses an otherwise valid loose cache.
+never silently suppresses an otherwise valid loose cache. Admission is
+read-only: zero-byte placeholders are rejected rather than initialized, and a
+global rejection releases every provisional lane lease without changing any
+member. Direct lazy admission through append or reset has the same cleanup
+boundary: a rejected or exceptional admission releases its path guards,
+physical identities, process registration, and writer lease. Release tooling
+must ship all four files with valid headers.
 
 Every writable pack set has a nonzero 128-bit identity. Runtime header checks
 are unconditional, and mutation ownership combines canonical process-local
 exclusion with a crash-recoverable machine-wide Windows named-pipe lease. Its
-key is the sorted physical file identity of the A/B pair, independent of `TEMP`, argument
-order, lane labels, and path aliases that Windows resolves to the same files.
-The handle may be released from another thread and is reclaimed if the process
-terminates. Optimized and developer lanes open and validate independently
-during admission; after a complete layout becomes authoritative, an operational
-failure quarantines only the affected lane. An unavailable authoritative lane
-recompiles from source without consulting or writing legacy loose blobs.
+key is the sorted physical file identity of the A/B pair, independent of `TEMP`,
+argument order, lane labels, and hard-link aliases. Physical identity is
+mandatory on Windows: directories, reparse points in any path component,
+identity-query failures, and same-object A/B pairs are rejected. Admission
+resolves relative names once and retains non-delete-sharing handles for every
+ordinary parent plus the final files. Later path-based I/O therefore reaches
+the admitted objects or fails closed without adding identity work to shader
+lookup. All four fixed members must have distinct
+identities. The lease handle may be released from another thread and is
+reclaimed if the process terminates. Optimized and developer lanes open and
+validate independently during admission; any global rejection destroys both
+stores and releases their leases, including after an exception. After a complete layout becomes authoritative,
+an operational failure quarantines only the affected lane. An unavailable
+authoritative lane recompiles from source without consulting or writing legacy
+loose blobs.
 
 `PackManifest.json` is immutable installation metadata. Schema 2 requires
 `fileStateSemantics: installation-baseline-v1`; its schema, format,
@@ -108,13 +124,22 @@ file to be at or beyond its named baseline, reject count regression within the
 baseline generation, reject identity/lane mismatch and equal A/B generations,
 and accept a later generation even when its count changed. All numeric manifest
 fields are non-Boolean unsigned 64-bit integers; schema and format values must
-also equal their supported constants.
+also equal their supported constants. Each installation-baseline A/B generation
+pair must differ by exactly one. Record sequences use the common domain
+`1..UINT64_MAX-1`; zero and `UINT64_MAX` are reserved and rejected by both the
+runtime scanner and packaging validator.
 
 Explicit cache clearing first commits a new empty generation barrier, then
 reinitializes the superseded file, rather than creating or deleting VFS entries.
 The result distinguishes complete cleanup, committed-but-degraded cleanup, and
-failure before commit. A committed degraded reset keeps the safe empty
-generation authoritative while emitting a bounded warning for later repair.
+failure before commit. Cleanup-only degradation keeps a successfully reopened
+empty generation authoritative. If either post-barrier reopen fails, the Store
+invalidates every pre-reset index, releases ownership, and quarantines the lane
+for source fallback until a clean admission succeeds. Reset-target initialization
+tracks whether mutation has not begun, has begun with uncertain durability, is
+durable, or has been verified. Only the first state may preserve the old Store
+and report failure before commit; every changed or uncertain state clears old
+authority and releases ownership.
 
 This storage transition is `engine-cache-v3-managed-pack` in
 `config/shader-cache-abi.json`. The generated pack manifest embeds the exact

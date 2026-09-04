@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cstring>
 #include <fstream>
@@ -11,6 +12,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <ranges>
+#include <stdexcept>
 #include <unordered_set>
 
 #ifdef _WIN32
@@ -78,26 +80,109 @@ namespace
 	std::mutex g_writerLeaseRegistryMutex;
 	std::unordered_set<std::string> g_writerLeaseRegistry;
 
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+	std::atomic<std::uint32_t> g_testFailurePoints{ 0 };
+
+	bool ConsumeTestFailurePoint(Util::ShaderCachePack::TestFailurePoint a_failurePoint)
+	{
+		const auto mask = static_cast<std::uint32_t>(a_failurePoint);
+		return (g_testFailurePoints.fetch_and(~mask) & mask) != 0;
+	}
+#endif
+
+#ifdef _WIN32
+	bool AcquireStablePathGuards(
+		std::filesystem::path& a_path,
+		std::vector<void*>& a_handles,
+		std::string* a_error)
+	{
+		std::error_code absoluteError;
+		const auto absolutePath = std::filesystem::absolute(a_path, absoluteError).lexically_normal();
+		if (absoluteError || !absolutePath.has_root_path() || !absolutePath.has_parent_path()) {
+			SetError(a_error, std::format(
+								  "failed to resolve absolute managed shader pack path '{}' ({})",
+								  a_path.string(),
+								  absoluteError ? absoluteError.message() : "path has no stable parent"));
+			return false;
+		}
+
+		auto current = absolutePath.root_path();
+		for (const auto& component : absolutePath.parent_path().relative_path()) {
+			current /= component;
+			const HANDLE directory = CreateFileW(
+				current.c_str(), FILE_READ_ATTRIBUTES,
+				FILE_SHARE_READ | FILE_SHARE_WRITE,
+				nullptr, OPEN_EXISTING,
+				FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+			if (directory == INVALID_HANDLE_VALUE) {
+				SetError(a_error, std::format(
+									  "failed to guard managed shader pack parent '{}' (Windows error {})",
+									  current.string(), GetLastError()));
+				return false;
+			}
+			BY_HANDLE_FILE_INFORMATION information{};
+			if (!GetFileInformationByHandle(directory, &information) ||
+				(information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+				(information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+				const auto identityError = GetLastError();
+				CloseHandle(directory);
+				SetError(a_error, std::format(
+									  "managed shader pack parent '{}' is not a stable non-reparse directory (Windows error {})",
+									  current.string(), identityError));
+				return false;
+			}
+			try {
+				a_handles.push_back(directory);
+			} catch (...) {
+				CloseHandle(directory);
+				throw;
+			}
+		}
+		a_path = absolutePath;
+		return true;
+	}
+
+	bool AcquireFileIdentityGuard(
+		const std::filesystem::path& a_path,
+		void*& a_handle,
+		std::string& a_identity,
+		std::string* a_error)
+	{
+		const HANDLE file = CreateFileW(
+			a_path.c_str(), GENERIC_READ | GENERIC_WRITE,
+			FILE_SHARE_READ | FILE_SHARE_WRITE,
+			nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+		if (file == INVALID_HANDLE_VALUE) {
+			SetError(a_error, std::format(
+								  "failed to acquire physical identity for managed shader pack '{}' (Windows error {})",
+								  a_path.string(),
+								  GetLastError()));
+			return false;
+		}
+
+		BY_HANDLE_FILE_INFORMATION information{};
+		if (!GetFileInformationByHandle(file, &information) ||
+			(information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+			const auto identityError = GetLastError();
+			CloseHandle(file);
+			SetError(a_error, std::format(
+								  "managed shader pack '{}' is not a stable regular file identity (Windows error {})",
+								  a_path.string(),
+								  identityError));
+			return false;
+		}
+
+		a_handle = file;
+		a_identity = std::format(
+			"file-id:{:08x}:{:08x}{:08x}",
+			information.dwVolumeSerialNumber,
+			information.nFileIndexHigh,
+			information.nFileIndexLow);
+		return true;
+	}
+#else
 	std::string CanonicalLeasePath(const std::filesystem::path& a_path)
 	{
-#ifdef _WIN32
-		const HANDLE file = CreateFileW(
-			a_path.c_str(), FILE_READ_ATTRIBUTES,
-			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-			nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-		if (file != INVALID_HANDLE_VALUE) {
-			BY_HANDLE_FILE_INFORMATION information{};
-			if (GetFileInformationByHandle(file, &information)) {
-				CloseHandle(file);
-				return std::format(
-					"file-id:{:08x}:{:08x}{:08x}",
-					information.dwVolumeSerialNumber,
-					information.nFileIndexHigh,
-					information.nFileIndexLow);
-			}
-			CloseHandle(file);
-		}
-#endif
 		std::error_code error;
 		auto canonical = std::filesystem::weakly_canonical(a_path, error);
 		if (error) {
@@ -106,23 +191,9 @@ namespace
 			if (error)
 				canonical = a_path.lexically_normal();
 		}
-		auto value = canonical.lexically_normal().generic_string();
-#ifdef _WIN32
-		std::ranges::transform(value, value.begin(), [](unsigned char a_character) {
-			return static_cast<char>(std::tolower(a_character));
-		});
+		return canonical.lexically_normal().generic_string();
+	}
 #endif
-		return value;
-	}
-
-	std::string BuildWriterLeaseKey(
-		const std::filesystem::path& a_pathA,
-		const std::filesystem::path& a_pathB)
-	{
-		std::array paths{ CanonicalLeasePath(a_pathA), CanonicalLeasePath(a_pathB) };
-		std::ranges::sort(paths);
-		return paths[0] + '|' + paths[1];
-	}
 
 	std::optional<std::uint64_t> ReadUnsigned(const nlohmann::json& a_value)
 	{
@@ -285,6 +356,13 @@ namespace
 
 namespace Util::ShaderCachePack
 {
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+	void SetTestFailurePoints(std::uint32_t a_failurePoints)
+	{
+		g_testFailurePoints.store(a_failurePoints);
+	}
+#endif
+
 	bool IsValidPackSetId(const PackSetId& a_packSetId)
 	{
 		return std::ranges::any_of(a_packSetId, [](std::byte a_value) { return a_value != std::byte{}; });
@@ -445,6 +523,22 @@ namespace Util::ShaderCachePack
 		return true;
 	}
 
+	bool ValidateDistinctFileIdentities(
+		const std::array<std::string, 4>& a_identities,
+		std::string* a_error)
+	{
+		std::unordered_set<std::string> unique;
+		for (const auto& identity : a_identities) {
+			if (identity.empty() || !unique.insert(identity).second) {
+				SetError(a_error, "managed shader pack fixed members must resolve to four distinct stable file identities");
+				return false;
+			}
+		}
+		if (a_error)
+			a_error->clear();
+		return true;
+	}
+
 	Store::Store(
 		std::filesystem::path a_pathA,
 		std::filesystem::path a_pathB,
@@ -467,15 +561,40 @@ namespace Util::ShaderCachePack
 			return false;
 		}
 
-		leaseKey = BuildWriterLeaseKey(pathA, pathB);
+#ifdef _WIN32
+		if (!AcquireStablePathGuards(pathA, pathGuardHandles, a_error) ||
+			!AcquireStablePathGuards(pathB, pathGuardHandles, a_error) ||
+			!AcquireFileIdentityGuard(pathA, fileIdentityHandles[0], fileIdentityKeys[0], a_error) ||
+			!AcquireFileIdentityGuard(pathB, fileIdentityHandles[1], fileIdentityKeys[1], a_error)) {
+			ReleaseWriterLease();
+			return false;
+		}
+#else
+		fileIdentityKeys = { CanonicalLeasePath(pathA), CanonicalLeasePath(pathB) };
+#endif
+		if (fileIdentityKeys[0].empty() || fileIdentityKeys[1].empty() ||
+			fileIdentityKeys[0] == fileIdentityKeys[1]) {
+			SetError(a_error, "managed shader pack A/B members must be distinct stable file identities");
+			ReleaseWriterLease();
+			return false;
+		}
+		auto sortedIdentities = fileIdentityKeys;
+		std::ranges::sort(sortedIdentities);
+		leaseKey = sortedIdentities[0] + '|' + sortedIdentities[1];
 		{
 			std::lock_guard registryLock(g_writerLeaseRegistryMutex);
 			if (!g_writerLeaseRegistry.insert(leaseKey).second) {
 				leaseKey.clear();
 				SetError(a_error, "managed shader pack writer lease is already held in this process");
+				ReleaseWriterLease();
 				return false;
 			}
+			processRegistryOwned = true;
 		}
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+		if (ConsumeTestFailurePoint(TestFailurePoint::AfterRegistryInsert))
+			throw std::runtime_error("injected shader pack failure after writer-registry insertion");
+#endif
 
 #ifdef _WIN32
 		const auto digest = CryptoHash::Sha256Hex(leaseKey);
@@ -500,6 +619,7 @@ namespace Util::ShaderCachePack
 			std::lock_guard registryLock(g_writerLeaseRegistryMutex);
 			g_writerLeaseRegistry.erase(leaseKey);
 			leaseKey.clear();
+			ReleaseWriterLease();
 			return false;
 		}
 #endif
@@ -524,19 +644,48 @@ namespace Util::ShaderCachePack
 		return { state(fileA), state(fileB) };
 	}
 
+	std::array<std::string, 2> Store::GetFileIdentityKeys() const
+	{
+		std::shared_lock lock(mutex);
+		return fileIdentityKeys;
+	}
+
 	void Store::ReleaseWriterLease() noexcept
 	{
 #ifdef _WIN32
 		if (leaseHandle)
 			CloseHandle(static_cast<HANDLE>(leaseHandle));
 		leaseHandle = nullptr;
+		for (auto& handle : fileIdentityHandles) {
+			if (handle)
+				CloseHandle(static_cast<HANDLE>(handle));
+			handle = nullptr;
+		}
+		for (auto& handle : pathGuardHandles) {
+			if (handle)
+				CloseHandle(static_cast<HANDLE>(handle));
+		}
+		pathGuardHandles.clear();
 #endif
-		if (leaseOwned && !leaseKey.empty()) {
+		if (processRegistryOwned && !leaseKey.empty()) {
 			std::lock_guard registryLock(g_writerLeaseRegistryMutex);
 			g_writerLeaseRegistry.erase(leaseKey);
 		}
 		leaseOwned = false;
+		processRegistryOwned = false;
 		leaseKey.clear();
+		fileIdentityKeys = {};
+	}
+
+	void Store::InvalidateStateLocked() noexcept
+	{
+		opened = false;
+		active = {};
+		fallback = {};
+		exactIndex.clear();
+		liveByLogical.clear();
+		activeLiveByLogical.clear();
+		stats = {};
 	}
 
 	bool Store::Scan(const std::filesystem::path& a_path, ScannedFile& a_output, std::string* a_error) const
@@ -650,13 +799,29 @@ namespace Util::ShaderCachePack
 		return true;
 	}
 
-	bool Store::InitializeEmpty(ScannedFile& a_file, std::uint64_t a_generation, std::string* a_error) const
+	bool Store::InitializeEmpty(
+		ScannedFile& a_file,
+		std::uint64_t a_generation,
+		std::string* a_error,
+		InitializeProgress* a_progress,
+		[[maybe_unused]] InitializePurpose a_purpose) const
 	{
+		if (a_progress)
+			*a_progress = InitializeProgress::Unchanged;
 		std::error_code existenceError;
 		if (!a_file.exists || !std::filesystem::is_regular_file(a_file.path, existenceError) || existenceError) {
 			SetError(a_error, "pack file is absent; runtime will not create files outside the shipped managed cache mod");
 			return false;
 		}
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+		const auto beforeMutationFailure = a_purpose == InitializePurpose::ResetCleanup ?
+		                                       TestFailurePoint::BeforeResetCleanupMutation :
+		                                       TestFailurePoint::BeforeInitializeMutation;
+		if (ConsumeTestFailurePoint(beforeMutationFailure)) {
+			SetError(a_error, "injected failure before shader pack initialization mutation");
+			return false;
+		}
+#endif
 		FileHeader header{};
 		std::memcpy(header.magic, kFileMagic.data(), kFileMagic.size());
 		header.version = kFormatVersion;
@@ -666,54 +831,139 @@ namespace Util::ShaderCachePack
 		const auto hash = CryptoHash::Sha256Bytes(std::span<const std::byte>{
 			reinterpret_cast<const std::byte*>(&header), offsetof(FileHeader, hash) });
 		std::memcpy(header.hash, hash.data(), hash.size());
+		if (a_progress)
+			*a_progress = InitializeProgress::MutationStarted;
 		{
 			std::ofstream stream(a_file.path, std::ios::binary | std::ios::trunc);
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+			const auto afterTruncateFailure = a_purpose == InitializePurpose::ResetCleanup ?
+			                                      TestFailurePoint::AfterResetCleanupTruncate :
+			                                      TestFailurePoint::AfterInitializeTruncate;
+			const auto throwAfterTruncate = a_purpose == InitializePurpose::ResetCleanup ?
+			                                    TestFailurePoint::ThrowAfterResetCleanupTruncate :
+			                                    TestFailurePoint::ThrowAfterInitializeTruncate;
+			if (ConsumeTestFailurePoint(afterTruncateFailure)) {
+				SetError(a_error, "injected failure after shader pack initialization truncate");
+				return false;
+			}
+			if (ConsumeTestFailurePoint(throwAfterTruncate))
+				throw std::runtime_error("injected exception after shader pack initialization truncate");
+#endif
 			stream.write(reinterpret_cast<const char*>(&header), sizeof(header));
 			stream.flush();
 			if (!stream.good()) {
 				SetError(a_error, "failed to initialize existing shader pack file");
 				return false;
 			}
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+			const auto afterWriteFailure = a_purpose == InitializePurpose::ResetCleanup ?
+			                                   TestFailurePoint::AfterResetCleanupWrite :
+			                                   TestFailurePoint::AfterInitializeWrite;
+			const auto throwAfterWrite = a_purpose == InitializePurpose::ResetCleanup ?
+			                                 TestFailurePoint::ThrowAfterResetCleanupWrite :
+			                                 TestFailurePoint::ThrowAfterInitializeWrite;
+			if (ConsumeTestFailurePoint(afterWriteFailure)) {
+				SetError(a_error, "injected failure after shader pack initialization write");
+				return false;
+			}
+			if (ConsumeTestFailurePoint(throwAfterWrite))
+				throw std::runtime_error("injected exception after shader pack initialization write");
+#endif
 		}
 		if (!DurableFlush(a_file.path)) {
 			SetError(a_error, "failed to durably flush initialized shader pack file");
 			return false;
 		}
-		return Scan(a_file.path, a_file, a_error);
+		if (a_progress)
+			*a_progress = InitializeProgress::Durable;
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+		const auto afterDurableFlushFailure = a_purpose == InitializePurpose::ResetCleanup ?
+		                                          TestFailurePoint::AfterResetCleanupDurableFlush :
+		                                          TestFailurePoint::AfterInitializeDurableFlush;
+		const auto throwAfterDurableFlush = a_purpose == InitializePurpose::ResetCleanup ?
+		                                        TestFailurePoint::ThrowAfterResetCleanupDurableFlush :
+		                                        TestFailurePoint::ThrowAfterInitializeDurableFlush;
+		if (ConsumeTestFailurePoint(afterDurableFlushFailure)) {
+			SetError(a_error, "injected failure after durable shader pack initialization flush");
+			return false;
+		}
+		if (ConsumeTestFailurePoint(throwAfterDurableFlush))
+			throw std::runtime_error("injected exception after durable shader pack initialization flush");
+		if (a_purpose == InitializePurpose::ResetCleanup &&
+			ConsumeTestFailurePoint(TestFailurePoint::ThrowBeforeResetCleanupVerification))
+			throw std::runtime_error("injected exception before shader pack reset cleanup verification");
+#endif
+		if (!Scan(a_file.path, a_file, a_error))
+			return false;
+		if (a_progress)
+			*a_progress = InitializeProgress::Verified;
+		return true;
 	}
 
 	bool Store::Open(std::string* a_error)
 	{
 		try {
 			std::unique_lock lock(mutex);
-			const bool result = OpenLocked(a_error);
+			const bool result = OpenLocked(false, a_error);
 			if (!result)
 				ReleaseWriterLease();
 			return result;
 		} catch (const std::exception& e) {
 			SetError(a_error, e.what());
-			opened = false;
+			std::unique_lock lock(mutex);
+			InvalidateStateLocked();
 			ReleaseWriterLease();
 			return false;
 		} catch (...) {
 			SetError(a_error, "unknown shader pack open failure");
-			opened = false;
+			std::unique_lock lock(mutex);
+			InvalidateStateLocked();
 			ReleaseWriterLease();
 			return false;
 		}
 	}
 
-	bool Store::OpenLocked(std::string* a_error)
+	bool Store::InitializeEmptyFilesAndOpen(std::string* a_error)
+	{
+		try {
+			std::unique_lock lock(mutex);
+			const bool result = OpenLocked(true, a_error);
+			if (!result)
+				ReleaseWriterLease();
+			return result;
+		} catch (const std::exception& e) {
+			SetError(a_error, e.what());
+			std::unique_lock lock(mutex);
+			InvalidateStateLocked();
+			ReleaseWriterLease();
+			return false;
+		} catch (...) {
+			SetError(a_error, "unknown shader pack initialization failure");
+			std::unique_lock lock(mutex);
+			InvalidateStateLocked();
+			ReleaseWriterLease();
+			return false;
+		}
+	}
+
+	void Store::Close()
+	{
+		std::unique_lock lock(mutex);
+		InvalidateStateLocked();
+		ReleaseWriterLease();
+	}
+
+	bool Store::OpenLocked(bool a_allowEmptyInitialization, std::string* a_error)
 	{
 		if (a_error)
 			a_error->clear();
+		// Admission publishes one coherent snapshot or no readable state.
+		InvalidateStateLocked();
 		if (!IsValidPackSetId(packSetId)) {
 			SetError(a_error, "managed shader pack requires a nonzero pack-set identity");
-			opened = false;
 			return false;
 		}
 		if (!AcquireWriterLease(a_error)) {
-			opened = false;
 			return false;
 		}
 		ScannedFile a;
@@ -724,7 +974,6 @@ namespace Util::ShaderCachePack
 		const bool scannedB = Scan(pathB, b, &bError);
 		if (!scannedA || !scannedB) {
 			SetError(a_error, std::format("failed to scan managed pack files (A='{}', B='{}')", aError, bError));
-			opened = false;
 			return false;
 		}
 		if (!a.exists || !b.exists) {
@@ -732,37 +981,139 @@ namespace Util::ShaderCachePack
 								  "both fixed A/B files are required (A='{}', B='{}')",
 								  a.diagnostic,
 								  b.diagnostic));
-			opened = false;
 			return false;
 		}
-		if (!a.valid && !b.valid) {
-			ScannedFile* emptyA = a.exists && a.fileSize == 0 ? &a : nullptr;
-			ScannedFile* emptyB = b.exists && b.fileSize == 0 ? &b : nullptr;
-			if (!emptyA && !emptyB) {
-				SetError(a_error, std::format("both managed pack generations are invalid (A='{}', B='{}')", a.diagnostic, b.diagnostic));
-				opened = false;
-				return false;
+		struct BootstrapRollbackResult
+		{
+			std::array<bool, 2> restored{};
+			bool recoveryException = false;
+
+			[[nodiscard]] bool AllRestored() const noexcept { return restored[0] && restored[1]; }
+		};
+		auto restoreEmptyPair = [&]() noexcept {
+			BootstrapRollbackResult result;
+			const std::array<const std::filesystem::path*, 2> paths{ &pathA, &pathB };
+			for (std::size_t index = 0; index < paths.size(); ++index) {
+				const auto& path = *paths[index];
+				try {
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+					try {
+						if (index == 0 && ConsumeTestFailurePoint(TestFailurePoint::ThrowBeforeFirstBootstrapRollback))
+							throw std::runtime_error("injected exception before first shader pack bootstrap rollback member");
+						if (index == 1 && ConsumeTestFailurePoint(TestFailurePoint::ThrowBetweenBootstrapRollbackMembers))
+							throw std::runtime_error("injected exception between shader pack bootstrap rollback members");
+					} catch (...) {
+						// Recovery bookkeeping and diagnostics must not prevent either
+						// physical member from being restored and verified.
+						result.recoveryException = true;
+					}
+					if (ConsumeTestFailurePoint(TestFailurePoint::DuringBootstrapRollback))
+						continue;
+#endif
+					std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+					if (!stream)
+						continue;
+					stream.close();
+					std::error_code sizeError;
+					const auto restoredSize = std::filesystem::file_size(path, sizeError);
+					if (!stream.good() || sizeError || restoredSize != 0 || !DurableFlush(path))
+						continue;
+					result.restored[index] = true;
+				} catch (...) {
+					result.recoveryException = true;
+				}
 			}
-			if (emptyA && !InitializeEmpty(*emptyA, 1, a_error)) {
-				opened = false;
-				return false;
+			return result;
+		};
+		auto reportBootstrapFailure = [&](std::string_view a_initializationError, const BootstrapRollbackResult& a_rollback) noexcept {
+			try {
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+				if (ConsumeTestFailurePoint(TestFailurePoint::ThrowDuringBootstrapRollbackDiagnostic))
+					throw std::runtime_error("injected exception during shader pack bootstrap rollback diagnostic");
+#endif
+				std::string rollbackDetail;
+				if (!a_rollback.restored[0])
+					rollbackDetail = "member A was not restored";
+				if (!a_rollback.restored[1]) {
+					if (!rollbackDetail.empty())
+						rollbackDetail += "; ";
+					rollbackDetail += "member B was not restored";
+				}
+				if (a_rollback.recoveryException) {
+					if (!rollbackDetail.empty())
+						rollbackDetail += "; ";
+					rollbackDetail += "a rollback operation raised an exception";
+				}
+				const auto separator = a_initializationError.empty() ? "" : "; ";
+				SetError(a_error, a_rollback.AllRestored() ?
+									  std::format("{}{}bootstrap rollback restored both members to zero bytes{}",
+										  a_initializationError,
+										  separator,
+										  a_rollback.recoveryException ? " despite a recovered rollback exception" : "") :
+									  std::format("{}{}bootstrap rollback failed or is indeterminate: {}",
+										  a_initializationError,
+										  separator,
+										  rollbackDetail));
+			} catch (...) {
+				try {
+					SetError(a_error, a_rollback.AllRestored() ?
+										  "shader pack bootstrap failed; rollback restored both members to zero bytes; detailed diagnostic unavailable" :
+										  "shader pack bootstrap failed; rollback failed or is indeterminate; detailed diagnostic unavailable");
+				} catch (...) {
+					// Physical recovery has already attempted and verified both
+					// members. An allocation failure may prevent textual reporting.
+				}
 			}
-			if (emptyB && !InitializeEmpty(*emptyB, emptyA ? 0 : 1, a_error)) {
-				if (!emptyA)
-					SetError(a_error, std::format("both managed pack generations are invalid (A='{}', B='{}')", a.diagnostic, b.diagnostic));
-				opened = false;
-				return false;
-			}
-		}
-		if (a.valid && !b.valid && b.exists && b.fileSize == 0 &&
-			!InitializeEmpty(b, a.generation == 0 ? 1 : a.generation - 1, a_error)) {
-			opened = false;
+		};
+		bool bootstrapRollbackArmed = false;
+		auto failBootstrap = [&](std::string_view a_failure) noexcept {
+			InvalidateStateLocked();
+			const auto rollback = restoreEmptyPair();
+			bootstrapRollbackArmed = false;
+			reportBootstrapFailure(a_failure, rollback);
 			return false;
-		}
-		if (b.valid && !a.valid && a.exists && a.fileSize == 0 &&
-			!InitializeEmpty(a, b.generation == 0 ? 1 : b.generation - 1, a_error)) {
-			opened = false;
-			return false;
+		};
+		if (!a.valid || !b.valid) {
+			const bool emptyPair = a.fileSize == 0 && b.fileSize == 0;
+			if (!a_allowEmptyInitialization || !emptyPair) {
+				SetError(a_error, std::format(
+									  "managed pack admission is read-only and requires two valid prebuilt files (A='{}', B='{}')",
+									  a.diagnostic,
+									  b.diagnostic));
+				return false;
+			}
+
+			bootstrapRollbackArmed = true;
+			try {
+				bool initialized = false;
+				std::string initializationError;
+				try {
+					const bool initializedA = InitializeEmpty(a, 1, a_error);
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+					if (initializedA && ConsumeTestFailurePoint(TestFailurePoint::AfterFirstBootstrapInitialization))
+						throw std::runtime_error("injected failure after first shader pack bootstrap initialization");
+					const bool initializeB = !ConsumeTestFailurePoint(TestFailurePoint::BeforeSecondBootstrapInitialization);
+					if (!initializeB)
+						SetError(a_error, "injected failure before second shader pack bootstrap initialization");
+#else
+					constexpr bool initializeB = true;
+#endif
+					initialized = initializedA && initializeB && InitializeEmpty(b, 0, a_error);
+					if (!initialized)
+						initializationError = a_error ? *a_error : std::string{};
+				} catch (const std::exception& e) {
+					initializationError = std::format("shader pack bootstrap initialization raised an exception: {}", e.what());
+				} catch (...) {
+					initializationError = "shader pack bootstrap initialization raised an unknown exception";
+				}
+				if (!initialized) {
+					return failBootstrap(initializationError);
+				}
+			} catch (const std::exception& e) {
+				return failBootstrap(e.what());
+			} catch (...) {
+				return failBootstrap("shader pack bootstrap transaction raised an unknown exception");
+			}
 		}
 		std::string degraded;
 		if (!a.diagnostic.empty())
@@ -774,27 +1125,53 @@ namespace Util::ShaderCachePack
 		}
 		if (a.valid && b.valid && a.generation == b.generation) {
 			SetError(a_error, "managed shader pack A/B generations are equal and therefore ambiguous");
-			opened = false;
 			return false;
 		}
-		if (b.valid && (!a.valid || b.generation > a.generation)) {
-			active = std::move(b);
-			fallback = std::move(a);
-		} else {
-			active = std::move(a);
-			fallback = std::move(b);
+		try {
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+			if (ConsumeTestFailurePoint(TestFailurePoint::BeforeStoreAdmissionCommit)) {
+				if (bootstrapRollbackArmed)
+					return failBootstrap("injected failure before shader pack admission commit");
+				SetError(a_error, "injected failure before shader pack admission commit");
+				return false;
+			}
+#endif
+			if (b.valid && (!a.valid || b.generation > a.generation)) {
+				active = std::move(b);
+				fallback = std::move(a);
+			} else {
+				active = std::move(a);
+				fallback = std::move(b);
+			}
+			if (fallback.valid && active.generation - fallback.generation > 1) {
+				if (!degraded.empty())
+					degraded += "; ";
+				degraded += std::format(
+					"A/B generation gap is {} (authoritative generation {}, superseded generation {}); prior reset cleanup may be incomplete",
+					active.generation - fallback.generation,
+					active.generation,
+					fallback.generation);
+			}
+			opened = active.valid && fallback.valid;
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+			if (ConsumeTestFailurePoint(TestFailurePoint::DuringStoreAdmissionCommit))
+				throw std::runtime_error("injected failure during shader pack admission commit");
+			if (ConsumeTestFailurePoint(TestFailurePoint::DuringStoreIndexPublication))
+				throw std::runtime_error("injected failure during shader pack index publication");
+#endif
+			RebuildIndexes();
+			bootstrapRollbackArmed = false;
+		} catch (const std::exception& e) {
+			InvalidateStateLocked();
+			if (bootstrapRollbackArmed)
+				return failBootstrap(e.what());
+			throw;
+		} catch (...) {
+			InvalidateStateLocked();
+			if (bootstrapRollbackArmed)
+				return failBootstrap("shader pack admission raised an unknown exception");
+			throw;
 		}
-		if (fallback.valid && active.generation - fallback.generation > 1) {
-			if (!degraded.empty())
-				degraded += "; ";
-			degraded += std::format(
-				"A/B generation gap is {} (authoritative generation {}, superseded generation {}); prior reset cleanup may be incomplete",
-				active.generation - fallback.generation,
-				active.generation,
-				fallback.generation);
-		}
-		opened = active.valid;
-		RebuildIndexes();
 		if (!degraded.empty())
 			SetError(a_error, std::move(degraded));
 		return opened;
@@ -1014,10 +1391,17 @@ namespace Util::ShaderCachePack
 
 	bool Store::Append(const Entry& a_entry, std::string* a_error)
 	{
+		bool admissionPending = false;
 		try {
 			std::unique_lock lock(mutex);
-			if (!opened && !OpenLocked(a_error))
-				return false;
+			admissionPending = !opened;
+			if (admissionPending) {
+				if (!OpenLocked(false, a_error)) {
+					ReleaseWriterLease();
+					return false;
+				}
+				admissionPending = false;
+			}
 			const auto offset = active.validSize;
 			const auto sequence = active.nextSequence;
 			const auto removedTailBytes = active.fileSize - active.validSize;
@@ -1074,9 +1458,19 @@ namespace Util::ShaderCachePack
 			return true;
 		} catch (const std::exception& e) {
 			SetError(a_error, e.what());
+			if (admissionPending) {
+				std::unique_lock lock(mutex);
+				InvalidateStateLocked();
+				ReleaseWriterLease();
+			}
 			return false;
 		} catch (...) {
 			SetError(a_error, "unknown shader pack append failure");
+			if (admissionPending) {
+				std::unique_lock lock(mutex);
+				InvalidateStateLocked();
+				ReleaseWriterLease();
+			}
 			return false;
 		}
 	}
@@ -1117,8 +1511,20 @@ namespace Util::ShaderCachePack
 
 	bool Store::Compact(std::string* a_error)
 	{
+		InitializeProgress compactionProgress = InitializeProgress::Unchanged;
 		try {
 			std::unique_lock lock(mutex);
+			auto failAfterMutation = [&](std::string_view a_fallbackError = {}) noexcept {
+				InvalidateStateLocked();
+				ReleaseWriterLease();
+				if (!a_fallbackError.empty()) {
+					try {
+						SetError(a_error, std::string(a_fallbackError));
+					} catch (...) {
+					}
+				}
+				return false;
+			};
 			if (!opened || !fallback.exists) {
 				SetError(a_error, "both fixed A/B files are required for compaction");
 				return false;
@@ -1142,24 +1548,48 @@ namespace Util::ShaderCachePack
 				return false;
 			}
 			ScannedFile target = fallback;
-			if (!InitializeEmpty(target, active.generation + 1, a_error))
-				return false;
+			if (!InitializeEmpty(target, active.generation + 1, a_error, &compactionProgress))
+				return compactionProgress == InitializeProgress::Unchanged ? false : failAfterMutation();
 			std::uint64_t sequence = 1;
 			for (const auto& entry : live) {
 				if (!AppendLocked(target, entry, sequence++, false, a_error))
-					return false;
+					return failAfterMutation();
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+				if (ConsumeTestFailurePoint(TestFailurePoint::DuringCompactionCopy)) {
+					return failAfterMutation("injected failure during shader pack compaction copy");
+				}
+#endif
 				target.validSize = std::filesystem::file_size(target.path);
 			}
 			if (!DurableFlush(target.path)) {
-				SetError(a_error, "failed to durably checkpoint compacted shader pack");
+				return failAfterMutation("failed to durably checkpoint compacted shader pack");
+			}
+			if (!OpenLocked(false, a_error)) {
+				ReleaseWriterLease();
 				return false;
 			}
-			return OpenLocked(a_error);
+			return true;
 		} catch (const std::exception& e) {
-			SetError(a_error, e.what());
+			if (compactionProgress != InitializeProgress::Unchanged) {
+				std::unique_lock lock(mutex);
+				InvalidateStateLocked();
+				ReleaseWriterLease();
+			}
+			try {
+				SetError(a_error, e.what());
+			} catch (...) {
+			}
 			return false;
 		} catch (...) {
-			SetError(a_error, "unknown shader pack compaction failure");
+			if (compactionProgress != InitializeProgress::Unchanged) {
+				std::unique_lock lock(mutex);
+				InvalidateStateLocked();
+				ReleaseWriterLease();
+			}
+			try {
+				SetError(a_error, "unknown shader pack compaction failure");
+			} catch (...) {
+			}
 			return false;
 		}
 	}
@@ -1167,10 +1597,18 @@ namespace Util::ShaderCachePack
 	ResetDisposition Store::Reset(std::string* a_error)
 	{
 		bool barrierCommitted = false;
+		bool admissionPending = false;
+		InitializeProgress resetProgress = InitializeProgress::Unchanged;
 		try {
 			std::unique_lock lock(mutex);
-			if (!opened && !OpenLocked(a_error))
-				return ResetDisposition::FailedBeforeCommit;
+			admissionPending = !opened;
+			if (admissionPending) {
+				if (!OpenLocked(false, a_error)) {
+					ReleaseWriterLease();
+					return ResetDisposition::FailedBeforeCommit;
+				}
+				admissionPending = false;
+			}
 			if (!active.exists || !fallback.exists) {
 				SetError(a_error, "both fixed A/B files are required to reset a managed shader pack");
 				return ResetDisposition::FailedBeforeCommit;
@@ -1184,10 +1622,35 @@ namespace Util::ShaderCachePack
 			// The +2 gap makes RebuildIndexes ignore the previous generation even if
 			// cleanup of that old file is interrupted.
 			ScannedFile resetTarget = fallback;
-			if (!InitializeEmpty(resetTarget, active.generation + 2, a_error))
-				return ResetDisposition::FailedBeforeCommit;
+			if (!InitializeEmpty(resetTarget, active.generation + 2, a_error, &resetProgress)) {
+				if (resetProgress == InitializeProgress::Unchanged)
+					return ResetDisposition::FailedBeforeCommit;
+
+				const bool durableBarrier = resetProgress == InitializeProgress::Durable;
+				std::string initializationError;
+				if (a_error)
+					initializationError.swap(*a_error);
+				InvalidateStateLocked();
+				ReleaseWriterLease();
+				try {
+					SetError(a_error, std::format(
+										  "managed pack reset {} but could not establish a verified authoritative generation{}{}",
+										  durableBarrier ? "barrier committed" : "mutation is commit-uncertain",
+										  initializationError.empty() ? "" : ": ",
+										  initializationError));
+				} catch (...) {
+					try {
+						SetError(a_error, durableBarrier ?
+											  "managed pack reset barrier committed but verification failed; detailed diagnostic unavailable" :
+											  "managed pack reset mutation is commit-uncertain; detailed diagnostic unavailable");
+					} catch (...) {
+					}
+				}
+				return ResetDisposition::CommittedDegraded;
+			}
 			barrierCommitted = true;
-			if (!OpenLocked(a_error)) {
+			if (!OpenLocked(false, a_error)) {
+				ReleaseWriterLease();
 				if (a_error && a_error->empty())
 					*a_error = "managed pack reset committed but the authoritative empty generation could not be reopened";
 				else if (a_error)
@@ -1199,11 +1662,70 @@ namespace Util::ShaderCachePack
 			// file is cleanup only; a failure must not invalidate the new empty store.
 			ScannedFile oldGeneration = fallback;
 			std::string cleanupError;
-			if (!InitializeEmpty(oldGeneration, active.generation - 1, &cleanupError)) {
-				SetError(a_error, "managed pack reset committed; superseded generation cleanup failed: " + cleanupError);
+			auto retainAuthoritativeReset = [&]() noexcept {
+				opened = active.valid;
+				fallback.valid = false;
+				fallback.generation = 0;
+				fallback.fileSize = 0;
+				fallback.validSize = 0;
+				fallback.nextSequence = 1;
+				fallback.diagnostic.clear();
+				fallback.records.clear();
+				exactIndex.clear();
+				liveByLogical.clear();
+				activeLiveByLogical.clear();
+				stats = {
+					.available = opened,
+					.activeGeneration = active.generation,
+					.totalBytes = active.fileSize,
+					.corruptTailBytes = active.fileSize - active.validSize,
+				};
+			};
+			auto reportCleanupFailure = [&](std::string_view a_detail) noexcept {
+				retainAuthoritativeReset();
+				try {
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+					if (ConsumeTestFailurePoint(TestFailurePoint::ThrowDuringResetCleanupDiagnostic))
+						throw std::runtime_error("injected exception during shader pack reset cleanup diagnostic");
+#endif
+					SetError(a_error, std::format(
+										  "managed pack reset committed; superseded generation cleanup failed{}{}",
+										  a_detail.empty() ? "" : ": ",
+										  a_detail));
+				} catch (...) {
+					try {
+						SetError(a_error, "managed pack reset committed; superseded generation cleanup failed; detailed diagnostic unavailable");
+					} catch (...) {
+					}
+				}
 				return ResetDisposition::CommittedDegraded;
+			};
+			InitializeProgress cleanupProgress = InitializeProgress::Unchanged;
+			try {
+				if (!InitializeEmpty(
+						oldGeneration,
+						active.generation - 1,
+						&cleanupError,
+						&cleanupProgress,
+						InitializePurpose::ResetCleanup))
+					return reportCleanupFailure(cleanupError);
+			} catch (const std::exception& e) {
+				return reportCleanupFailure(e.what());
+			} catch (...) {
+				return reportCleanupFailure("unknown cleanup exception");
 			}
-			if (!OpenLocked(a_error)) {
+			bool finalReopened = false;
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+			if (ConsumeTestFailurePoint(TestFailurePoint::BeforeFinalResetReopen)) {
+				InvalidateStateLocked();
+				SetError(a_error, "injected failure before final shader pack reset reopen");
+			} else
+#endif
+			{
+				finalReopened = OpenLocked(false, a_error);
+			}
+			if (!finalReopened) {
+				ReleaseWriterLease();
 				if (a_error && a_error->empty())
 					*a_error = "managed pack reset committed but final reopen failed";
 				else if (a_error)
@@ -1212,11 +1734,40 @@ namespace Util::ShaderCachePack
 			}
 			return ResetDisposition::Complete;
 		} catch (const std::exception& e) {
-			SetError(a_error, e.what());
-			return barrierCommitted ? ResetDisposition::CommittedDegraded : ResetDisposition::FailedBeforeCommit;
+			const bool changedOrCommitted = barrierCommitted || resetProgress != InitializeProgress::Unchanged;
+			{
+				std::unique_lock lock(mutex);
+				InvalidateStateLocked();
+				ReleaseWriterLease();
+			}
+			try {
+				SetError(a_error, std::format(
+									  "managed pack reset {} after an exception: {}",
+									  barrierCommitted || resetProgress == InitializeProgress::Durable ?
+										  "barrier committed" :
+									  changedOrCommitted ? "mutation is commit-uncertain" :
+														   "failed before mutation",
+									  e.what()));
+			} catch (...) {
+			}
+			return changedOrCommitted ? ResetDisposition::CommittedDegraded : ResetDisposition::FailedBeforeCommit;
 		} catch (...) {
-			SetError(a_error, "unknown shader pack reset failure");
-			return barrierCommitted ? ResetDisposition::CommittedDegraded : ResetDisposition::FailedBeforeCommit;
+			const bool changedOrCommitted = barrierCommitted || resetProgress != InitializeProgress::Unchanged;
+			{
+				std::unique_lock lock(mutex);
+				InvalidateStateLocked();
+				ReleaseWriterLease();
+			}
+			try {
+				SetError(a_error,
+					barrierCommitted || resetProgress == InitializeProgress::Durable ?
+						"managed pack reset barrier committed before an unknown exception" :
+					changedOrCommitted ?
+						"managed pack reset mutation is commit-uncertain after an unknown exception" :
+						"unknown shader pack reset failure before mutation");
+			} catch (...) {
+			}
+			return changedOrCommitted ? ResetDisposition::CommittedDegraded : ResetDisposition::FailedBeforeCommit;
 		}
 	}
 }
