@@ -462,6 +462,131 @@ int main(int argc, char** argv)
 		assert(!layoutError.empty());
 		assert(std::filesystem::file_size(regularMember) == 0);
 	}
+#ifdef _WIN32
+	// Admission resolves relative names once and guards every ordinary parent.
+	// Later current-directory changes cannot redirect reads or mutations.
+	{
+		const auto originalWorkingDirectory = std::filesystem::current_path();
+		const auto stableRoot = root / "stable-relative-root";
+		const auto alternateRoot = root / "alternate-relative-root";
+		const auto relativeDirectory = std::filesystem::path("Data") / "ShaderCache";
+		std::filesystem::create_directories(stableRoot / relativeDirectory);
+		std::filesystem::create_directories(alternateRoot / relativeDirectory);
+		for (const auto& base : { stableRoot, alternateRoot }) {
+			std::ofstream(base / relativeDirectory / "Optimized.A.csxpack", std::ios::binary).close();
+			std::ofstream(base / relativeDirectory / "Optimized.B.csxpack", std::ios::binary).close();
+		}
+		std::filesystem::current_path(stableRoot);
+		std::string stableError;
+		Store stable(
+			relativeDirectory / "Optimized.A.csxpack",
+			relativeDirectory / "Optimized.B.csxpack",
+			Lane::Optimized,
+			TestPackSetId());
+		assert(stable.InitializeEmptyFilesAndOpen(&stableError));
+		std::filesystem::current_path(alternateRoot);
+		assert(stable.Append(MakeEntry("stable", "stable-exact", 0x70), &stableError));
+		assert(stable.Checkpoint(&stableError));
+		assert(stable.Find("stable-exact", &stableError));
+		assert(stable.Compact(&stableError));
+		assert(stable.Find("stable-exact", &stableError));
+		assert(stable.Reset(&stableError) == ResetDisposition::Complete);
+		assert(!stable.Find("stable-exact", &stableError));
+		assert(std::filesystem::file_size(
+				   alternateRoot / relativeDirectory / "Optimized.A.csxpack") == 0);
+		assert(std::filesystem::file_size(
+				   alternateRoot / relativeDirectory / "Optimized.B.csxpack") == 0);
+		std::error_code renameError;
+		std::filesystem::rename(
+			stableRoot / relativeDirectory,
+			stableRoot / "displaced-cache",
+			renameError);
+		assert(renameError);
+		stable.Close();
+		renameError.clear();
+		std::filesystem::rename(
+			stableRoot / relativeDirectory,
+			stableRoot / "displaced-cache",
+			renameError);
+		assert(!renameError);
+		std::filesystem::current_path(originalWorkingDirectory);
+	}
+
+	// An intermediate directory reparse point is rejected before either member
+	// is admitted. The test is conditional when symlink creation is unavailable.
+	{
+		const auto target = root / "reparse-target";
+		const auto link = root / "reparse-link";
+		std::filesystem::create_directories(target);
+		const auto first = target / "Optimized.A.csxpack";
+		const auto second = target / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		std::string setupError;
+		{
+			Store setup(first, second, Lane::Optimized, TestPackSetId());
+			assert(setup.InitializeEmptyFilesAndOpen(&setupError));
+		}
+		constexpr DWORD allowUnprivilegedCreate = 0x2;
+		if (CreateSymbolicLinkW(
+				link.c_str(), target.c_str(),
+				SYMBOLIC_LINK_FLAG_DIRECTORY | allowUnprivilegedCreate)) {
+			std::string reparseError;
+			Store throughReparse(
+				link / first.filename(), link / second.filename(),
+				Lane::Optimized, TestPackSetId());
+			assert(!throughReparse.Open(&reparseError));
+			assert(reparseError.find("reparse") != std::string::npos);
+		}
+	}
+
+	// Ownership acquired before a thrown admission step must be reacquirable in
+	// the same process without terminating it.
+	{
+		const auto failureRoot = root / "registry-failure";
+		std::filesystem::create_directories(failureRoot);
+		const auto first = failureRoot / "Optimized.A.csxpack";
+		const auto second = failureRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		std::string failureError;
+		{
+			Store setup(first, second, Lane::Optimized, TestPackSetId());
+			assert(setup.InitializeEmptyFilesAndOpen(&failureError));
+		}
+		SetTestFailurePoints(static_cast<std::uint32_t>(TestFailurePoint::AfterRegistryInsert));
+		Store failed(first, second, Lane::Optimized, TestPackSetId());
+		assert(!failed.Open(&failureError));
+		Store recovered(first, second, Lane::Optimized, TestPackSetId());
+		assert(recovered.Open(&failureError));
+	}
+
+	// A failed isolated bootstrap reports when its attempted rollback cannot
+	// establish the original zero-byte state.
+	{
+		const auto rollbackRoot = root / "bootstrap-rollback-failure";
+		std::filesystem::create_directories(rollbackRoot);
+		const auto first = rollbackRoot / "Optimized.A.csxpack";
+		const auto second = rollbackRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		const auto failurePoints =
+			static_cast<std::uint32_t>(TestFailurePoint::BeforeSecondBootstrapInitialization) |
+			static_cast<std::uint32_t>(TestFailurePoint::DuringBootstrapRollback);
+		SetTestFailurePoints(failurePoints);
+		std::string rollbackError;
+		{
+			Store failed(first, second, Lane::Optimized, TestPackSetId());
+			assert(!failed.InitializeEmptyFilesAndOpen(&rollbackError));
+			assert(rollbackError.find("rollback failed") != std::string::npos);
+			assert(std::filesystem::file_size(first) > 0);
+			assert(std::filesystem::file_size(second) == 0);
+		}
+		std::ofstream(first, std::ios::binary | std::ios::trunc).close();
+		Store recovered(first, second, Lane::Optimized, TestPackSetId());
+		assert(recovered.InitializeEmptyFilesAndOpen(&rollbackError));
+	}
+#endif
 	{
 		const auto invalidLayoutRoot = root / "malformed-layout";
 		std::filesystem::create_directories(invalidLayoutRoot);

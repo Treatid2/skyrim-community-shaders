@@ -603,9 +603,9 @@ namespace SIE
 						return;
 					}
 
-					packs.optimized = std::make_unique<Util::ShaderCachePack::Store>(
+					auto optimized = std::make_unique<Util::ShaderCachePack::Store>(
 						packPaths[0], packPaths[1], Util::ShaderCachePack::Lane::Optimized, contract->packSetId);
-					packs.developer = std::make_unique<Util::ShaderCachePack::Store>(
+					auto developer = std::make_unique<Util::ShaderCachePack::Store>(
 						packPaths[2], packPaths[3], Util::ShaderCachePack::Lane::Developer, contract->packSetId);
 					auto openLane = [&](Util::ShaderCachePack::Store& a_store,
 										std::string_view a_name) {
@@ -619,22 +619,22 @@ namespace SIE
 					};
 
 					const bool optimizedOpen = openLane(
-						*packs.optimized,
+						*optimized,
 						"Optimized");
 					const bool developerOpen = openLane(
-						*packs.developer,
+						*developer,
 						"Developer");
 
 					bool manifestFilesValid = false;
 					if (optimizedOpen && developerOpen) {
-						const auto optimizedIdentities = packs.optimized->GetFileIdentityKeys();
-						const auto developerIdentities = packs.developer->GetFileIdentityKeys();
+						const auto optimizedIdentities = optimized->GetFileIdentityKeys();
+						const auto developerIdentities = developer->GetFileIdentityKeys();
 						const std::array identities{
 							optimizedIdentities[0], optimizedIdentities[1],
 							developerIdentities[0], developerIdentities[1]
 						};
-						const auto optimizedStates = packs.optimized->GetFileStates();
-						const auto developerStates = packs.developer->GetFileStates();
+						const auto optimizedStates = optimized->GetFileStates();
+						const auto developerStates = developer->GetFileStates();
 						const std::array states{
 							optimizedStates[0], optimizedStates[1], developerStates[0], developerStates[1]
 						};
@@ -654,17 +654,28 @@ namespace SIE
 						logger::error(
 							"Managed shader pack layout is not fully valid; retaining legacy loose-cache fallback: {}",
 							manifestError);
-						packs.optimized.reset();
-						packs.developer.reset();
+						return;
 					}
+					packs.optimized = std::move(optimized);
+					packs.developer = std::move(developer);
 
 					logger::info(
 						"Managed shader pack layout initialized (optimized={}, developer={})",
 						optimizedOpen,
 						developerOpen);
 				} catch (const std::exception& e) {
+					packs.optimizedAvailable.store(false, std::memory_order_release);
+					packs.developerAvailable.store(false, std::memory_order_release);
+					packs.layoutState = Util::ShaderCachePack::LayoutState::PartialOrInvalid;
+					packs.optimized.reset();
+					packs.developer.reset();
 					logger::error("Managed shader pack initialization failed: {}", e.what());
 				} catch (...) {
+					packs.optimizedAvailable.store(false, std::memory_order_release);
+					packs.developerAvailable.store(false, std::memory_order_release);
+					packs.layoutState = Util::ShaderCachePack::LayoutState::PartialOrInvalid;
+					packs.optimized.reset();
+					packs.developer.reset();
 					logger::error("Managed shader pack initialization failed");
 				}
 			});

@@ -624,13 +624,17 @@ thresholds. It writes current logical records into the inactive file at a
 higher generation and leaves the old generation searchable as fallback.
 
 Initial runtime admission is non-mutating. Every shipped A/B member must already
-contain a valid header; zero-byte placeholders, directories, reparse points,
+contain a valid header; zero-byte placeholders, directories, reparse points in
+any path component,
 unreadable files, and same-object aliases are rejected without modifying any
-peer. On Windows, the writer lease requires physical identity for each member
-and retains non-delete-sharing identity handles so admitted paths cannot be
-replaced while the lease is active. The four optimized/developer members must
+peer. On Windows, the writer lease requires physical identity for each member,
+resolves relative names once, and retains non-delete-sharing parent and final
+file handles so admitted paths cannot be rebound or replaced while the lease is
+active. The four optimized/developer members must
 resolve to four distinct file identities, and any whole-layout rejection
-releases all provisional lane ownership.
+releases all provisional lane ownership. Explicit zero-byte bootstrap verifies
+both truncation and durable flush during rollback and reports a distinct
+rollback failure when the original empty state cannot be established.
 
 Schema-2 installation baselines require adjacent A/B generations. Later runtime
 compaction or reset may produce a larger actual generation gap. Record sequences

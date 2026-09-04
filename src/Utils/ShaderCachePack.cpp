@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cstring>
 #include <fstream>
@@ -11,6 +12,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <ranges>
+#include <stdexcept>
 #include <unordered_set>
 
 #ifdef _WIN32
@@ -78,7 +80,68 @@ namespace
 	std::mutex g_writerLeaseRegistryMutex;
 	std::unordered_set<std::string> g_writerLeaseRegistry;
 
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+	std::atomic<std::uint32_t> g_testFailurePoints{ 0 };
+
+	bool ConsumeTestFailurePoint(Util::ShaderCachePack::TestFailurePoint a_failurePoint)
+	{
+		const auto mask = static_cast<std::uint32_t>(a_failurePoint);
+		return (g_testFailurePoints.fetch_and(~mask) & mask) != 0;
+	}
+#endif
+
 #ifdef _WIN32
+	bool AcquireStablePathGuards(
+		std::filesystem::path& a_path,
+		std::vector<void*>& a_handles,
+		std::string* a_error)
+	{
+		std::error_code absoluteError;
+		const auto absolutePath = std::filesystem::absolute(a_path, absoluteError).lexically_normal();
+		if (absoluteError || !absolutePath.has_root_path() || !absolutePath.has_parent_path()) {
+			SetError(a_error, std::format(
+								  "failed to resolve absolute managed shader pack path '{}' ({})",
+								  a_path.string(),
+								  absoluteError ? absoluteError.message() : "path has no stable parent"));
+			return false;
+		}
+
+		auto current = absolutePath.root_path();
+		for (const auto& component : absolutePath.parent_path().relative_path()) {
+			current /= component;
+			const HANDLE directory = CreateFileW(
+				current.c_str(), FILE_READ_ATTRIBUTES,
+				FILE_SHARE_READ | FILE_SHARE_WRITE,
+				nullptr, OPEN_EXISTING,
+				FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+			if (directory == INVALID_HANDLE_VALUE) {
+				SetError(a_error, std::format(
+									  "failed to guard managed shader pack parent '{}' (Windows error {})",
+									  current.string(), GetLastError()));
+				return false;
+			}
+			BY_HANDLE_FILE_INFORMATION information{};
+			if (!GetFileInformationByHandle(directory, &information) ||
+				(information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+				(information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+				const auto identityError = GetLastError();
+				CloseHandle(directory);
+				SetError(a_error, std::format(
+									  "managed shader pack parent '{}' is not a stable non-reparse directory (Windows error {})",
+									  current.string(), identityError));
+				return false;
+			}
+			try {
+				a_handles.push_back(directory);
+			} catch (...) {
+				CloseHandle(directory);
+				throw;
+			}
+		}
+		a_path = absolutePath;
+		return true;
+	}
+
 	bool AcquireFileIdentityGuard(
 		const std::filesystem::path& a_path,
 		void*& a_handle,
@@ -293,6 +356,13 @@ namespace
 
 namespace Util::ShaderCachePack
 {
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+	void SetTestFailurePoints(std::uint32_t a_failurePoints)
+	{
+		g_testFailurePoints.store(a_failurePoints);
+	}
+#endif
+
 	bool IsValidPackSetId(const PackSetId& a_packSetId)
 	{
 		return std::ranges::any_of(a_packSetId, [](std::byte a_value) { return a_value != std::byte{}; });
@@ -492,7 +562,9 @@ namespace Util::ShaderCachePack
 		}
 
 #ifdef _WIN32
-		if (!AcquireFileIdentityGuard(pathA, fileIdentityHandles[0], fileIdentityKeys[0], a_error) ||
+		if (!AcquireStablePathGuards(pathA, pathGuardHandles, a_error) ||
+			!AcquireStablePathGuards(pathB, pathGuardHandles, a_error) ||
+			!AcquireFileIdentityGuard(pathA, fileIdentityHandles[0], fileIdentityKeys[0], a_error) ||
 			!AcquireFileIdentityGuard(pathB, fileIdentityHandles[1], fileIdentityKeys[1], a_error)) {
 			ReleaseWriterLease();
 			return false;
@@ -517,7 +589,12 @@ namespace Util::ShaderCachePack
 				ReleaseWriterLease();
 				return false;
 			}
+			processRegistryOwned = true;
 		}
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+		if (ConsumeTestFailurePoint(TestFailurePoint::AfterRegistryInsert))
+			throw std::runtime_error("injected shader pack failure after writer-registry insertion");
+#endif
 
 #ifdef _WIN32
 		const auto digest = CryptoHash::Sha256Hex(leaseKey);
@@ -584,12 +661,18 @@ namespace Util::ShaderCachePack
 				CloseHandle(static_cast<HANDLE>(handle));
 			handle = nullptr;
 		}
+		for (auto& handle : pathGuardHandles) {
+			if (handle)
+				CloseHandle(static_cast<HANDLE>(handle));
+		}
+		pathGuardHandles.clear();
 #endif
-		if (leaseOwned && !leaseKey.empty()) {
+		if (processRegistryOwned && !leaseKey.empty()) {
 			std::lock_guard registryLock(g_writerLeaseRegistryMutex);
 			g_writerLeaseRegistry.erase(leaseKey);
 		}
 		leaseOwned = false;
+		processRegistryOwned = false;
 		leaseKey.clear();
 		fileIdentityKeys = {};
 	}
@@ -835,15 +918,54 @@ namespace Util::ShaderCachePack
 				return false;
 			}
 
-			auto restoreEmptyPair = [&] {
+			auto restoreEmptyPair = [&](std::string& a_rollbackError) {
+				bool restored = true;
 				for (const auto& path : { pathA, pathB }) {
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+					if (ConsumeTestFailurePoint(TestFailurePoint::DuringBootstrapRollback)) {
+						restored = false;
+						a_rollbackError += std::format(
+							"{}injected rollback failure for '{}'",
+							a_rollbackError.empty() ? "" : "; ", path.string());
+						continue;
+					}
+#endif
 					std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+					if (!stream) {
+						restored = false;
+						a_rollbackError += std::format("{}failed to truncate '{}'", a_rollbackError.empty() ? "" : "; ", path.string());
+						continue;
+					}
 					stream.close();
-					DurableFlush(path);
+					std::error_code sizeError;
+					const auto restoredSize = std::filesystem::file_size(path, sizeError);
+					if (!stream.good() || sizeError || restoredSize != 0 || !DurableFlush(path)) {
+						restored = false;
+						a_rollbackError += std::format(
+							"{}failed to verify and durably flush zero-byte rollback for '{}'",
+							a_rollbackError.empty() ? "" : "; ", path.string());
+					}
 				}
+				return restored;
 			};
-			if (!InitializeEmpty(a, 1, a_error) || !InitializeEmpty(b, 0, a_error)) {
-				restoreEmptyPair();
+			const bool initializedA = InitializeEmpty(a, 1, a_error);
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+			const bool initializeB = !ConsumeTestFailurePoint(TestFailurePoint::BeforeSecondBootstrapInitialization);
+			if (!initializeB)
+				SetError(a_error, "injected failure before second shader pack bootstrap initialization");
+#else
+			constexpr bool initializeB = true;
+#endif
+			if (!initializedA || !initializeB || !InitializeEmpty(b, 0, a_error)) {
+				const auto initializationError = a_error ? *a_error : std::string{};
+				std::string rollbackError;
+				if (!restoreEmptyPair(rollbackError)) {
+					SetError(a_error, std::format(
+										  "{}{}bootstrap rollback failed: {}",
+										  initializationError,
+										  initializationError.empty() ? "" : "; ",
+										  rollbackError));
+				}
 				opened = false;
 				return false;
 			}

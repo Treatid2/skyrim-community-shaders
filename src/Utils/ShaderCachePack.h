@@ -98,6 +98,17 @@ namespace Util::ShaderCachePack
 		const std::array<std::string, 4>& a_identities,
 		std::string* a_error = nullptr);
 
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+	enum class TestFailurePoint : std::uint32_t
+	{
+		None = 0,
+		AfterRegistryInsert = 1u << 0,
+		BeforeSecondBootstrapInitialization = 1u << 1,
+		DuringBootstrapRollback = 1u << 2
+	};
+	void SetTestFailurePoints(std::uint32_t a_failurePoints);
+#endif
+
 	// A complete, readable managed pack set is authoritative. A miss in that
 	// set means the exact shader contract must be compiled; consulting a legacy
 	// loose blob would bypass pack identity and compatibility validation.
@@ -134,10 +145,10 @@ namespace Util::ShaderCachePack
 
 	/**
 	 * Two-generation append-only shader pack. Both paths must already exist;
-	 * runtime never creates a new MO2/VFS file. Empty shipped files may be
-	 * initialized in place. A committed record is visible only when its trailer
-	 * and payload hash validate. Invalid tail bytes are ignored and truncated
-	 * before the next append.
+	 * runtime never creates or initializes a new MO2/VFS file. The isolated
+	 * bootstrap entry point may initialize an existing empty pair. A committed
+	 * record is visible only when its trailer and payload hash validate. Invalid
+	 * tail bytes are ignored and truncated before the next append.
 	 */
 	class Store
 	{
@@ -208,9 +219,11 @@ namespace Util::ShaderCachePack
 		std::string leaseKey;
 		std::array<std::string, 2> fileIdentityKeys{};
 		bool leaseOwned = false;
+		bool processRegistryOwned = false;
 #ifdef _WIN32
 		void* leaseHandle = nullptr;
 		std::array<void*, 2> fileIdentityHandles{};
+		std::vector<void*> pathGuardHandles;
 #endif
 		ScannedFile active;
 		ScannedFile fallback;
