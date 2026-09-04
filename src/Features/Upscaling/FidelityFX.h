@@ -5,6 +5,7 @@
 #include <winrt/base.h>
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -60,7 +61,17 @@ public:
 	enum class StereoUpscaleResult : uint8_t
 	{
 		NotHandled,
+		Deferred,
 		Ready,
+		Failed
+	};
+	enum class UpscaleResult : uint8_t
+	{
+		/** The runtime lifecycle intentionally withheld this frame's dispatch. */
+		Deferred,
+		/** The dispatch produced an output suitable for the current frame. */
+		Ready,
+		/** Dispatch preparation or execution failed. */
 		Failed
 	};
 	/** @brief Complete resource and active-extent contract for one FSR context. */
@@ -100,7 +111,9 @@ public:
 	HMODULE module = nullptr;
 
 	ffx::Context swapChainContext{};
-	ffx::Context frameGenContext;
+	ffx::Context frameGenContext{};
+	bool swapChainContextValid = false;
+	bool frameGenContextValid = false;
 	FfxFsr3Context fsrContext[2];
 
 	bool featureFSR3FG = false;
@@ -113,14 +126,39 @@ public:
 	static std::vector<std::pair<std::string, std::string>> dllVersions;
 
 	void LoadFFX();
-	void SetupFrameGeneration();
-	void Present(bool a_useFrameGeneration);
+	bool IsFrameGenerationRuntimeReady() const noexcept;
+	bool IsFrameGenerationQuarantined() const noexcept;
+	bool IsFrameGenerationDisableConfirmed() const noexcept;
+	bool CreateFrameGenerationContext(ffx::Context& a_context, ffxCreateContextDescHeader* a_desc) noexcept;
+	bool SetupFrameGeneration();
+	bool ResetFrameGenerationRenderContext() noexcept;
+	bool ResetFrameGenerationContexts() noexcept;
+	bool Present(bool a_useFrameGeneration) noexcept;
+	ffxReturnCode_t DispatchFrameGenerationCallback(ffxDispatchDescFrameGeneration* a_parameters) noexcept;
 
 	LifecycleResult CreateFSRResources();
 
 	LifecycleResult DestroyFSRResources(bool a_waitForIdle = true);
 	bool HasFSRResources() const;
 	bool AreFSRResourcesCompatible(uint32_t a_renderWidth, uint32_t a_renderHeight, uint32_t a_displayWidth, uint32_t a_displayHeight, uint32_t a_contextCount) const;
+	/** @brief Returns whether the active D3D11 feature level can execute the host FSR3 shader set. */
+	bool IsHostFSR3Supported() const noexcept;
+	/** @brief Prepares the primary runtime FSR contexts without requiring dispatch resources. */
+	LifecycleResult PrepareRuntimeUpscalerContextsForFSR(
+		uint32_t a_renderWidth,
+		uint32_t a_renderHeight,
+		uint32_t a_displayWidth,
+		uint32_t a_displayHeight,
+		uint32_t a_contextCount,
+		bool a_requestFsr4);
+	/** @brief Proves a compatible host or primary runtime FSR context generation. */
+	bool AreFSRProviderContextsCompatible(
+		uint32_t a_renderWidth,
+		uint32_t a_renderHeight,
+		uint32_t a_displayWidth,
+		uint32_t a_displayHeight,
+		uint32_t a_contextCount,
+		bool a_requestFsr4) const;
 	/** @brief Proves a complete reusable runtime FSR provider generation. */
 	bool AreRuntimeUpscalerResourcesCompatible(
 		uint32_t a_fullRenderWidth,
@@ -150,6 +188,8 @@ public:
 	bool IsRuntimeUpscalerProviderMatchingRequestedVersion() const;
 	bool IsRuntimeUpscalerFailureLatched() const;
 	bool IsRuntimeFsr4FailureLatched() const;
+	/** @brief Validates that the provider which produced a dispatch proof remains usable. */
+	bool IsRuntimeUpscalerDispatchProofUsable(RuntimeUpscalerFramePath a_path) const;
 	const std::string& GetRuntimeUpscalerLastFramePathLabel() const;
 	const std::string& GetConfiguredFsrPathLabel() const;
 	const std::string& GetDisplayedFsrPathLabel() const;
@@ -162,7 +202,7 @@ public:
 	RuntimeUpscalerDispatchSnapshot GetRuntimeUpscalerDispatchSnapshotForRenderThread() const;
 #endif
 
-	bool Upscale(ID3D11Resource* a_upscalingTexture, ID3D11Resource* a_depth, ID3D11Resource* a_reactiveMask, ID3D11Resource* a_transparencyCompositionMask, ID3D11Resource* a_motionVectors, float a_sharpness);
+	UpscaleResult Upscale(ID3D11Resource* a_upscalingTexture, ID3D11Resource* a_depth, ID3D11Resource* a_reactiveMask, ID3D11Resource* a_transparencyCompositionMask, ID3D11Resource* a_motionVectors, float a_sharpness);
 	bool UpscaleRegion(uint32_t a_contextIndex, ID3D11Resource* a_color, ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
 		ID3D11Resource* a_reactiveMask, ID3D11Resource* a_transparencyCompositionMask, ID3D11Resource* a_output,
 		uint32_t a_renderWidth, uint32_t a_renderHeight, uint32_t a_displayWidth, uint32_t a_displayHeight,
@@ -171,6 +211,13 @@ public:
 	StereoUpscaleResult UpscaleStereoRegions(const std::array<UpscaleRegionParameters, 2>& a_regions);
 
 private:
+	bool ConfirmFrameGenerationDisabled(uint64_t a_frameID) noexcept;
+	void QuarantineFrameGenerationForSession(const char* a_reason, bool a_disableConfirmed = false) noexcept;
+	std::atomic_bool frameGenerationSessionQuarantined{ false };
+	std::atomic_bool frameGenerationDisableConfirmed{ true };
+	bool frameGenContextIndeterminate = false;
+	bool swapChainContextIndeterminate = false;
+
 	LifecycleResult RecordFSRDeviceStatus() noexcept;
 	LifecycleResult RecordRuntimeUpscalerDeviceStatus() noexcept;
 	LifecycleResult ResolveFSRLifecycleFailure(const char* a_operation);
@@ -217,6 +264,7 @@ private:
 	uint64_t pendingRuntimeTeardownD3D11FenceValue = 0;
 	uint64_t pendingRuntimeTeardownD3D12FenceValue = 0;
 	uint64_t runtimeFenceValue = 1;
+	bool runtimeUpscalerIdleProofValid = false;
 
 	static constexpr uint32_t kRuntimeCommandContextCount = 8;
 	struct RuntimeCommandContext
@@ -283,6 +331,8 @@ private:
 	struct RuntimeDispatchPlan
 	{
 		bool valid = false;
+		bool deferred = false;
+		bool providerSetupDeferred = false;
 		bool runtimeFsr4Requested = false;
 		bool runtimeRequested = false;
 		bool vendorLifecycleMutationDeferred = false;
@@ -308,6 +358,7 @@ private:
 	void RecordRuntimeUpscalerFramePath(RuntimeUpscalerFramePath a_path);
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	void RecordDevBenchSuccessfulDispatch(RuntimeUpscalerFramePath a_path);
+	mutable std::mutex devBenchSuccessfulDispatchMutex;
 	RuntimeUpscalerDispatchSnapshot devBenchSuccessfulDispatch{};
 	uint64_t devBenchSuccessfulDispatchSerial = 0;
 #endif
@@ -318,6 +369,8 @@ private:
 	void ResetRuntimeCommandContexts();
 	void ReleaseIdleRuntimeUpscalerInterop();
 	bool HasRuntimeUpscalerResources() const;
+	bool IsRuntimeUpscalerTeardownFencePending() const;
+	LifecycleResult PollPendingRuntimeUpscalerTeardownFence(const char* a_reason);
 	bool HasCompleteRuntimeUpscalerSharedResources(uint32_t a_contextCount) const;
 	bool AreRuntimeUpscalerContextsCompatible(uint32_t a_fullRenderWidth, uint32_t a_fullRenderHeight, uint32_t a_fullDisplayWidth, uint32_t a_fullDisplayHeight, uint32_t a_contextCount, uint32_t a_requestedVersion) const;
 	LifecycleResult PollRuntimeUpscalerTeardownReady(const char* a_reason = nullptr);
@@ -331,6 +384,7 @@ private:
 		const D3D11_TEXTURE2D_DESC& a_transparencyDesc,
 		const D3D11_TEXTURE2D_DESC& a_outputDesc);
 	LifecycleResult ExecuteRuntimeUpscalerBatch(const RuntimeDispatchPlan& a_plan, std::span<const UpscaleRegionParameters> a_regions);
+	[[nodiscard]] bool CanDispatchHostFallbackForRegions(std::span<const UpscaleRegionParameters> a_regions) const;
 	LifecycleResult DispatchRuntimeUpscalerBatch(std::span<const UpscaleRegionParameters> a_regions);
 	LifecycleResult DestroyRuntimeUpscalerContexts(bool a_waitForIdle = true);
 	LifecycleResult DestroyRuntimeUpscalerResources(bool a_waitForIdle = true);

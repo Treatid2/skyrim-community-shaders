@@ -1,11 +1,15 @@
 #include "Features/ScreenshotFeature.h"
 #include "Features/Upscaling.h"
+#include "Features/Upscaling/VRRenderScaleDevBenchBridge.h"
 #include "Features/VR.h"
 #include "Features/VR/InSceneOverlaySubmitPolicy.h"
 #include "Features/VR/OpenVRSubmitLeasePolicy.h"
 #include "Globals.h"
 #include "Hooks.h"
 #include "Menu.h"
+#ifdef DEVBENCH_BRIDGE_ENABLED
+#	include "RenderMap/Runtime.h"
+#endif
 #include "State.h"
 #include "Util.h"
 #include "Utils/VRUtils.h"
@@ -33,6 +37,37 @@ using AttachMode = VR::Settings::OverlayAttachMode;
 
 namespace
 {
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	CSX::RenderMap::ResourceObservationInput DescribeSubmittedTexture(
+		ID3D11Texture2D* a_texture)
+	{
+		CSX::RenderMap::ResourceObservationInput result;
+		if (!a_texture)
+			return result;
+		D3D11_TEXTURE2D_DESC desc{};
+		a_texture->GetDesc(&desc);
+		result.d3dObject = reinterpret_cast<std::uintptr_t>(a_texture);
+		result.dimension = CSX::RenderMap::ResourceDimension::kTexture2D;
+		result.widthOrBytes = desc.Width;
+		result.height = desc.Height;
+		result.depthOrArraySize = desc.ArraySize;
+		result.mipLevels = desc.MipLevels;
+		result.format = desc.Format;
+		result.sampleCount = desc.SampleDesc.Count;
+		result.sampleQuality = desc.SampleDesc.Quality;
+		result.usage = desc.Usage;
+		result.bindFlags = desc.BindFlags;
+		result.cpuAccessFlags = desc.CPUAccessFlags;
+		result.miscFlags = desc.MiscFlags;
+		return result;
+	}
+
+	CSX::RenderMap::Eye RenderMapEye(vr::EVREye a_eye) noexcept
+	{
+		return a_eye == vr::Eye_Left ? CSX::RenderMap::Eye::kLeft : CSX::RenderMap::Eye::kRight;
+	}
+#endif
+
 	// Publish the cycle token and its promotion-sensitive cooldown policy as one
 	// atomic snapshot. Bit zero is the cycle-start cooldown; the remaining bits
 	// are the OpenVR Submit-cycle token.
@@ -126,6 +161,11 @@ namespace
 		       vr.ShouldPresentOverlayInHeadset() &&
 		       vr.menuTexture &&
 		       vr.GetEffectiveMenuAttachMode() != AttachMode::None;
+	}
+
+	bool ShouldRenderInSceneContent(const VR& vr)
+	{
+		return ShouldRenderInSceneMenu(vr) || vr.ShouldRenderCaptureIndicatorInScene();
 	}
 
 	bool MatchesSubmitCopyDesc(const D3D11_TEXTURE2D_DESC& lhs, const D3D11_TEXTURE2D_DESC& rhs)
@@ -581,6 +621,43 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 }
 )";
 
+	constexpr char kCaptureIndicatorCompositeCS[] = R"(
+cbuffer CaptureIndicatorCB : register(b0)
+{
+	uint2 TargetSize;
+	uint2 DispatchOrigin;
+	uint2 DispatchSize;
+	float2 CentrePixels;
+	float RadiusPixels;
+	float3 Padding;
+};
+
+RWTexture2D<float4> Target : register(u0);
+
+[numthreads(8, 8, 1)]
+void main(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+	if (dispatchThreadID.x >= DispatchSize.x || dispatchThreadID.y >= DispatchSize.y) {
+		return;
+	}
+
+	uint2 targetPixel = DispatchOrigin + dispatchThreadID.xy;
+	if (targetPixel.x >= TargetSize.x || targetPixel.y >= TargetSize.y) {
+		return;
+	}
+
+	float distanceFromCentre = length((float2(targetPixel) + 0.5f) - CentrePixels);
+	float alpha = saturate(RadiusPixels + 0.75f - distanceFromCentre);
+	if (alpha <= 0.0f) {
+		return;
+	}
+
+	float4 sceneColor = Target[targetPixel];
+	const float3 indicatorColor = float3(0.92f, 0.15f, 0.15f);
+	Target[targetPixel] = float4(lerp(sceneColor.rgb, indicatorColor, alpha), sceneColor.a);
+}
+)";
+
 	struct IVRCompositor_WaitGetPoses
 	{
 		static vr::EVRCompositorError thunk(
@@ -690,6 +767,15 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 													 const vr::Texture_t* a_texture,
 													 const vr::VRTextureBounds_t* a_bounds) {
 #ifdef DEVBENCH_BRIDGE_ENABLED
+				VRRenderScaleDevBenchBridge::RecordPresentationAuditObservation({
+					.valid = true,
+					.eyeIndex = static_cast<uint32_t>(eEye),
+					.frame = globals::state ? globals::state->frameCount : 0,
+					.compositorCycleToken = compositorCycleToken,
+					.submitted = false,
+					.selection = VRRenderScaleDevBenchBridge::
+						PresentationAuditSelection::Quarantine,
+				});
 				const uint64_t probeSequence =
 					upscaling.BeginVRLoadPresentationProbeSubmit(
 						"compositor-quarantine",
@@ -728,16 +814,67 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 							  const Upscaling::VRRenderScalePresentationObservation* a_probeObservation = nullptr,
 							  Upscaling::VRPostLoadCompositorKeepaliveDisposition* a_keepaliveDisposition = nullptr,
 							  bool a_allowPostLoadScopeRebase = false,
-							  bool a_allowScreenshotCapture = true) {
+							  bool a_allowScreenshotCapture = true,
+							  bool a_auditBlackKeepalive = false,
+							  const vr::Texture_t* a_screenshotTexture = nullptr,
+							  const vr::VRTextureBounds_t* a_screenshotBounds = nullptr) {
 				(void)a_probeObservation;
+				(void)a_auditBlackKeepalive;
+				const bool observeScreenshot =
+					a_allowScreenshotCapture &&
+					globals::features::screenshotFeature.HasPendingCapture();
+				winrt::com_ptr<ID3D11Texture2D> screenshotTextureLifetime;
+				OpenVRSubmitLeasePolicy::PublicationLease screenshotLease{};
+				vr::VRTextureBounds_t retainedScreenshotBounds{};
+				bool hasScreenshotBounds = false;
+				vr::EColorSpace screenshotColorSpace = vr::ColorSpace_Auto;
 				const RetainedOpenVRSubmitPacket submitPacket = [&]() {
 					const std::shared_lock renderTargetReadLock(
 						Hooks::GetRenderTargetRecreationMutex());
-					return CaptureRetainedOpenVRSubmitPacketLocked(
+					auto packet = CaptureRetainedOpenVRSubmitPacketLocked(
 						eEye,
 						a_texture,
 						a_bounds,
 						a_submitFlags);
+					if (!observeScreenshot)
+						return packet;
+
+					const vr::Texture_t* screenshotTexture =
+						a_screenshotTexture ? a_screenshotTexture : packet.GetTexture();
+					const vr::VRTextureBounds_t* screenshotBounds =
+						a_screenshotTexture ? a_screenshotBounds : packet.GetBounds();
+					if (!screenshotTexture ||
+						!screenshotTexture->handle ||
+						screenshotTexture->eType != vr::TextureType_DirectX)
+						return packet;
+
+					screenshotTextureLifetime = a_screenshotTexture ?
+					                                RetainExactOpenVRSubmitTexture(screenshotTexture->handle) :
+					                                packet.colorLifetime;
+					if (!screenshotTextureLifetime)
+						return packet;
+
+					winrt::com_ptr<ID3D11Device> screenshotDevice;
+					screenshotTextureLifetime->GetDevice(screenshotDevice.put());
+					if (!screenshotDevice || screenshotDevice.get() != globals::d3d::device) {
+						screenshotTextureLifetime = nullptr;
+						return packet;
+					}
+					if (screenshotBounds) {
+						retainedScreenshotBounds = *screenshotBounds;
+						hasScreenshotBounds = true;
+					}
+					screenshotColorSpace = screenshotTexture->eColorSpace;
+					screenshotLease = {
+						.generation = globals::state ?
+						                  globals::state->GetCompletedRenderTargetResourcePublicationGeneration() :
+						                  0u,
+						.deviceIdentity = reinterpret_cast<std::uintptr_t>(screenshotDevice.get()),
+						.colorTextureRetained = true,
+						.depthTextureRequired = false,
+						.depthTextureRetained = true,
+					};
+					return packet;
 				}();
 				const auto isSubmitPacketCurrent = [&]() {
 					const std::shared_lock renderTargetReadLock(
@@ -761,9 +898,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 					a_probeObservation);
 #endif
 				vr::EVRCompositorError result = submitPacket.captureError;
-				const bool observeScreenshot =
-					a_allowScreenshotCapture &&
-					globals::features::screenshotFeature.HasPendingCapture();
 				if (submitPacket.valid) {
 					result = func(
 						_this,
@@ -789,18 +923,52 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 				}
 				if (result == vr::VRCompositorError_None &&
 					submitPacketCurrentAfterSubmit &&
-					isSubmitPacketCurrent() &&
 					observeScreenshot &&
-					submitPacket.GetColorTexture() &&
-					retainedTexture &&
 					globals::features::screenshotFeature.HasPendingCapture()) {
-					globals::features::screenshotFeature.ObserveAcceptedVRSubmit(
-						compositorCycleToken,
-						submitPacket.eye,
-						submitPacket.GetColorTexture(),
-						retainedBounds,
-						retainedTexture->eColorSpace);
+					// Publication validity and the D3D staging copy form one claim/use
+					// interval. Once staged, slower CPU work owns independent resources.
+					const std::shared_lock renderTargetReadLock(
+						Hooks::GetRenderTargetRecreationMutex());
+					const bool screenshotCurrent =
+						submitPacket.IsCurrent() &&
+						screenshotTextureLifetime &&
+						screenshotLease.IsValid() &&
+						OpenVRSubmitLeasePolicy::CanPublish(
+							screenshotLease,
+							globals::state ?
+								globals::state->GetRenderTargetResourcePublicationGeneration() :
+								0u,
+							reinterpret_cast<std::uintptr_t>(globals::d3d::device));
+					if (screenshotCurrent &&
+						globals::features::screenshotFeature.HasPendingCapture()) {
+						globals::features::screenshotFeature.ObserveAcceptedVRSubmit(
+							compositorCycleToken,
+							submitPacket.eye,
+							screenshotTextureLifetime.get(),
+							hasScreenshotBounds ? &retainedScreenshotBounds : nullptr,
+							screenshotColorSpace);
+					}
 				}
+#ifdef DEVBENCH_BRIDGE_ENABLED
+				if (result == vr::VRCompositorError_None &&
+					submitPacketCurrentAfterSubmit &&
+					isSubmitPacketCurrent() &&
+					submitPacket.directX &&
+					submitPacket.GetColorTexture()) {
+					const vr::VRTextureBounds_t fullBounds{ 0.0f, 0.0f, 1.0f, 1.0f };
+					const auto& bounds = retainedBounds ? *retainedBounds : fullBounds;
+					CSX::RenderMap::GetRuntime().RecordEyeSubmission(
+						DescribeSubmittedTexture(submitPacket.GetColorTexture()),
+						RenderMapEye(submitPacket.eye),
+						submitPacket.eye == vr::Eye_Left ? 1u : 2u,
+						bounds.uMin,
+						bounds.vMin,
+						bounds.uMax,
+						bounds.vMax,
+						static_cast<std::uint32_t>(submitPacket.flags),
+						compositorCycleToken);
+				}
+#endif
 				uint64_t completionScopeEpoch =
 					postLoadSubmitScopeEpoch;
 				if (a_allowPostLoadScopeRebase &&
@@ -832,6 +1000,17 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 					*a_keepaliveDisposition = keepaliveDisposition;
 #ifdef DEVBENCH_BRIDGE_ENABLED
 				upscaling.CompleteVRLoadPresentationProbeSubmit(probeSequence, result);
+				if (a_auditBlackKeepalive) {
+					VRRenderScaleDevBenchBridge::RecordPresentationAuditObservation({
+						.valid = true,
+						.eyeIndex = static_cast<uint32_t>(submitPacket.eye),
+						.frame = globals::state ? globals::state->frameCount : 0,
+						.compositorCycleToken = compositorCycleToken,
+						.submitted = result == vr::VRCompositorError_None,
+						.selection = VRRenderScaleDevBenchBridge::
+							PresentationAuditSelection::BlackKeepalive,
+					});
+				}
 #endif
 				Upscaling::TraceVRMenuPresentationOpenVRSubmit(
 					a_path,
@@ -918,7 +1097,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 					nullptr,
 					&keepaliveDisposition,
 					false,
-					false);
+					false,
+					true);
 				switch (keepaliveDisposition) {
 				case Upscaling::VRPostLoadCompositorKeepaliveDisposition::
 					Accepted:
@@ -1107,6 +1287,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 					uint64_t a_expectedGuardEpoch,
 					uint32_t a_expectedContractGeneration,
 					ID3D11Texture2D* a_expectedTexture) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
+					const uint32_t diagnosticFrame =
+						globals::state ? globals::state->frameCount : 0u;
+#endif
 					if (a_expectedGuardEpoch == 0 ||
 						!a_expectedTexture ||
 						upscaling.GetVRNativeRestorePresentationGuardActiveEpoch() !=
@@ -1115,6 +1299,13 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 						upscaling.IsVRPostLoadCompositorHoldActive() ||
 						upscaling.ShouldQuarantineVRPostLoadCompositorCycle(
 							compositorCycleToken)) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
+						upscaling.RecordVRNativeRestoreCommitDiagnostic(
+							Upscaling::VRNativeRestoreCommitDiagnosticOutcome::
+								PreSubmitProtectionRejected,
+							diagnosticFrame,
+							compositorCycleToken);
+#endif
 						return;
 					}
 
@@ -1122,6 +1313,13 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 						!lastSubmitPacket.GetColorTexture() ||
 						lastSubmitPacket.GetColorTexture() !=
 							a_expectedTexture) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
+						upscaling.RecordVRNativeRestoreCommitDiagnostic(
+							Upscaling::VRNativeRestoreCommitDiagnosticOutcome::
+								SubmitLeaseRejected,
+							diagnosticFrame,
+							compositorCycleToken);
+#endif
 						return;
 					}
 
@@ -1137,19 +1335,45 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 						freshObservation.transitionEpoch !=
 							a_expectedGuardEpoch ||
 						freshObservation.contractGeneration !=
-							a_expectedContractGeneration ||
+							a_expectedContractGeneration) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
+						upscaling.RecordVRNativeRestoreCommitDiagnostic(
+							Upscaling::VRNativeRestoreCommitDiagnosticOutcome::
+								PostSubmitPreparationRejected,
+							diagnosticFrame,
+							compositorCycleToken);
+#endif
+						return;
+					}
+					if (
 						upscaling.GetVRNativeRestorePresentationGuardActiveEpoch() !=
 							a_expectedGuardEpoch ||
 						upscaling.IsVRInitialLoadPresentationProtectionActive() ||
 						upscaling.IsVRPostLoadCompositorHoldActive() ||
 						upscaling.ShouldQuarantineVRPostLoadCompositorCycle(
 							compositorCycleToken)) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
+						upscaling.RecordVRNativeRestoreCommitDiagnostic(
+							Upscaling::VRNativeRestoreCommitDiagnosticOutcome::
+								PostSubmitProtectionRejected,
+							diagnosticFrame,
+							compositorCycleToken);
+#endif
 						return;
 					}
-					(void)upscaling
-						.RecordVRNativeRestorePresentationObservationIfUnprotected(
-							freshObservation,
-							renderScalePresentationPacketPtr);
+					[[maybe_unused]] const bool recorded = upscaling
+				                                               .RecordVRNativeRestorePresentationObservationIfUnprotected(
+																   freshObservation,
+																   renderScalePresentationPacketPtr);
+#ifdef DEVBENCH_BRIDGE_ENABLED
+					upscaling.RecordVRNativeRestoreCommitDiagnostic(
+						recorded ?
+							Upscaling::VRNativeRestoreCommitDiagnosticOutcome::Recorded :
+							Upscaling::VRNativeRestoreCommitDiagnosticOutcome::
+								ControllerCommitRejected,
+						diagnosticFrame,
+						compositorCycleToken);
+#endif
 				};
 			const auto submitLatchedNativeRestoreCycle = [&](
 															 const char* a_path,
@@ -1466,7 +1690,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 			if (!upscaling.IsVRPostLoadCompositorHoldActive() &&
 				!upscaling.IsVRRenderScaleModeLatched() &&
 				!upscaling.IsPresentationUpscalingActive() &&
-				!ShouldRenderInSceneMenu(vr) &&
+				!ShouldRenderInSceneContent(vr) &&
 				!nativeRestoreGuardActive) {
 				return submit("original", pTexture, pBounds, nSubmitFlags);
 			}
@@ -1501,25 +1725,35 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 						refreshOriginalSubmitDecision();
 						if (!nativeRestoreGuardActive) {
 							bool inSceneOverlayComposited = false;
+							vr::Texture_t inSceneTexture{};
+							const vr::Texture_t* presentedTexture = &upscaledTexture;
 							if (postLoadReleaseToken == 0 &&
-								ShouldRenderInSceneMenu(vr) &&
+								ShouldRenderInSceneContent(vr) &&
 								upscaledTexture.handle &&
 								upscaledTexture.eType == vr::TextureType_DirectX) {
-								vr.RenderInSceneOverlay(
-									eEye,
-									static_cast<ID3D11Texture2D*>(upscaledTexture.handle),
-									&upscaledBounds,
-									nullptr,
-									&inSceneOverlayComposited);
+								if (vr.PrepareInSceneOverlaySubmitTexture(
+										eEye,
+										&upscaledTexture,
+										&upscaledBounds,
+										inSceneTexture)) {
+									presentedTexture = &inSceneTexture;
+									inSceneOverlayComposited = true;
+								}
 							}
 							const auto result = submit(
 								"upscaled",
-								&upscaledTexture,
+								presentedTexture,
 								&upscaledBounds,
 								nSubmitFlags,
 								postLoadReleaseToken,
 								0,
-								&presentationObservation);
+								&presentationObservation,
+								nullptr,
+								false,
+								true,
+								false,
+								&upscaledTexture,
+								&upscaledBounds);
 							if (isCurrentSubmitSuccess(result)) {
 								upscaling.RecordVRRenderScalePresentationObservation(
 									presentationObservation,
@@ -1703,7 +1937,16 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 							"in-scene-overlay",
 							&overlayTexture,
 							pBounds,
-							nSubmitFlags);
+							nSubmitFlags,
+							0,
+							0,
+							nullptr,
+							nullptr,
+							false,
+							true,
+							false,
+							pTexture,
+							pBounds);
 						if (isCurrentSubmitSuccess(result)) {
 							vr.MarkAutoHideOverlayPresented();
 						}
@@ -2032,6 +2275,52 @@ void VR::InitInSceneResources()
 		return;
 	}
 	Util::SetResourceName(temp.submitCompositeCB.get(), "VR::SubmitMenuCompositeCB");
+
+	ID3DBlob* indicatorCSBlob = nullptr;
+	if (FAILED(D3DCompile(
+			kCaptureIndicatorCompositeCS,
+			sizeof(kCaptureIndicatorCompositeCS) - 1,
+			"VRCaptureIndicatorCompositeCS",
+			nullptr,
+			nullptr,
+			"main",
+			"cs_5_0",
+			D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
+			0,
+			&indicatorCSBlob,
+			&errorBlob))) {
+		if (errorBlob) {
+			logger::error("VR capture indicator composite CS compile error: {}", static_cast<char*>(errorBlob->GetBufferPointer()));
+			errorBlob->Release();
+		}
+		return;
+	}
+	if (errorBlob) {
+		errorBlob->Release();
+		errorBlob = nullptr;
+	}
+	if (FAILED(device->CreateComputeShader(
+			indicatorCSBlob->GetBufferPointer(),
+			indicatorCSBlob->GetBufferSize(),
+			nullptr,
+			temp.submitIndicatorCS.put()))) {
+		logger::error("VR: Failed to create capture indicator composite compute shader");
+		indicatorCSBlob->Release();
+		return;
+	}
+	indicatorCSBlob->Release();
+	Util::SetResourceName(temp.submitIndicatorCS.get(), "VR::CaptureIndicatorCompositeCS");
+
+	D3D11_BUFFER_DESC submitIndicatorCBDesc{};
+	submitIndicatorCBDesc.Usage = D3D11_USAGE_DYNAMIC;
+	submitIndicatorCBDesc.ByteWidth = sizeof(SubmitIndicatorCB);
+	submitIndicatorCBDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+	submitIndicatorCBDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+	if (FAILED(device->CreateBuffer(&submitIndicatorCBDesc, nullptr, temp.submitIndicatorCB.put()))) {
+		logger::error("VR: Failed to create capture indicator composite constant buffer");
+		return;
+	}
+	Util::SetResourceName(temp.submitIndicatorCB.get(), "VR::CaptureIndicatorCompositeCB");
 
 	inSceneResources = std::move(temp);
 	inSceneResources.initialized = true;
@@ -2716,6 +3005,118 @@ void VR::CompositeInSceneOverlaySubmitTexture(vr::EVREye eye, ID3D11Texture2D* t
 		oldCB->Release();
 }
 
+void VR::CompositeCaptureIndicatorSubmitTexture(
+	ID3D11UnorderedAccessView* targetUAV,
+	const D3D11_TEXTURE2D_DESC& targetDesc,
+	const vr::VRTextureBounds_t* bounds,
+	bool* indicatorComposited)
+{
+	if (indicatorComposited) {
+		*indicatorComposited = false;
+	}
+	if (!ShouldRenderCaptureIndicatorInScene() ||
+		!targetUAV ||
+		!inSceneResources.initialized ||
+		!inSceneResources.submitIndicatorCS ||
+		!inSceneResources.submitIndicatorCB) {
+		return;
+	}
+
+	auto* context = globals::d3d::context;
+	if (!context) {
+		return;
+	}
+
+	const float targetWidth = static_cast<float>(targetDesc.Width);
+	const float targetHeight = static_cast<float>(targetDesc.Height);
+	float viewX = 0.0f;
+	float viewY = 0.0f;
+	float viewW = targetWidth;
+	float viewH = targetHeight;
+	if (bounds) {
+		const float u0 = std::clamp(bounds->uMin, 0.0f, 1.0f);
+		const float u1 = std::clamp(bounds->uMax, 0.0f, 1.0f);
+		const float v0 = std::clamp(bounds->vMin, 0.0f, 1.0f);
+		const float v1 = std::clamp(bounds->vMax, 0.0f, 1.0f);
+		viewX = std::min(u0, u1) * targetWidth;
+		viewY = std::min(v0, v1) * targetHeight;
+		viewW = std::max(1.0f, std::abs(u1 - u0) * targetWidth);
+		viewH = std::max(1.0f, std::abs(v1 - v0) * targetHeight);
+	}
+
+	SubmitIndicatorCB cbData{};
+	cbData.targetSize[0] = targetDesc.Width;
+	cbData.targetSize[1] = targetDesc.Height;
+	// A headset HUD must not require a head turn to inspect. Place the dot at
+	// eye height and one eighth of the submitted eye width left of centre.
+	cbData.centrePixels[0] = viewX + viewW * 0.375f;
+	cbData.centrePixels[1] = viewY + viewH * 0.5f;
+	cbData.radiusPixels = std::max(5.0f, std::min(viewW, viewH) * 0.006f);
+
+	const int dispatchLeft = std::clamp(
+		static_cast<int>(std::floor(cbData.centrePixels[0] - cbData.radiusPixels - 1.0f)),
+		0,
+		static_cast<int>(targetDesc.Width));
+	const int dispatchTop = std::clamp(
+		static_cast<int>(std::floor(cbData.centrePixels[1] - cbData.radiusPixels - 1.0f)),
+		0,
+		static_cast<int>(targetDesc.Height));
+	const int dispatchRight = std::clamp(
+		static_cast<int>(std::ceil(cbData.centrePixels[0] + cbData.radiusPixels + 1.0f)),
+		0,
+		static_cast<int>(targetDesc.Width));
+	const int dispatchBottom = std::clamp(
+		static_cast<int>(std::ceil(cbData.centrePixels[1] + cbData.radiusPixels + 1.0f)),
+		0,
+		static_cast<int>(targetDesc.Height));
+	if (dispatchRight <= dispatchLeft || dispatchBottom <= dispatchTop) {
+		return;
+	}
+
+	cbData.dispatchOrigin[0] = static_cast<uint32_t>(dispatchLeft);
+	cbData.dispatchOrigin[1] = static_cast<uint32_t>(dispatchTop);
+	cbData.dispatchSize[0] = static_cast<uint32_t>(dispatchRight - dispatchLeft);
+	cbData.dispatchSize[1] = static_cast<uint32_t>(dispatchBottom - dispatchTop);
+
+	D3D11_MAPPED_SUBRESOURCE mapped{};
+	if (FAILED(context->Map(inSceneResources.submitIndicatorCB.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+		return;
+	}
+	std::memcpy(mapped.pData, &cbData, sizeof(cbData));
+	context->Unmap(inSceneResources.submitIndicatorCB.get(), 0);
+
+	ID3D11ComputeShader* oldCS = nullptr;
+	ID3D11UnorderedAccessView* oldUAV = nullptr;
+	ID3D11Buffer* oldCB = nullptr;
+	context->CSGetShader(&oldCS, nullptr, nullptr);
+	context->CSGetUnorderedAccessViews(0, 1, &oldUAV);
+	context->CSGetConstantBuffers(0, 1, &oldCB);
+
+	ID3D11UnorderedAccessView* uav = targetUAV;
+	ID3D11Buffer* cb = inSceneResources.submitIndicatorCB.get();
+	context->CSSetShader(inSceneResources.submitIndicatorCS.get(), nullptr, 0);
+	context->CSSetConstantBuffers(0, 1, &cb);
+	context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+	context->Dispatch((cbData.dispatchSize[0] + 7) / 8, (cbData.dispatchSize[1] + 7) / 8, 1);
+
+	ID3D11UnorderedAccessView* nullUAV = nullptr;
+	context->CSSetUnorderedAccessViews(0, 1, &nullUAV, nullptr);
+	context->CSSetShader(oldCS, nullptr, 0);
+	context->CSSetConstantBuffers(0, 1, &oldCB);
+	context->CSSetUnorderedAccessViews(0, 1, &oldUAV, nullptr);
+
+	if (oldCS)
+		oldCS->Release();
+	if (oldUAV)
+		oldUAV->Release();
+	if (oldCB)
+		oldCB->Release();
+
+	if (indicatorComposited) {
+		*indicatorComposited = true;
+	}
+}
+
 void VR::EnsureInSceneOverlaySubmitCopyResources()
 {
 	auto* device = globals::d3d::device;
@@ -2820,7 +3221,7 @@ void VR::EnsureInSceneOverlaySubmitCopyResources()
 
 bool VR::PrepareInSceneOverlaySubmitTexture(vr::EVREye eye, const vr::Texture_t* inputTexture, const vr::VRTextureBounds_t* bounds, vr::Texture_t& outputTexture)
 {
-	if (!inputTexture || !inputTexture->handle || inputTexture->eType != vr::TextureType_DirectX || !ShouldRenderInSceneMenu(*this)) {
+	if (!inputTexture || !inputTexture->handle || inputTexture->eType != vr::TextureType_DirectX || !ShouldRenderInSceneContent(*this)) {
 		return false;
 	}
 
@@ -2849,15 +3250,23 @@ bool VR::PrepareInSceneOverlaySubmitTexture(vr::EVREye eye, const vr::Texture_t*
 	}
 
 	context->CopyResource(submitCopy.texture.get(), sourceTexture.get());
-	bool overlayComposited = false;
-	CompositeInSceneOverlaySubmitTexture(
-		eye,
-		submitCopy.texture.get(),
+	bool menuComposited = false;
+	if (ShouldRenderInSceneMenu(*this)) {
+		CompositeInSceneOverlaySubmitTexture(
+			eye,
+			submitCopy.texture.get(),
+			submitCopy.uav.get(),
+			sourceDesc,
+			bounds,
+			&menuComposited);
+	}
+	bool indicatorComposited = false;
+	CompositeCaptureIndicatorSubmitTexture(
 		submitCopy.uav.get(),
 		sourceDesc,
 		bounds,
-		&overlayComposited);
-	if (!overlayComposited) {
+		&indicatorComposited);
+	if (!menuComposited && !indicatorComposited) {
 		return false;
 	}
 

@@ -4,7 +4,7 @@ param(
 
     [string]$Branch = $Name,
     [string]$Path,
-    [string]$StartPoint = "HEAD",
+    [string]$StartPoint,
     [switch]$NoSubmodules,
     [switch]$ForcePresetCopy
 )
@@ -64,7 +64,36 @@ if ($branchExists) {
     & git @repositoryArguments worktree add $Path $Branch
 }
 else {
+    if ([string]::IsNullOrWhiteSpace($StartPoint)) {
+        $configuredStartPoint = ([string](& git @repositoryArguments config --get csx.worktreeStartPoint 2>$null)).Trim()
+        if ($LASTEXITCODE -eq 0 -and $configuredStartPoint) {
+            $StartPoint = $configuredStartPoint
+            $startPointSource = "csx.worktreeStartPoint"
+        }
+        else {
+            $remoteHead = ([string](& git @repositoryArguments symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>$null)).Trim()
+            if ($LASTEXITCODE -eq 0 -and $remoteHead) {
+                $StartPoint = $remoteHead
+                $startPointSource = "origin/HEAD"
+            }
+            else {
+                $StartPoint = "HEAD"
+                $startPointSource = "current HEAD fallback"
+            }
+        }
+    }
+    else {
+        $startPointSource = "explicit -StartPoint"
+    }
+
+    & git @repositoryArguments rev-parse --verify --quiet "$StartPoint^{commit}"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Worktree start point '$StartPoint' from $startPointSource does not resolve to a commit."
+        exit 1
+    }
+
     Write-Host "Creating worktree at $Path with new branch '$Branch' from '$StartPoint'"
+    Write-Host "Start point source: $startPointSource"
     & git @repositoryArguments worktree add -b $Branch $Path $StartPoint
 }
 

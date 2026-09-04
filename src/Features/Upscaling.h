@@ -22,6 +22,7 @@
 #include <mutex>
 #include <openvr.h>
 #include <optional>
+#include <string_view>
 #include <vector>
 #include <winrt/base.h>
 
@@ -183,6 +184,85 @@ public:
 	static constexpr uint32_t ClampDLSSPresetUInt(uint32_t a_preset)
 	{
 		return a_preset <= kDLSSPresetMaxIndex ? a_preset : kDLSSPresetMaxIndex;
+	}
+
+	/** Return the stable one-letter name used by settings and automation. */
+	static constexpr const char* GetDLSSPresetName(uint32_t a_preset)
+	{
+		switch (a_preset) {
+		case kDLSSPresetJ:
+			return "J";
+		case kDLSSPresetL:
+			return "L";
+		case kDLSSPresetM:
+			return "M";
+		case kDLSSPresetF:
+			return "F";
+		case kDLSSPresetE:
+			return "E";
+		case kDLSSPresetK:
+		default:
+			return "K";
+		}
+	}
+
+	/** Parse a one-letter DLSS profile without accepting clamped aliases. */
+	static constexpr bool TryParseDLSSPresetName(
+		std::string_view a_name,
+		uint32_t& a_preset)
+	{
+		if (a_name.size() != 1)
+			return false;
+
+		switch (a_name.front()) {
+		case 'J':
+		case 'j':
+			a_preset = kDLSSPresetJ;
+			return true;
+		case 'K':
+		case 'k':
+			a_preset = kDLSSPresetK;
+			return true;
+		case 'L':
+		case 'l':
+			a_preset = kDLSSPresetL;
+			return true;
+		case 'M':
+		case 'm':
+			a_preset = kDLSSPresetM;
+			return true;
+		case 'F':
+		case 'f':
+			a_preset = kDLSSPresetF;
+			return true;
+		case 'E':
+		case 'e':
+			a_preset = kDLSSPresetE;
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	/** Return the shared user-facing quality label for DLSS or FSR. */
+	static constexpr const char* GetQualityModeName(uint32_t a_qualityMode, bool a_isDLSS)
+	{
+		switch (a_qualityMode <= kQualityModeMaxIndex ? a_qualityMode : kQualityModeMaxIndex) {
+		case 1:
+			return "Hoshipa";
+		case 2:
+			return "Ultra Quality";
+		case 3:
+			return "Quality";
+		case 4:
+			return "Balanced";
+		case 5:
+			return "Performance";
+		case 6:
+			return "Ultra Performance";
+		default:
+			return a_isDLSS ? "DLAA" : "Native AA";
+		}
 	}
 
 	static constexpr float GetQualityModeResolutionScale(uint32_t a_qualityMode)
@@ -405,6 +485,84 @@ public:
 		FoveatedRegionPlan foveatedRegion{};
 	};
 
+	enum class VRNativeRestorePreparationReject : uint64_t
+	{
+		None = 0,
+		InvalidInput = 1ull << 0,
+		TransitionOwnership = 1ull << 1,
+		FrameNotReady = 1ull << 2,
+		MenuOrLoadContext = 1ull << 3,
+		RelatchPending = 1ull << 4,
+		VendorResetPending = 1ull << 5,
+		StabilizerPending = 1ull << 6,
+		PhysicalTargets = 1ull << 7,
+		ResolutionPlan = 1ull << 8,
+		SourceIdentity = 1ull << 9,
+		VendorDispatchFrame = 1ull << 10,
+		TextureLayout = 1ull << 11,
+		RuntimeContract = 1ull << 12,
+	};
+
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	enum class VRMainPassDispatchStage : uint8_t
+	{
+		None,
+		Entered,
+		MissingGlobals,
+		LifecycleDeferred,
+		SubmitStageOwned,
+		MissingMotionVectors,
+		EncodingStarted,
+		EncodePrerequisitesMissing,
+		EncodeResolutionInvalid,
+		EncodeStereoLayoutInvalid,
+		EncodeActiveIntermediatesIncompatible,
+		EncodeIntermediateCreationFailed,
+		EncodeIntermediateResourcesMissing,
+		EncodeCompleted,
+		VendorResetBlocked,
+		FidelityDispatchStarted,
+		FidelityDispatchFailed,
+		FidelityDispatchSucceeded,
+		Completed
+	};
+
+	struct VRMainPassDispatchDiagnosticSnapshot
+	{
+		VRMainPassDispatchStage lastStage = VRMainPassDispatchStage::None;
+		uint32_t lastFrame = 0;
+		uint64_t callCount = 0;
+		uint64_t encodeAttemptCount = 0;
+		uint64_t encodeSuccessCount = 0;
+		uint64_t vendorResetBlockedCount = 0;
+		uint64_t fidelityAttemptCount = 0;
+		uint64_t fidelitySuccessCount = 0;
+	};
+
+	struct VRNativeRestorePreparationDiagnosticSnapshot
+	{
+		uint64_t rejectMask = 0;
+		uint32_t frame = 0;
+		uint64_t compositorCycleToken = 0;
+		uint32_t commitOutcome = 0;
+		uint32_t commitFrame = 0;
+		uint64_t commitCompositorCycleToken = 0;
+		uint64_t commitAttemptCount = 0;
+		uint64_t commitSuccessCount = 0;
+	};
+
+	enum class VRNativeRestoreCommitDiagnosticOutcome : uint32_t
+	{
+		NotAttempted,
+		PreSubmitProtectionRejected,
+		SubmitLeaseRejected,
+		PostSubmitPreparationRejected,
+		PostSubmitProtectionRejected,
+		ControllerCommitRejected,
+		Recorded,
+	};
+#endif
+
 	/** @brief Complete, immutable target captured for one deferred VR render-scale request. */
 	struct VRRenderScaleDesiredProfile
 	{
@@ -423,6 +581,7 @@ public:
 		float fsrSharpness = 0.0f;
 		uint32_t queuedFrame = 0;
 		VRUpscalingTransitionOrigin origin = VRUpscalingTransitionOrigin::CSMenu;
+		bool directMenuEdit = false;
 		bool stabilizerDoorHandoff = false;
 		uint64_t stabilizerDoorHandoffSerial = 0;
 
@@ -604,6 +763,7 @@ public:
 		uint32_t actionMask = static_cast<uint32_t>(VRRenderScaleRelatchAction::None);
 		bool reuseRenderTargets = false;
 		bool reuseStableRenderTargets = false;
+		bool reusePublishableInactiveRenderTargets = false;
 		bool renderTargetDimensionsMatch = false;
 		bool stableContractEvidenceMatches = false;
 		bool stateScreenDimensionsMatch = false;
@@ -1242,7 +1402,8 @@ public:
 		Superseded = 1ull << 13,
 		DeviceChanged = 1ull << 14,
 		ShaderFailure = 1ull << 15,
-		ProviderFailure = 1ull << 16
+		ProviderFailure = 1ull << 16,
+		NonDirectEdit = 1ull << 17
 	};
 
 	struct VRRenderScalePreparationEvent
@@ -1426,6 +1587,7 @@ public:
 		uint32_t renderEyeHeight = 0;
 		uint32_t queuedFrame = 0;
 		VRUpscalingTransitionOrigin origin = VRUpscalingTransitionOrigin::CSMenu;
+		bool directMenuEdit = false;
 		bool stabilizerDoorHandoff = false;
 		uint64_t stabilizerDoorHandoffSerial = 0;
 		VRRenderScaleResourceKey resources{};
@@ -1649,6 +1811,8 @@ public:
 	RuntimeResolutionPlan runtimeResolutionPlan;
 	/** @brief Returns the pending request, or a non-pending snapshot of current settings. */
 	VRRenderScaleDesiredProfile GetPendingVRRenderScaleDesiredProfile() const;
+	/** @brief Resolves a queued portable DLSS preference after adapter capability is known. */
+	bool ResolvePendingVRUpscalingProviderSelection();
 	/** @brief Publishes or coalesces one complete latest-wins request. */
 	VRRenderScaleRequestQueueResult QueueVRRenderScaleRequest(
 		UpscaleMethod a_method,
@@ -1659,7 +1823,8 @@ public:
 		VRUpscalingTransitionOrigin a_origin = VRUpscalingTransitionOrigin::CSMenu,
 		uint64_t a_bufferedStabilizerDoorHandoffSerial = 0,
 		VRVendorRelatchPolicy::StartupNativeFallbackControl a_startupFallbackControl =
-			VRVendorRelatchPolicy::StartupNativeFallbackControl::None);
+			VRVendorRelatchPolicy::StartupNativeFallbackControl::None,
+		bool a_directMenuEdit = false);
 	/** @brief Atomically removes and returns the complete pending request. */
 	std::optional<VRRenderScaleDesiredProfile> TakePendingVRRenderScaleRequest();
 	/** @brief Rejects a request that was cleared or superseded before application began. */
@@ -1688,6 +1853,8 @@ public:
 	[[nodiscard]] uint64_t GetVRRenderScaleCPUPerformanceSessionID() const noexcept;
 	/** @brief Starts a new monotonically identified session, or returns zero if IDs are exhausted. */
 	[[nodiscard]] uint64_t StartVRRenderScaleCPUPerformanceTelemetry() noexcept;
+	/** @brief Starts CPU telemetry at an exact caller-owned frame boundary. */
+	[[nodiscard]] uint64_t StartVRRenderScaleCPUPerformanceTelemetry(uint32_t a_startFrame) noexcept;
 	/** @brief Stops recording while retaining the current session ID and counters. */
 	void StopVRRenderScaleCPUPerformanceTelemetry() noexcept;
 	/** @brief Clears retained telemetry and its session ID without rewinding ID allocation. */
@@ -1695,6 +1862,8 @@ public:
 	VRRenderScaleGPUPerformanceSnapshot GetVRRenderScaleGPUPerformanceSnapshot() const noexcept;
 	[[nodiscard]] bool IsVRRenderScaleGPUPerformanceTelemetryActive() const noexcept;
 	void StartVRRenderScaleGPUPerformanceTelemetry() noexcept;
+	/** @brief Starts GPU telemetry at an exact caller-owned frame boundary. */
+	void StartVRRenderScaleGPUPerformanceTelemetry(uint32_t a_startFrame) noexcept;
 	void StopVRRenderScaleGPUPerformanceTelemetry() noexcept;
 	void ResetVRRenderScaleGPUPerformanceTelemetry() noexcept;
 	void RecordVRRenderScaleGPUPerformanceCounter(VRRenderScaleGPUPerformanceCounter a_counter, uint64_t a_delta = 1) const noexcept;
@@ -1734,6 +1903,8 @@ public:
 		const VRRenderScaleResourceKey& a_target);
 	static uint64_t EstimateVRRenderScaleResourceBytes(const VRRenderScaleResourceKey& a_key);
 	uint32_t GetActiveVRRenderScaleContractGeneration() const;
+	uint32_t GetVRVendorEvaluationContractGeneration(
+		UpscaleMethod a_upscaleMethod) const;
 	bool IsVendorRuntimeReadyForActiveContract(UpscaleMethod a_upscaleMethod) const;
 	void MarkVendorRuntimeResourcesDirty(UpscaleMethod a_upscaleMethod, uint32_t a_generation = 0);
 	void MarkVendorRuntimeResourcesReady(UpscaleMethod a_upscaleMethod, uint32_t a_generation = 0);
@@ -1933,7 +2104,7 @@ public:
 	// Runtime state
 	bool isWindowed = false;
 	bool lowRefreshRate = false;
-	bool d3d12SwapChainActive = false;
+	std::atomic_bool d3d12SwapChainActive{ false };
 
 	// Timing and scaling
 	double refreshRate = 0.0f;
@@ -1962,6 +2133,10 @@ public:
 	virtual const char* GetPerformanceCostMeasurementWaitText() const override;
 	virtual bool RequiresMenuCloseForPerformanceCostMeasurement(bool a_targetEnabled) const override;
 	virtual bool RequiresMenuCloseForPerformanceCostMeasurementRestore(const json& a_state) const override;
+	/** Resolve a captured primary/fallback pair against current DLSS capability. */
+	static UpscaleMethod ResolvePerformanceCostMeasurementMethod(
+		uint32_t a_primaryMethod,
+		uint32_t a_fallbackMethod);
 	virtual json CapturePerformanceCostMeasurementState() const override;
 	virtual void RestorePerformanceCostMeasurementState(const json& a_state) override;
 	void DrawFoveatedSetupInstructions();
@@ -1998,6 +2173,17 @@ public:
 	bool ShouldApplyDLSSSharpening() const;
 	bool ShouldRouteDLSSMainPassThroughSharpener() const;
 	const RuntimeResolutionPlan& GetRuntimeResolutionPlan() const;
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	/** @brief Returns fixed-path progress without affecting release dispatch behavior. */
+	VRMainPassDispatchDiagnosticSnapshot GetVRMainPassDispatchDiagnosticSnapshot() const noexcept;
+	/** @brief Returns the latest strict native-presentation proof rejection. */
+	VRNativeRestorePreparationDiagnosticSnapshot GetVRNativeRestorePreparationDiagnosticSnapshot() const noexcept;
+	/** @brief Records the exact DevBench-only post-submit proof outcome. */
+	void RecordVRNativeRestoreCommitDiagnostic(
+		VRNativeRestoreCommitDiagnosticOutcome a_outcome,
+		uint32_t a_frame,
+		uint64_t a_compositorCycleToken) noexcept;
+#endif
 	/** @brief Resolve material mip bias from the active resolution owner or OpenComposite Unleashed. */
 	float ResolveRuntimeMipBias(bool a_temporal);
 	// Refresh both the cached plan and restart-required state from the current VR render-scale settings.
@@ -2037,7 +2223,8 @@ public:
 		uint64_t a_bufferedStabilizerDoorHandoffSerial = 0,
 		std::optional<bool> a_targetFSR4RuntimeEnable = std::nullopt,
 		VRVendorRelatchPolicy::StartupNativeFallbackControl a_startupFallbackControl =
-			VRVendorRelatchPolicy::StartupNativeFallbackControl::None);
+			VRVendorRelatchPolicy::StartupNativeFallbackControl::None,
+		bool a_directMenuEdit = false);
 	void SetVRUpscalingTransitionProfile(bool a_renderScaleModeEnabled, uint32_t a_qualityMode, uint32_t a_dlssPreset, const char* a_reason = nullptr, VRUpscalingTransitionOrigin a_origin = VRUpscalingTransitionOrigin::CSMenu);
 	uint32_t GetVRUpscalingApplyBlockReasonsForAPI() const;
 	/** @return The admitted LoadingMenu serial when an atomic Stabilizer profile may be staged; otherwise zero. */
@@ -2281,6 +2468,7 @@ public:
 		bool valid = false;
 		bool renderScaleActive = false;
 		UpscaleMethod method = UpscaleMethod::kNONE;
+		VRRenderScaleBackendKind backend = VRRenderScaleBackendKind::None;
 		uint32_t qualityMode = 0;
 		uint32_t dlssPreset = kDLSSPresetK;
 		uint32_t renderEyeWidth = 0;
@@ -2288,6 +2476,7 @@ public:
 		uint32_t displayEyeWidth = 0;
 		uint32_t displayEyeHeight = 0;
 		uint32_t contractGeneration = 0;
+		VRRenderScaleResourceKey resources{};
 	};
 
 	// Helper: Create a Texture2D matching source format at a given size
@@ -2872,6 +3061,12 @@ public:
 		uint32_t depthHeight = 0;
 		uint32_t depthOffsetX = 0;
 		uint32_t depthOffsetY = 0;
+#ifdef DEVBENCH_BRIDGE_ENABLED
+		VRRenderScaleBackendKind vendorBackend = VRRenderScaleBackendKind::None;
+		uint32_t vendorDispatchFrame = 0;
+		uint64_t vendorDispatchSerial = 0;
+		bool vendorRuntimeFallback = false;
+#endif
 	};
 	struct SubmitStageFoveatedCenterState
 	{
@@ -3044,12 +3239,18 @@ public:
 	bool RecordVRRenderScaleTransitionPreparing(const VRRenderScaleDesiredProfile& a_request);
 	uint64_t AllocateVRRenderScaleTransitionEpoch();
 	uint64_t AllocateVRRenderScalePreparationOptionsGeneration();
-	void BindVRRenderScaleRelatchEpoch(uint64_t a_epoch);
+	void BindVRRenderScaleRelatchEpoch(
+		uint64_t a_epoch,
+		uint32_t a_contractGeneration);
 	bool IsVRRenderScaleTransitionEpochCurrent(uint64_t a_epoch) const;
 	bool RecordVRRenderScaleRelatchPlan(const VRRenderScaleRelatchPlan& a_plan);
 	void StoreVRRenderScaleTransitionStateLocked(VRRenderScaleTransitionState a_state) noexcept;
 	void SetVRRenderScaleTransitionState(VRRenderScaleTransitionState a_state, const char* a_reason = nullptr);
-	bool PublishVRRenderScaleTransitionApplied(VRUpscalingTransitionOrigin a_origin, bool a_requiresStabilization, uint64_t a_epoch);
+	bool PublishVRRenderScaleTransitionApplied(
+		VRUpscalingTransitionOrigin a_origin,
+		bool a_requiresStabilization,
+		uint64_t a_epoch,
+		uint32_t a_relatchContractGeneration = 0);
 	bool PublishVRRenderScaleTransitionStable(
 		uint64_t a_expectedEpoch,
 		uint32_t a_expectedGeneration,
@@ -3253,10 +3454,10 @@ public:
 
 	// Backend interface methods
 	bool IsBackendInitialized() const;
-	void CheckBackendFeatures(IDXGIAdapter* adapter);
-	void UpgradeBackendInterface(void** ppInterface);
-	void SetBackendD3DDevice(ID3D11Device* device);
-	void PostBackendDevice();
+	bool CheckBackendFeatures(IDXGIAdapter* adapter);
+	bool UpgradeBackendInterface(void** ppInterface);
+	bool SetBackendD3DDevice(ID3D11Device* device);
+	bool PostBackendDevice();
 
 	// Module availability methods
 	bool HasFrameGenModule() const;
@@ -3273,14 +3474,41 @@ public:
 	// Proxy interface methods
 	void SetProxyD3D11Device(ID3D11Device* device);
 	void SetProxyD3D11DeviceContext(ID3D11DeviceContext* context);
-	void CreateProxySwapChain(IDXGIAdapter* adapter, DXGI_SWAP_CHAIN_DESC swapChainDesc);
+	bool TryBeginProxyCreation() noexcept;
+	void CreateProxySwapChain(
+		IDXGIAdapter* adapter,
+		DXGI_SWAP_CHAIN_DESC backendSwapChainDesc,
+		DXGI_SWAP_CHAIN_DESC publicSwapChainDesc);
 	void CreateProxyInterop();
 	IDXGISwapChain* GetProxySwapChain();
+	bool ResetProxyCreationState() noexcept;
 	bool IsOpenCompositeUpscalingBlocked(bool a_forceRefresh = false) const;
 	void ClearVRDirectUpscaledEyeOutput(uint32_t eyeIndex, ID3D11UnorderedAccessView* colorUAV, ID3D11ShaderResourceView* depthSRV,
 		uint32_t depthWidthPerEye, uint32_t depthHeight, uint32_t colorWidthPerEye, uint32_t colorHeight, uint32_t colorOffsetX = 0);
 
 private:
+	std::once_flag upscalingSDKLoadOnce;
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	std::atomic<VRMainPassDispatchStage> vrMainPassDispatchLastStage{ VRMainPassDispatchStage::None };
+	std::atomic_uint32_t vrMainPassDispatchLastFrame{ 0 };
+	std::atomic_uint64_t vrMainPassDispatchCallCount{ 0 };
+	std::atomic_uint64_t vrMainPassEncodeAttemptCount{ 0 };
+	std::atomic_uint64_t vrMainPassEncodeSuccessCount{ 0 };
+	std::atomic_uint64_t vrMainPassVendorResetBlockedCount{ 0 };
+	std::atomic_uint64_t vrMainPassFidelityAttemptCount{ 0 };
+	std::atomic_uint64_t vrMainPassFidelitySuccessCount{ 0 };
+	mutable std::atomic_uint64_t vrNativeRestorePreparationRejectMask{ 0 };
+	mutable std::atomic_uint32_t vrNativeRestorePreparationRejectFrame{ 0 };
+	mutable std::atomic_uint64_t vrNativeRestorePreparationRejectCycle{ 0 };
+	std::atomic<VRNativeRestoreCommitDiagnosticOutcome> vrNativeRestoreCommitOutcome{
+		VRNativeRestoreCommitDiagnosticOutcome::NotAttempted
+	};
+	std::atomic_uint32_t vrNativeRestoreCommitFrame{ 0 };
+	std::atomic_uint64_t vrNativeRestoreCommitCycle{ 0 };
+	std::atomic_uint64_t vrNativeRestoreCommitAttemptCount{ 0 };
+	std::atomic_uint64_t vrNativeRestoreCommitSuccessCount{ 0 };
+	void RecordVRMainPassDispatchStage(VRMainPassDispatchStage a_stage, uint32_t a_frame) noexcept;
+#endif
 	enum class VRPostLoadCompositorHoldState : uint32_t
 	{
 		Idle,
