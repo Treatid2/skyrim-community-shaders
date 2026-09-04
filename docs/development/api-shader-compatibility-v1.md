@@ -94,14 +94,16 @@ are unconditional, and mutation ownership combines canonical process-local
 exclusion with a crash-recoverable machine-wide Windows named-pipe lease. Its
 key is the sorted physical file identity of the A/B pair, independent of `TEMP`,
 argument order, lane labels, and hard-link aliases. Physical identity is
-mandatory on Windows: directories, reparse points, identity-query failures, and
-same-object A/B pairs are rejected. Non-delete-sharing identity handles remain
-open for the lease lifetime, binding later path-based I/O to the admitted file
-objects by preventing replacement. All four fixed members must have distinct
+mandatory on Windows: directories, reparse points in any path component,
+identity-query failures, and same-object A/B pairs are rejected. Admission
+resolves relative names once and retains non-delete-sharing handles for every
+ordinary parent plus the final files. Later path-based I/O therefore reaches
+the admitted objects or fails closed without adding identity work to shader
+lookup. All four fixed members must have distinct
 identities. The lease handle may be released from another thread and is
 reclaimed if the process terminates. Optimized and developer lanes open and
 validate independently during admission; any global rejection destroys both
-stores and releases their leases. After a complete layout becomes authoritative,
+stores and releases their leases, including after an exception. After a complete layout becomes authoritative,
 an operational failure quarantines only the affected lane. An unavailable
 authoritative lane recompiles from source without consulting or writing legacy
 loose blobs.
