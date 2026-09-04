@@ -118,7 +118,18 @@ namespace Util::ShaderCachePack
 		ThrowAfterInitializeDurableFlush = 1u << 13,
 		ThrowBeforeFirstBootstrapRollback = 1u << 14,
 		ThrowBetweenBootstrapRollbackMembers = 1u << 15,
-		ThrowDuringBootstrapRollbackDiagnostic = 1u << 16
+		ThrowDuringBootstrapRollbackDiagnostic = 1u << 16,
+		DuringStoreIndexPublication = 1u << 17,
+		DuringCompactionCopy = 1u << 18,
+		BeforeResetCleanupMutation = 1u << 19,
+		AfterResetCleanupTruncate = 1u << 20,
+		ThrowAfterResetCleanupTruncate = 1u << 21,
+		AfterResetCleanupWrite = 1u << 22,
+		ThrowAfterResetCleanupWrite = 1u << 23,
+		AfterResetCleanupDurableFlush = 1u << 24,
+		ThrowAfterResetCleanupDurableFlush = 1u << 25,
+		ThrowBeforeResetCleanupVerification = 1u << 26,
+		ThrowDuringResetCleanupDiagnostic = 1u << 27
 	};
 	void SetTestFailurePoints(std::uint32_t a_failurePoints);
 #endif
@@ -252,6 +263,11 @@ namespace Util::ShaderCachePack
 			Durable,
 			Verified
 		};
+		enum class InitializePurpose
+		{
+			General,
+			ResetCleanup
+		};
 
 		bool OpenLocked(bool a_allowEmptyInitialization, std::string* a_error);
 		bool AcquireWriterLease(std::string* a_error);
@@ -262,7 +278,8 @@ namespace Util::ShaderCachePack
 			ScannedFile& a_file,
 			std::uint64_t a_generation,
 			std::string* a_error,
-			InitializeProgress* a_progress = nullptr) const;
+			InitializeProgress* a_progress = nullptr,
+			InitializePurpose a_purpose = InitializePurpose::General) const;
 		bool AppendLocked(ScannedFile& a_file, const Entry& a_entry, std::uint64_t a_sequence, bool a_checkpoint, std::string* a_error) const;
 		std::optional<Entry> Read(const RecordLocation& a_location, std::string* a_error) const;
 		void RebuildIndexes();

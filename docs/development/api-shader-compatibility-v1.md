@@ -73,7 +73,9 @@ file. Before the main menu, fragmentation-based compaction rewrites the latest
 record for every logical shader identity into the inactive file, durably commits
 it, and selects its higher generation; the prior file remains a searchable
 fallback generation. Fragmentation is measured only within the active file, so
-the intentional fallback generation does not cause endless compaction.
+the intentional fallback generation does not cause endless compaction. If
+inactive-member mutation cannot complete, the Store withdraws its authority and
+releases ownership before the caller quarantines that lane.
 
 The managed layout is authoritative only when the manifest and all four fixed
 files are present and the manifest passes the same strict identity, runtime,

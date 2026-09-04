@@ -636,7 +636,8 @@ releases all provisional lane ownership. The same release applies when direct
 append or reset performs lazy admission and that admission rejects or throws.
 Explicit zero-byte bootstrap verifies both truncation and durable flush during
 ordinary or exceptional rollback and reports whether the original empty state
-was restored or could not be established.
+was restored or could not be established. Rollback remains armed until the
+initialized pair has completed Store admission and index publication.
 
 Schema-2 installation baselines require adjacent A/B generations. Later runtime
 compaction or reset may produce a larger actual generation gap. Record sequences
@@ -663,6 +664,13 @@ Explicit zero-byte bootstrap arms rollback before initializing the first member.
 Rollback attempts and verifies both members independently under a nonthrowing
 recovery boundary; optional diagnostic construction happens only afterward and
 cannot pre-empt physical restoration.
+
+Once reset has reopened its higher empty generation, a cleanup-only failure or
+exception retains that generation as available authority and excludes the
+uncertain superseded member. Conversely, any compaction failure after inactive-
+member mutation withdraws Store authority and releases ownership before return;
+the lane then falls back to source compilation rather than exposing stale
+fallback locations or statistics.
 
 Users can still compile local variants when:
 
