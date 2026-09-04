@@ -108,7 +108,17 @@ namespace Util::ShaderCachePack
 		AfterFirstBootstrapInitialization = 1u << 3,
 		BeforeStoreAdmissionCommit = 1u << 4,
 		DuringStoreAdmissionCommit = 1u << 5,
-		BeforeFinalResetReopen = 1u << 6
+		BeforeFinalResetReopen = 1u << 6,
+		BeforeInitializeMutation = 1u << 7,
+		AfterInitializeTruncate = 1u << 8,
+		ThrowAfterInitializeTruncate = 1u << 9,
+		AfterInitializeWrite = 1u << 10,
+		ThrowAfterInitializeWrite = 1u << 11,
+		AfterInitializeDurableFlush = 1u << 12,
+		ThrowAfterInitializeDurableFlush = 1u << 13,
+		ThrowBeforeFirstBootstrapRollback = 1u << 14,
+		ThrowBetweenBootstrapRollbackMembers = 1u << 15,
+		ThrowDuringBootstrapRollbackDiagnostic = 1u << 16
 	};
 	void SetTestFailurePoints(std::uint32_t a_failurePoints);
 #endif
@@ -235,13 +245,24 @@ namespace Util::ShaderCachePack
 		std::unordered_map<std::string, RecordLocation> liveByLogical;
 		std::unordered_map<std::string, RecordLocation> activeLiveByLogical;
 		Stats stats;
+		enum class InitializeProgress
+		{
+			Unchanged,
+			MutationStarted,
+			Durable,
+			Verified
+		};
 
 		bool OpenLocked(bool a_allowEmptyInitialization, std::string* a_error);
 		bool AcquireWriterLease(std::string* a_error);
 		void ReleaseWriterLease() noexcept;
 		void InvalidateStateLocked() noexcept;
 		bool Scan(const std::filesystem::path& a_path, ScannedFile& a_output, std::string* a_error) const;
-		bool InitializeEmpty(ScannedFile& a_file, std::uint64_t a_generation, std::string* a_error) const;
+		bool InitializeEmpty(
+			ScannedFile& a_file,
+			std::uint64_t a_generation,
+			std::string* a_error,
+			InitializeProgress* a_progress = nullptr) const;
 		bool AppendLocked(ScannedFile& a_file, const Entry& a_entry, std::uint64_t a_sequence, bool a_checkpoint, std::string* a_error) const;
 		std::optional<Entry> Read(const RecordLocation& a_location, std::string* a_error) const;
 		void RebuildIndexes();

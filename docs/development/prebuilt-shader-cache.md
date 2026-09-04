@@ -654,7 +654,15 @@ empty generation reopens successfully but cleanup fails, the Store remains
 available with a degraded-cleanup diagnostic. If the first or final reopen
 fails, the Store clears all pre-reset indexes and statistics, releases its
 writer ownership, and the runtime quarantines that lane while compiling from
-source.
+source. Initialization also reports its mutation phase to reset: failure before
+opening the target for truncation is non-mutating, while any failure or exception
+after that boundary is commit-uncertain (or known durable), invalidates the
+pre-reset Store, and releases its path and writer ownership.
+
+Explicit zero-byte bootstrap arms rollback before initializing the first member.
+Rollback attempts and verifies both members independently under a nonthrowing
+recovery boundary; optional diagnostic construction happens only afterward and
+cannot pre-empt physical restoration.
 
 Users can still compile local variants when:
 

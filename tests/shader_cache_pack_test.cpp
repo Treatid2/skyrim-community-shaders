@@ -655,6 +655,31 @@ int main(int argc, char** argv)
 		Store recovered(first, second, Lane::Optimized, TestPackSetId());
 		assert(recovered.InitializeEmptyFilesAndOpen(&rollbackError));
 	}
+
+	// Exceptions raised by rollback bookkeeping or diagnostics cannot pre-empt
+	// restoration and verification of either bootstrap member.
+	for (const auto failurePoint : {
+			 TestFailurePoint::ThrowBeforeFirstBootstrapRollback,
+			 TestFailurePoint::ThrowBetweenBootstrapRollbackMembers,
+			 TestFailurePoint::ThrowDuringBootstrapRollbackDiagnostic }) {
+		const auto rollbackRoot = root / ("bootstrap-recovery-exception-" + std::to_string(static_cast<std::uint32_t>(failurePoint)));
+		std::filesystem::create_directories(rollbackRoot);
+		const auto first = rollbackRoot / "Optimized.A.csxpack";
+		const auto second = rollbackRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		SetTestFailurePoints(
+			static_cast<std::uint32_t>(TestFailurePoint::AfterFirstBootstrapInitialization) |
+			static_cast<std::uint32_t>(failurePoint));
+		std::string rollbackError;
+		Store failed(first, second, Lane::Optimized, TestPackSetId());
+		assert(!failed.InitializeEmptyFilesAndOpen(&rollbackError));
+		assert(rollbackError.find("rollback restored") != std::string::npos);
+		assert(std::filesystem::file_size(first) == 0);
+		assert(std::filesystem::file_size(second) == 0);
+		Store recovered(first, second, Lane::Optimized, TestPackSetId());
+		assert(recovered.InitializeEmptyFilesAndOpen(&rollbackError));
+	}
 #endif
 	{
 		const auto invalidLayoutRoot = root / "malformed-layout";
@@ -1108,6 +1133,72 @@ int main(int argc, char** argv)
 	verifyQuarantinedReset(TestFailurePoint::BeforeStoreAdmissionCommit, "before-commit");
 	verifyQuarantinedReset(TestFailurePoint::DuringStoreAdmissionCommit, "during-commit");
 	verifyQuarantinedReset(TestFailurePoint::BeforeFinalResetReopen, "final-reopen");
+
+	// A reset-target failure is "before commit" only when no physical mutation
+	// began. The prior coherent Store remains usable in that proven case.
+	{
+		const auto resetRoot = root / "reset-before-mutation";
+		std::filesystem::create_directories(resetRoot);
+		const auto first = resetRoot / "Optimized.A.csxpack";
+		const auto second = resetRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		std::string resetError;
+		Store unchanged(first, second, Lane::Optimized, TestPackSetId());
+		assert(unchanged.InitializeEmptyFilesAndOpen(&resetError));
+		assert(unchanged.Append(MakeEntry("old", "old-exact", 0x78), &resetError));
+		assert(unchanged.Checkpoint(&resetError));
+		SetTestFailurePoints(static_cast<std::uint32_t>(TestFailurePoint::BeforeInitializeMutation));
+		assert(unchanged.Reset(&resetError) == ResetDisposition::FailedBeforeCommit);
+		assert(unchanged.GetStats().available);
+		assert(unchanged.Find("old-exact", &resetError));
+	}
+
+	// Once reset-target mutation begins, every false return or exception is
+	// commit-uncertain (or known durable), invalidates stale authority, and
+	// releases path and writer ownership while the failed Store remains alive.
+	auto verifyUncertainReset = [&](TestFailurePoint a_failurePoint, std::string_view a_name, bool a_pairRemainsAdmissible) {
+		const auto resetRoot = root / (std::string("reset-initialize-") + std::string(a_name));
+		const auto movedRoot = root / (std::string("reset-initialize-moved-") + std::string(a_name));
+		std::filesystem::create_directories(resetRoot);
+		const auto first = resetRoot / "Optimized.A.csxpack";
+		const auto second = resetRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		std::string resetError;
+		Store failed(first, second, Lane::Optimized, TestPackSetId());
+		assert(failed.InitializeEmptyFilesAndOpen(&resetError));
+		assert(failed.Append(MakeEntry("old", "old-exact", 0x79), &resetError));
+		assert(failed.Checkpoint(&resetError));
+		SetTestFailurePoints(static_cast<std::uint32_t>(a_failurePoint));
+		assert(failed.Reset(&resetError) == ResetDisposition::CommittedDegraded);
+		assert(!resetError.empty());
+		assert(!failed.GetStats().available);
+		assert(!failed.Find("old-exact", &resetError));
+
+		std::error_code renameError;
+		std::filesystem::rename(resetRoot, movedRoot, renameError);
+		assert(!renameError);
+		std::filesystem::rename(movedRoot, resetRoot, renameError);
+		assert(!renameError);
+
+		Store recovered(first, second, Lane::Optimized, TestPackSetId());
+		if (a_pairRemainsAdmissible) {
+			assert(recovered.Open(&resetError));
+			assert(!recovered.Find("old-exact", &resetError));
+		} else {
+			assert(!recovered.Open(&resetError));
+			std::ofstream(first, std::ios::binary | std::ios::trunc).close();
+			std::ofstream(second, std::ios::binary | std::ios::trunc).close();
+			assert(recovered.InitializeEmptyFilesAndOpen(&resetError));
+		}
+	};
+	verifyUncertainReset(TestFailurePoint::AfterInitializeTruncate, "truncate-false", false);
+	verifyUncertainReset(TestFailurePoint::ThrowAfterInitializeTruncate, "truncate-throw", false);
+	verifyUncertainReset(TestFailurePoint::AfterInitializeWrite, "write-false", true);
+	verifyUncertainReset(TestFailurePoint::ThrowAfterInitializeWrite, "write-throw", true);
+	verifyUncertainReset(TestFailurePoint::AfterInitializeDurableFlush, "durable-false", true);
+	verifyUncertainReset(TestFailurePoint::ThrowAfterInitializeDurableFlush, "durable-throw", true);
 #endif
 
 	// The retained physical-identity guards prevent a backing path from being

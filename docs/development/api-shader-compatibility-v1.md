@@ -133,7 +133,11 @@ The result distinguishes complete cleanup, committed-but-degraded cleanup, and
 failure before commit. Cleanup-only degradation keeps a successfully reopened
 empty generation authoritative. If either post-barrier reopen fails, the Store
 invalidates every pre-reset index, releases ownership, and quarantines the lane
-for source fallback until a clean admission succeeds.
+for source fallback until a clean admission succeeds. Reset-target initialization
+tracks whether mutation has not begun, has begun with uncertain durability, is
+durable, or has been verified. Only the first state may preserve the old Store
+and report failure before commit; every changed or uncertain state clears old
+authority and releases ownership.
 
 This storage transition is `engine-cache-v3-managed-pack` in
 `config/shader-cache-abi.json`. The generated pack manifest embeds the exact
