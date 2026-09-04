@@ -1,7 +1,11 @@
 #include "Features/Upscaling/VRVendorRelatchPolicy.h"
 
+#include <atomic>
 #include <cstdint>
 #include <limits>
+#include <mutex>
+#include <semaphore>
+#include <thread>
 
 namespace
 {
@@ -1756,6 +1760,84 @@ namespace
 		       conservative.pending && conservative.generation == 0 &&
 		       !CanRepublishVendorResetAfterFailure(true, claimedGeneration, 0) &&
 		       CanRepublishVendorResetAfterFailure(true, 0, 0);
+	}
+
+	bool CoversVendorResetFailureCommitTransaction()
+	{
+		constexpr std::uint32_t claimedGeneration = 7;
+		constexpr std::uint32_t successorGeneration = 8;
+		std::mutex resetMutex;
+		std::atomic<bool> resetPending{ false };
+		std::atomic<std::uint32_t> resetGeneration{ 0 };
+		std::atomic<std::uint32_t> lifecycleGeneration{ 0 };
+		std::atomic<std::uint32_t> terminalGeneration{ 0 };
+		std::atomic<bool> failureAccepted{ false };
+		std::atomic<bool> successorPublished{ false };
+		std::binary_semaphore failureCommitEntered{ 0 };
+		std::binary_semaphore releaseFailureCommit{ 0 };
+		std::binary_semaphore successorStarted{ 0 };
+
+		std::thread failedOperation([&]() {
+			failureAccepted.store(
+				TryCommitVendorResetFailure(
+					resetMutex,
+					resetPending,
+					resetGeneration,
+					claimedGeneration,
+					[&]() {
+						lifecycleGeneration.store(
+							claimedGeneration,
+							std::memory_order_release);
+						terminalGeneration.store(
+							claimedGeneration,
+							std::memory_order_release);
+						failureCommitEntered.release();
+						releaseFailureCommit.acquire();
+					}),
+				std::memory_order_release);
+		});
+		failureCommitEntered.acquire();
+
+		std::thread successorPublisher([&]() {
+			successorStarted.release();
+			const std::scoped_lock lock(resetMutex);
+			resetGeneration.store(successorGeneration, std::memory_order_release);
+			resetPending.store(true, std::memory_order_release);
+			lifecycleGeneration.store(
+				successorGeneration,
+				std::memory_order_release);
+			successorPublished.store(true, std::memory_order_release);
+		});
+		successorStarted.acquire();
+		const bool successorBlockedDuringFailureCommit =
+			!successorPublished.load(std::memory_order_acquire);
+		releaseFailureCommit.release();
+		failedOperation.join();
+		successorPublisher.join();
+
+		const bool serializedCommit =
+			failureAccepted.load(std::memory_order_acquire) &&
+			successorBlockedDuringFailureCommit &&
+			successorPublished.load(std::memory_order_acquire) &&
+			resetPending.load(std::memory_order_acquire) &&
+			resetGeneration.load(std::memory_order_acquire) ==
+				successorGeneration &&
+			lifecycleGeneration.load(std::memory_order_acquire) ==
+				successorGeneration &&
+			terminalGeneration.load(std::memory_order_acquire) !=
+				resetGeneration.load(std::memory_order_acquire);
+
+		bool staleEvidenceCommitted = false;
+		const bool staleAccepted = TryCommitVendorResetFailure(
+			resetMutex,
+			resetPending,
+			resetGeneration,
+			claimedGeneration,
+			[&]() { staleEvidenceCommitted = true; });
+		return serializedCommit && !staleAccepted &&
+		       !staleEvidenceCommitted &&
+		       resetGeneration.load(std::memory_order_acquire) ==
+		           successorGeneration;
 	}
 
 	constexpr bool CoversVendorResetServiceOwnership()
@@ -3710,4 +3792,7 @@ namespace
 	static_assert(CoversMenuPresentationDecisionLatching());
 }
 
-int main() {}
+int main()
+{
+	return CoversVendorResetFailureCommitTransaction() ? 0 : 1;
+}

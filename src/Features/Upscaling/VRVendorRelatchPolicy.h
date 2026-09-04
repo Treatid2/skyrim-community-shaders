@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <limits>
+#include <mutex>
 #include <string_view>
+#include <utility>
 
 namespace VRVendorRelatchPolicy
 {
@@ -1392,6 +1395,35 @@ namespace VRVendorRelatchPolicy
 		std::uint32_t a_failedGeneration) noexcept
 	{
 		return !a_resetPending || a_resetGeneration == a_failedGeneration;
+	}
+
+	// Keep failure evidence in the same transaction as the reset-slot decision.
+	// A successor therefore publishes either wholly before or wholly after it.
+	template <class CommitFailureEvidence>
+	[[nodiscard]] bool TryCommitVendorResetFailure(
+		std::mutex& a_resetMutex,
+		std::atomic<bool>& a_resetPending,
+		std::atomic<std::uint32_t>& a_resetGeneration,
+		std::uint32_t a_failedGeneration,
+		CommitFailureEvidence&& a_commitFailureEvidence)
+	{
+		const std::scoped_lock lock(a_resetMutex);
+		const bool pending = a_resetPending.load(std::memory_order_relaxed);
+		const std::uint32_t generation =
+			pending ? a_resetGeneration.load(std::memory_order_relaxed) : 0u;
+		if (!CanRepublishVendorResetAfterFailure(
+				pending,
+				generation,
+				a_failedGeneration)) {
+			return false;
+		}
+
+		if (!pending) {
+			a_resetGeneration.store(a_failedGeneration, std::memory_order_release);
+			a_resetPending.store(true, std::memory_order_release);
+		}
+		std::forward<CommitFailureEvidence>(a_commitFailureEvidence)();
+		return true;
 	}
 
 	struct VendorResetServiceAdmission

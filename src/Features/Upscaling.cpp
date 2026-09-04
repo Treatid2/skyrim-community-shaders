@@ -6152,6 +6152,15 @@ namespace
 		add(a_upscaling.GetVRVendorEvaluationContractGeneration(
 			a_upscaleMethod));
 		add(a_upscaling.GetVRRenderScaleTransitionSnapshot().targetEpoch);
+		if (a_upscaleMethod == Upscaling::UpscaleMethod::kFSR) {
+			const bool resetPending =
+				a_upscaling.pendingFSRReset.load(std::memory_order_acquire);
+			add(resetPending);
+			add(resetPending ?
+					a_upscaling.pendingFSRResetGeneration.load(
+						std::memory_order_acquire) :
+					0u);
+		}
 		return hash;
 	}
 
@@ -37049,16 +37058,26 @@ bool Upscaling::ApplyPendingVendorRuntimeReset(UpscaleMethod a_upscaleMethod, co
 		return false;
 	const bool retainTerminalInactiveFSRResources =
 		ShouldRetainInactiveFSROwnership(*this, a_upscaleMethod);
-	const auto latchTerminalFSRFailure = [&](FidelityFX::LifecycleResult a_result, bool a_failedResetOwnsQueue) {
-		if (HandleFSRLifecycleDeviceLoss(
-				a_result,
-				"vendor runtime FSR lifecycle")) {
-			return;
-		}
-		if (a_result == FidelityFX::LifecycleResult::Failed &&
-			a_failedResetOwnsQueue) {
-			fsrResourceFailureRequestKey = fsrResourceRequestKey;
-		}
+	const auto commitFSRResetFailure = [&, this](
+										   FidelityFX::LifecycleResult a_result,
+										   uint32_t a_generation,
+										   const char* a_reason,
+										   bool a_incompatibleReady = false) {
+		const auto phase =
+			a_result == FidelityFX::LifecycleResult::Pending ?
+				VRVendorRuntimeLifecyclePhase::WaitingForDrain :
+				VRVendorRuntimeLifecyclePhase::Failed;
+		const bool terminalFailure =
+			a_result == FidelityFX::LifecycleResult::Failed ||
+			a_incompatibleReady;
+		(void)TryCommitFSRRuntimeResetFailure(
+			a_generation,
+			phase,
+			a_reason,
+			terminalFailure);
+		(void)HandleFSRLifecycleDeviceLoss(
+			a_result,
+			"vendor runtime FSR lifecycle");
 	};
 	const bool activeGenerationMismatch =
 		activeContractGeneration != 0 &&
@@ -37139,20 +37158,10 @@ bool Upscaling::ApplyPendingVendorRuntimeReset(UpscaleMethod a_upscaleMethod, co
 			logger::debug("[Upscaling] Retiring {}inactive FSR resources before {} runtime reset", context, magic_enum::enum_name(a_upscaleMethod));
 			const auto pollResult = fidelityFX.PollFSRResourceTeardownReady("inactive FSR resource teardown before vendor runtime reset");
 			if (pollResult != FidelityFX::LifecycleResult::Ready) {
-				const bool failedResetOwnsQueue =
-					TryRepublishFSRRuntimeResetAfterFailure(
-						pendingFSRResetContractGeneration);
-				if (failedResetOwnsQueue) {
-					RecordVRVendorRuntimeLifecycle(
-						UpscaleMethod::kFSR,
-						pollResult == FidelityFX::LifecycleResult::Pending ?
-							VRVendorRuntimeLifecyclePhase::WaitingForDrain :
-							VRVendorRuntimeLifecyclePhase::Failed,
-						pendingFSRResetContractGeneration,
-						"inactive runtime retirement",
-						true);
-				}
-				latchTerminalFSRFailure(pollResult, failedResetOwnsQueue);
+				(void)commitFSRResetFailure(
+					pollResult,
+					pendingFSRResetContractGeneration,
+					"inactive runtime retirement");
 				retireFSR = false;
 				if (pollResult == FidelityFX::LifecycleResult::Pending) {
 					LogWarnOnceFmt(
@@ -37180,20 +37189,10 @@ bool Upscaling::ApplyPendingVendorRuntimeReset(UpscaleMethod a_upscaleMethod, co
 			}
 #endif
 			if (destroyResult != FidelityFX::LifecycleResult::Ready) {
-				const bool failedResetOwnsQueue =
-					TryRepublishFSRRuntimeResetAfterFailure(
-						pendingFSRResetContractGeneration);
-				if (failedResetOwnsQueue) {
-					RecordVRVendorRuntimeLifecycle(
-						UpscaleMethod::kFSR,
-						destroyResult == FidelityFX::LifecycleResult::Pending ?
-							VRVendorRuntimeLifecyclePhase::WaitingForDrain :
-							VRVendorRuntimeLifecyclePhase::Failed,
-						pendingFSRResetContractGeneration,
-						"inactive runtime teardown",
-						true);
-				}
-				latchTerminalFSRFailure(destroyResult, failedResetOwnsQueue);
+				(void)commitFSRResetFailure(
+					destroyResult,
+					pendingFSRResetContractGeneration,
+					"inactive runtime teardown");
 				retireFSR = false;
 				return false;
 			}
@@ -37317,20 +37316,10 @@ bool Upscaling::ApplyPendingVendorRuntimeReset(UpscaleMethod a_upscaleMethod, co
 			logger::debug("[Upscaling] Rebuilding {}FSR resources after VR reset", context);
 			const auto pollResult = fidelityFX.PollFSRResourceTeardownReady("vendor runtime FSR resource teardown");
 			if (pollResult != FidelityFX::LifecycleResult::Ready) {
-				const bool failedResetOwnsQueue =
-					TryRepublishFSRRuntimeResetAfterFailure(
-						activeContractGeneration);
-				if (failedResetOwnsQueue) {
-					RecordVRVendorRuntimeLifecycle(
-						UpscaleMethod::kFSR,
-						pollResult == FidelityFX::LifecycleResult::Pending ?
-							VRVendorRuntimeLifecyclePhase::WaitingForDrain :
-							VRVendorRuntimeLifecyclePhase::Failed,
-						activeContractGeneration,
-						"runtime reset rebuild",
-						true);
-				}
-				latchTerminalFSRFailure(pollResult, failedResetOwnsQueue);
+				(void)commitFSRResetFailure(
+					pollResult,
+					activeContractGeneration,
+					"runtime reset rebuild");
 				if (pollResult == FidelityFX::LifecycleResult::Pending) {
 					LogWarnOnceFmt(
 						loggedVendorResetDeferral,
@@ -37358,20 +37347,10 @@ bool Upscaling::ApplyPendingVendorRuntimeReset(UpscaleMethod a_upscaleMethod, co
 			}
 #endif
 			if (destroyResult != FidelityFX::LifecycleResult::Ready) {
-				const bool failedResetOwnsQueue =
-					TryRepublishFSRRuntimeResetAfterFailure(
-						activeContractGeneration);
-				if (failedResetOwnsQueue) {
-					RecordVRVendorRuntimeLifecycle(
-						UpscaleMethod::kFSR,
-						destroyResult == FidelityFX::LifecycleResult::Pending ?
-							VRVendorRuntimeLifecyclePhase::WaitingForDrain :
-							VRVendorRuntimeLifecyclePhase::Failed,
-						activeContractGeneration,
-						"runtime reset teardown",
-						true);
-				}
-				latchTerminalFSRFailure(destroyResult, failedResetOwnsQueue);
+				(void)commitFSRResetFailure(
+					destroyResult,
+					activeContractGeneration,
+					"runtime reset teardown");
 				rebuildFSR = false;
 				return false;
 			}
@@ -37380,29 +37359,13 @@ bool Upscaling::ApplyPendingVendorRuntimeReset(UpscaleMethod a_upscaleMethod, co
 				createResult == FidelityFX::LifecycleResult::Ready &&
 				areCurrentFSRResourcesCompatible();
 			if (!compatibleResourcesCreated) {
-				HandleFSRLifecycleDeviceLoss(
+				(void)commitFSRResetFailure(
 					createResult,
-					"vendor runtime FSR resource creation");
-				const bool failedResetOwnsQueue =
-					TryRepublishFSRRuntimeResetAfterFailure(
-						activeContractGeneration);
-				if (failedResetOwnsQueue) {
-					RecordVRVendorRuntimeLifecycle(
-						UpscaleMethod::kFSR,
-						createResult == FidelityFX::LifecycleResult::Pending ?
-							VRVendorRuntimeLifecyclePhase::WaitingForDrain :
-							VRVendorRuntimeLifecyclePhase::Failed,
-						activeContractGeneration,
-						createResult == FidelityFX::LifecycleResult::Ready ?
-							"runtime reset incompatible FSR resources" :
-							"runtime reset FSR create",
-						true);
-				}
-				if (failedResetOwnsQueue &&
-					(createResult == FidelityFX::LifecycleResult::Failed ||
-						createResult == FidelityFX::LifecycleResult::Ready)) {
-					fsrResourceFailureRequestKey = fsrResourceRequestKey;
-				}
+					activeContractGeneration,
+					createResult == FidelityFX::LifecycleResult::Ready ?
+						"runtime reset incompatible FSR resources" :
+						"runtime reset FSR create",
+					createResult == FidelityFX::LifecycleResult::Ready);
 				rebuildFSR = false;
 				return false;
 			}
@@ -37415,20 +37378,17 @@ bool Upscaling::ApplyPendingVendorRuntimeReset(UpscaleMethod a_upscaleMethod, co
 			MarkVendorRuntimeResourcesDirty(UpscaleMethod::kDLSS, activeContractGeneration);
 		else if (retireDLSS)
 			MarkVendorRuntimeResourcesDirty(UpscaleMethod::kDLSS, pendingDLSSResetContractGeneration);
-		const bool failedFSRResetOwnsQueue =
-			rebuildFSR ?
-				TryRepublishFSRRuntimeResetAfterFailure(
-					activeContractGeneration) :
-			retireFSR ?
-				TryRepublishFSRRuntimeResetAfterFailure(
-					pendingFSRResetContractGeneration) :
-				false;
+		if (rebuildFSR || retireFSR) {
+			(void)TryCommitFSRRuntimeResetFailure(
+				rebuildFSR ?
+					activeContractGeneration :
+					pendingFSRResetContractGeneration,
+				VRVendorRuntimeLifecyclePhase::Failed,
+				"runtime reset exception",
+				true);
+		}
 		if (rebuildDLSS || retireDLSS)
 			RecordVRVendorRuntimeLifecycle(UpscaleMethod::kDLSS, VRVendorRuntimeLifecyclePhase::Failed, rebuildDLSS ? activeContractGeneration : pendingDLSSResetContractGeneration, "runtime reset exception");
-		if (failedFSRResetOwnsQueue)
-			RecordVRVendorRuntimeLifecycle(UpscaleMethod::kFSR, VRVendorRuntimeLifecyclePhase::Failed, rebuildFSR ? activeContractGeneration : pendingFSRResetContractGeneration, "runtime reset exception", true);
-		if (failedFSRResetOwnsQueue)
-			fsrResourceFailureRequestKey = fsrResourceRequestKey;
 		MarkSubmitStageDeviceLostIfNeeded(e, "vendor runtime reset");
 		LogWarnOnceFmt(
 			loggedVendorResetFailure,
@@ -37442,20 +37402,17 @@ bool Upscaling::ApplyPendingVendorRuntimeReset(UpscaleMethod a_upscaleMethod, co
 			MarkVendorRuntimeResourcesDirty(UpscaleMethod::kDLSS, activeContractGeneration);
 		else if (retireDLSS)
 			MarkVendorRuntimeResourcesDirty(UpscaleMethod::kDLSS, pendingDLSSResetContractGeneration);
-		const bool failedFSRResetOwnsQueue =
-			rebuildFSR ?
-				TryRepublishFSRRuntimeResetAfterFailure(
-					activeContractGeneration) :
-			retireFSR ?
-				TryRepublishFSRRuntimeResetAfterFailure(
-					pendingFSRResetContractGeneration) :
-				false;
+		if (rebuildFSR || retireFSR) {
+			(void)TryCommitFSRRuntimeResetFailure(
+				rebuildFSR ?
+					activeContractGeneration :
+					pendingFSRResetContractGeneration,
+				VRVendorRuntimeLifecyclePhase::Failed,
+				"runtime reset exception",
+				true);
+		}
 		if (rebuildDLSS || retireDLSS)
 			RecordVRVendorRuntimeLifecycle(UpscaleMethod::kDLSS, VRVendorRuntimeLifecyclePhase::Failed, rebuildDLSS ? activeContractGeneration : pendingDLSSResetContractGeneration, "runtime reset exception");
-		if (failedFSRResetOwnsQueue)
-			RecordVRVendorRuntimeLifecycle(UpscaleMethod::kFSR, VRVendorRuntimeLifecyclePhase::Failed, rebuildFSR ? activeContractGeneration : pendingFSRResetContractGeneration, "runtime reset exception", true);
-		if (failedFSRResetOwnsQueue)
-			fsrResourceFailureRequestKey = fsrResourceRequestKey;
 		MarkSubmitStageDeviceLostIfDeviceRemoved("vendor runtime reset");
 		LogWarnOnceFmt(
 			loggedVendorResetFailure,
@@ -54272,6 +54229,7 @@ void Upscaling::MarkVendorRuntimeResourcesDirty(UpscaleMethod a_upscaleMethod, u
 		a_generation != 0 ?
 			a_generation :
 			GetVRVendorEvaluationContractGeneration(a_upscaleMethod);
+	bool lifecycleRecorded = false;
 	{
 		const std::scoped_lock lock(vendorRuntimeResetMutex);
 		switch (a_upscaleMethod) {
@@ -54282,12 +54240,24 @@ void Upscaling::MarkVendorRuntimeResourcesDirty(UpscaleMethod a_upscaleMethod, u
 		case UpscaleMethod::kFSR:
 			pendingFSRResetGeneration.store(generation, std::memory_order_release);
 			pendingFSRReset.store(true, std::memory_order_release);
+			RecordVRVendorRuntimeLifecycle(
+				UpscaleMethod::kFSR,
+				VRVendorRuntimeLifecyclePhase::Dirty,
+				generation,
+				"resources dirty");
+			lifecycleRecorded = true;
 			break;
 		default:
 			break;
 		}
 	}
-	RecordVRVendorRuntimeLifecycle(a_upscaleMethod, VRVendorRuntimeLifecyclePhase::Dirty, generation, "resources dirty");
+	if (!lifecycleRecorded) {
+		RecordVRVendorRuntimeLifecycle(
+			a_upscaleMethod,
+			VRVendorRuntimeLifecyclePhase::Dirty,
+			generation,
+			"resources dirty");
+	}
 }
 
 void Upscaling::MarkVendorRuntimeResourcesReady(UpscaleMethod a_upscaleMethod, uint32_t a_generation)
@@ -54390,32 +54360,35 @@ void Upscaling::ClearVendorRuntimeResourcesDirty(UpscaleMethod a_upscaleMethod, 
 		"resources cleared");
 }
 
-bool Upscaling::TryRepublishFSRRuntimeResetAfterFailure(uint32_t a_failedGeneration)
+bool Upscaling::TryCommitFSRRuntimeResetFailure(
+	uint32_t a_failedGeneration,
+	VRVendorRuntimeLifecyclePhase a_phase,
+	const char* a_reason,
+	bool a_latchTerminalFailure)
 {
-	{
-		const std::scoped_lock lock(vendorRuntimeResetMutex);
-		const bool pending = pendingFSRReset.load(std::memory_order_relaxed);
-		const uint32_t generation =
-			pending ? pendingFSRResetGeneration.load(std::memory_order_relaxed) : 0u;
-		if (!VRVendorRelatchPolicy::CanRepublishVendorResetAfterFailure(
-				pending,
-				generation,
-				a_failedGeneration)) {
-			return false;
-		}
-
-		if (!pending) {
-			pendingFSRResetGeneration.store(a_failedGeneration, std::memory_order_release);
-			pendingFSRReset.store(true, std::memory_order_release);
-		}
-	}
-	RecordVRVendorRuntimeLifecycle(
-		UpscaleMethod::kFSR,
-		VRVendorRuntimeLifecyclePhase::Dirty,
+	return VRVendorRelatchPolicy::TryCommitVendorResetFailure(
+		vendorRuntimeResetMutex,
+		pendingFSRReset,
+		pendingFSRResetGeneration,
 		a_failedGeneration,
-		"resources dirty",
-		true);
-	return true;
+		[&]() {
+			RecordVRVendorRuntimeLifecycle(
+				UpscaleMethod::kFSR,
+				VRVendorRuntimeLifecyclePhase::Dirty,
+				a_failedGeneration,
+				"resources dirty");
+			RecordVRVendorRuntimeLifecycle(
+				UpscaleMethod::kFSR,
+				a_phase,
+				a_failedGeneration,
+				a_reason);
+			if (a_latchTerminalFailure) {
+				fsrResourceFailureRequestKey =
+					BuildFSRResourceLifecycleRequestKey(
+						*this,
+						UpscaleMethod::kFSR);
+			}
+		});
 }
 
 bool Upscaling::TryClaimPendingVendorRuntimeReset(
@@ -54446,11 +54419,9 @@ bool Upscaling::TryClaimPendingVendorRuntimeReset(
 	}
 }
 
-void Upscaling::RecordVRVendorRuntimeLifecycle(UpscaleMethod a_upscaleMethod, VRVendorRuntimeLifecyclePhase a_phase, uint32_t a_generation, const char* a_reason, bool a_requirePendingResetOwnership)
+void Upscaling::RecordVRVendorRuntimeLifecycle(UpscaleMethod a_upscaleMethod, VRVendorRuntimeLifecyclePhase a_phase, uint32_t a_generation, const char* a_reason)
 {
 	if (a_upscaleMethod != UpscaleMethod::kDLSS && a_upscaleMethod != UpscaleMethod::kFSR)
-		return;
-	if (a_requirePendingResetOwnership && a_upscaleMethod != UpscaleMethod::kFSR)
 		return;
 
 	const uint32_t frame = globals::state ? std::max(globals::state->frameCount, 1u) : 0u;
@@ -54464,16 +54435,6 @@ void Upscaling::RecordVRVendorRuntimeLifecycle(UpscaleMethod a_upscaleMethod, VR
 	uint64_t revision = 0;
 	{
 		std::scoped_lock lock(vrRenderScaleTransitionControllerMutex);
-		if (a_requirePendingResetOwnership) {
-			const bool resetPending =
-				pendingFSRReset.load(std::memory_order_acquire);
-			const uint32_t resetGeneration =
-				resetPending ?
-					pendingFSRResetGeneration.load(std::memory_order_acquire) :
-					0u;
-			if (!resetPending || resetGeneration != a_generation)
-				return;
-		}
 		auto& target = a_upscaleMethod == UpscaleMethod::kDLSS ?
 		                   vrRenderScaleTransitionController.dlssLifecycle :
 		                   vrRenderScaleTransitionController.fsrLifecycle;
