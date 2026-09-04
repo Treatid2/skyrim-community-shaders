@@ -283,10 +283,12 @@ def validate_cache_source(
         else None
     )
     contract_runtime = "SE" if expected_runtime == RUNTIME_SE_AE else "VR"
-    if version_match is None or version_match.group("runtime") != contract_runtime:
+    observed_runtime = version_match.group("runtime") if version_match else None
+    if observed_runtime != contract_runtime:
         raise SystemExit(
-            f"cache {cache_directory} plugin version does not identify "
-            f"runtime {contract_runtime}: {plugin_version!r}"
+            f"shader cache runtime does not match its FOMOD slot: {info_path} "
+            f"(expected {contract_runtime!r}, observed {observed_runtime!r}; "
+            f"PluginVersion {plugin_version!r})"
         )
     if shader_cache_abi != expected_shader_cache_abi:
         raise SystemExit(
@@ -310,7 +312,23 @@ def validate_cache_source(
         pack_manifest = json.loads(pack_manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise SystemExit(f"invalid managed pack manifest {pack_manifest_path}: {exc}") from exc
-    pack_set_id = pack_manifest.get("packSetId") if isinstance(pack_manifest, dict) else None
+    if not isinstance(pack_manifest, dict):
+        raise SystemExit(f"invalid managed pack manifest: {pack_manifest_path}")
+    pack_runtime = pack_manifest.get("runtime")
+    if pack_runtime != contract_runtime:
+        raise SystemExit(
+            f"managed shader cache runtime does not match its FOMOD slot: "
+            f"{pack_manifest_path} (expected {contract_runtime!r}, "
+            f"observed {pack_runtime!r})"
+        )
+    pack_shader_cache_abi = pack_manifest.get("shaderCacheABI")
+    if pack_shader_cache_abi != expected_shader_cache_abi:
+        raise SystemExit(
+            f"managed shader cache ABI does not match the core AIO: "
+            f"{pack_manifest_path} (core {expected_shader_cache_abi}, "
+            f"cache {pack_shader_cache_abi!r})"
+        )
+    pack_set_id = pack_manifest.get("packSetId")
     if not SHADER_CACHE_CONTRACT.valid_pack_set_id(pack_set_id):
         raise SystemExit(
             f"managed pack manifest does not match its runtime metadata: "
@@ -350,7 +368,7 @@ def validate_cache_source(
         SHADER_CACHE_CONTRACT.validate_pack_manifest_contract(
             pack_manifest,
             contract_runtime,
-            shader_cache_abi,
+            expected_shader_cache_abi,
             pack_stats,
         )
     except SystemExit as exc:
