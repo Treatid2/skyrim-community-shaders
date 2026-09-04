@@ -803,7 +803,8 @@ namespace Util::ShaderCachePack
 		ScannedFile& a_file,
 		std::uint64_t a_generation,
 		std::string* a_error,
-		InitializeProgress* a_progress) const
+		InitializeProgress* a_progress,
+		[[maybe_unused]] InitializePurpose a_purpose) const
 	{
 		if (a_progress)
 			*a_progress = InitializeProgress::Unchanged;
@@ -813,7 +814,10 @@ namespace Util::ShaderCachePack
 			return false;
 		}
 #ifdef CSX_SHADER_CACHE_PACK_TESTING
-		if (ConsumeTestFailurePoint(TestFailurePoint::BeforeInitializeMutation)) {
+		const auto beforeMutationFailure = a_purpose == InitializePurpose::ResetCleanup ?
+		                                       TestFailurePoint::BeforeResetCleanupMutation :
+		                                       TestFailurePoint::BeforeInitializeMutation;
+		if (ConsumeTestFailurePoint(beforeMutationFailure)) {
 			SetError(a_error, "injected failure before shader pack initialization mutation");
 			return false;
 		}
@@ -832,11 +836,17 @@ namespace Util::ShaderCachePack
 		{
 			std::ofstream stream(a_file.path, std::ios::binary | std::ios::trunc);
 #ifdef CSX_SHADER_CACHE_PACK_TESTING
-			if (ConsumeTestFailurePoint(TestFailurePoint::AfterInitializeTruncate)) {
+			const auto afterTruncateFailure = a_purpose == InitializePurpose::ResetCleanup ?
+			                                      TestFailurePoint::AfterResetCleanupTruncate :
+			                                      TestFailurePoint::AfterInitializeTruncate;
+			const auto throwAfterTruncate = a_purpose == InitializePurpose::ResetCleanup ?
+			                                    TestFailurePoint::ThrowAfterResetCleanupTruncate :
+			                                    TestFailurePoint::ThrowAfterInitializeTruncate;
+			if (ConsumeTestFailurePoint(afterTruncateFailure)) {
 				SetError(a_error, "injected failure after shader pack initialization truncate");
 				return false;
 			}
-			if (ConsumeTestFailurePoint(TestFailurePoint::ThrowAfterInitializeTruncate))
+			if (ConsumeTestFailurePoint(throwAfterTruncate))
 				throw std::runtime_error("injected exception after shader pack initialization truncate");
 #endif
 			stream.write(reinterpret_cast<const char*>(&header), sizeof(header));
@@ -846,11 +856,17 @@ namespace Util::ShaderCachePack
 				return false;
 			}
 #ifdef CSX_SHADER_CACHE_PACK_TESTING
-			if (ConsumeTestFailurePoint(TestFailurePoint::AfterInitializeWrite)) {
+			const auto afterWriteFailure = a_purpose == InitializePurpose::ResetCleanup ?
+			                                   TestFailurePoint::AfterResetCleanupWrite :
+			                                   TestFailurePoint::AfterInitializeWrite;
+			const auto throwAfterWrite = a_purpose == InitializePurpose::ResetCleanup ?
+			                                 TestFailurePoint::ThrowAfterResetCleanupWrite :
+			                                 TestFailurePoint::ThrowAfterInitializeWrite;
+			if (ConsumeTestFailurePoint(afterWriteFailure)) {
 				SetError(a_error, "injected failure after shader pack initialization write");
 				return false;
 			}
-			if (ConsumeTestFailurePoint(TestFailurePoint::ThrowAfterInitializeWrite))
+			if (ConsumeTestFailurePoint(throwAfterWrite))
 				throw std::runtime_error("injected exception after shader pack initialization write");
 #endif
 		}
@@ -861,12 +877,21 @@ namespace Util::ShaderCachePack
 		if (a_progress)
 			*a_progress = InitializeProgress::Durable;
 #ifdef CSX_SHADER_CACHE_PACK_TESTING
-		if (ConsumeTestFailurePoint(TestFailurePoint::AfterInitializeDurableFlush)) {
+		const auto afterDurableFlushFailure = a_purpose == InitializePurpose::ResetCleanup ?
+		                                          TestFailurePoint::AfterResetCleanupDurableFlush :
+		                                          TestFailurePoint::AfterInitializeDurableFlush;
+		const auto throwAfterDurableFlush = a_purpose == InitializePurpose::ResetCleanup ?
+		                                        TestFailurePoint::ThrowAfterResetCleanupDurableFlush :
+		                                        TestFailurePoint::ThrowAfterInitializeDurableFlush;
+		if (ConsumeTestFailurePoint(afterDurableFlushFailure)) {
 			SetError(a_error, "injected failure after durable shader pack initialization flush");
 			return false;
 		}
-		if (ConsumeTestFailurePoint(TestFailurePoint::ThrowAfterInitializeDurableFlush))
+		if (ConsumeTestFailurePoint(throwAfterDurableFlush))
 			throw std::runtime_error("injected exception after durable shader pack initialization flush");
+		if (a_purpose == InitializePurpose::ResetCleanup &&
+			ConsumeTestFailurePoint(TestFailurePoint::ThrowBeforeResetCleanupVerification))
+			throw std::runtime_error("injected exception before shader pack reset cleanup verification");
 #endif
 		if (!Scan(a_file.path, a_file, a_error))
 			return false;
@@ -958,6 +983,96 @@ namespace Util::ShaderCachePack
 								  b.diagnostic));
 			return false;
 		}
+		struct BootstrapRollbackResult
+		{
+			std::array<bool, 2> restored{};
+			bool recoveryException = false;
+
+			[[nodiscard]] bool AllRestored() const noexcept { return restored[0] && restored[1]; }
+		};
+		auto restoreEmptyPair = [&]() noexcept {
+			BootstrapRollbackResult result;
+			const std::array<const std::filesystem::path*, 2> paths{ &pathA, &pathB };
+			for (std::size_t index = 0; index < paths.size(); ++index) {
+				const auto& path = *paths[index];
+				try {
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+					try {
+						if (index == 0 && ConsumeTestFailurePoint(TestFailurePoint::ThrowBeforeFirstBootstrapRollback))
+							throw std::runtime_error("injected exception before first shader pack bootstrap rollback member");
+						if (index == 1 && ConsumeTestFailurePoint(TestFailurePoint::ThrowBetweenBootstrapRollbackMembers))
+							throw std::runtime_error("injected exception between shader pack bootstrap rollback members");
+					} catch (...) {
+						// Recovery bookkeeping and diagnostics must not prevent either
+						// physical member from being restored and verified.
+						result.recoveryException = true;
+					}
+					if (ConsumeTestFailurePoint(TestFailurePoint::DuringBootstrapRollback))
+						continue;
+#endif
+					std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+					if (!stream)
+						continue;
+					stream.close();
+					std::error_code sizeError;
+					const auto restoredSize = std::filesystem::file_size(path, sizeError);
+					if (!stream.good() || sizeError || restoredSize != 0 || !DurableFlush(path))
+						continue;
+					result.restored[index] = true;
+				} catch (...) {
+					result.recoveryException = true;
+				}
+			}
+			return result;
+		};
+		auto reportBootstrapFailure = [&](std::string_view a_initializationError, const BootstrapRollbackResult& a_rollback) noexcept {
+			try {
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+				if (ConsumeTestFailurePoint(TestFailurePoint::ThrowDuringBootstrapRollbackDiagnostic))
+					throw std::runtime_error("injected exception during shader pack bootstrap rollback diagnostic");
+#endif
+				std::string rollbackDetail;
+				if (!a_rollback.restored[0])
+					rollbackDetail = "member A was not restored";
+				if (!a_rollback.restored[1]) {
+					if (!rollbackDetail.empty())
+						rollbackDetail += "; ";
+					rollbackDetail += "member B was not restored";
+				}
+				if (a_rollback.recoveryException) {
+					if (!rollbackDetail.empty())
+						rollbackDetail += "; ";
+					rollbackDetail += "a rollback operation raised an exception";
+				}
+				const auto separator = a_initializationError.empty() ? "" : "; ";
+				SetError(a_error, a_rollback.AllRestored() ?
+									  std::format("{}{}bootstrap rollback restored both members to zero bytes{}",
+										  a_initializationError,
+										  separator,
+										  a_rollback.recoveryException ? " despite a recovered rollback exception" : "") :
+									  std::format("{}{}bootstrap rollback failed or is indeterminate: {}",
+										  a_initializationError,
+										  separator,
+										  rollbackDetail));
+			} catch (...) {
+				try {
+					SetError(a_error, a_rollback.AllRestored() ?
+										  "shader pack bootstrap failed; rollback restored both members to zero bytes; detailed diagnostic unavailable" :
+										  "shader pack bootstrap failed; rollback failed or is indeterminate; detailed diagnostic unavailable");
+				} catch (...) {
+					// Physical recovery has already attempted and verified both
+					// members. An allocation failure may prevent textual reporting.
+				}
+			}
+		};
+		bool bootstrapRollbackArmed = false;
+		auto failBootstrap = [&](std::string_view a_failure) noexcept {
+			InvalidateStateLocked();
+			const auto rollback = restoreEmptyPair();
+			bootstrapRollbackArmed = false;
+			reportBootstrapFailure(a_failure, rollback);
+			return false;
+		};
 		if (!a.valid || !b.valid) {
 			const bool emptyPair = a.fileSize == 0 && b.fileSize == 0;
 			if (!a_allowEmptyInitialization || !emptyPair) {
@@ -968,91 +1083,7 @@ namespace Util::ShaderCachePack
 				return false;
 			}
 
-			struct BootstrapRollbackResult
-			{
-				std::array<bool, 2> restored{};
-				bool recoveryException = false;
-
-				[[nodiscard]] bool AllRestored() const noexcept { return restored[0] && restored[1]; }
-			};
-			auto restoreEmptyPair = [&]() noexcept {
-				BootstrapRollbackResult result;
-				const std::array<const std::filesystem::path*, 2> paths{ &pathA, &pathB };
-				for (std::size_t index = 0; index < paths.size(); ++index) {
-					const auto& path = *paths[index];
-					try {
-#ifdef CSX_SHADER_CACHE_PACK_TESTING
-						try {
-							if (index == 0 && ConsumeTestFailurePoint(TestFailurePoint::ThrowBeforeFirstBootstrapRollback))
-								throw std::runtime_error("injected exception before first shader pack bootstrap rollback member");
-							if (index == 1 && ConsumeTestFailurePoint(TestFailurePoint::ThrowBetweenBootstrapRollbackMembers))
-								throw std::runtime_error("injected exception between shader pack bootstrap rollback members");
-						} catch (...) {
-							// Recovery bookkeeping and diagnostics must not prevent either
-							// physical member from being restored and verified.
-							result.recoveryException = true;
-						}
-						if (ConsumeTestFailurePoint(TestFailurePoint::DuringBootstrapRollback)) {
-							continue;
-						}
-#endif
-						std::ofstream stream(path, std::ios::binary | std::ios::trunc);
-						if (!stream)
-							continue;
-						stream.close();
-						std::error_code sizeError;
-						const auto restoredSize = std::filesystem::file_size(path, sizeError);
-						if (!stream.good() || sizeError || restoredSize != 0 || !DurableFlush(path))
-							continue;
-						result.restored[index] = true;
-					} catch (...) {
-						result.recoveryException = true;
-					}
-				}
-				return result;
-			};
-			auto reportBootstrapFailure = [&](const std::string& a_initializationError, const BootstrapRollbackResult& a_rollback) noexcept {
-				try {
-#ifdef CSX_SHADER_CACHE_PACK_TESTING
-					if (ConsumeTestFailurePoint(TestFailurePoint::ThrowDuringBootstrapRollbackDiagnostic))
-						throw std::runtime_error("injected exception during shader pack bootstrap rollback diagnostic");
-#endif
-					std::string rollbackDetail;
-					if (!a_rollback.restored[0])
-						rollbackDetail = "member A was not restored";
-					if (!a_rollback.restored[1]) {
-						if (!rollbackDetail.empty())
-							rollbackDetail += "; ";
-						rollbackDetail += "member B was not restored";
-					}
-					if (a_rollback.recoveryException) {
-						if (!rollbackDetail.empty())
-							rollbackDetail += "; ";
-						rollbackDetail += "a rollback operation raised an exception";
-					}
-					const auto separator = a_initializationError.empty() ? "" : "; ";
-					SetError(a_error, a_rollback.AllRestored() ?
-										  std::format("{}{}bootstrap rollback restored both members to zero bytes{}",
-											  a_initializationError,
-											  separator,
-											  a_rollback.recoveryException ? " despite a recovered rollback exception" : "") :
-										  std::format("{}{}bootstrap rollback failed or is indeterminate: {}",
-											  a_initializationError,
-											  separator,
-											  rollbackDetail));
-				} catch (...) {
-					try {
-						SetError(a_error, a_rollback.AllRestored() ?
-											  "shader pack bootstrap failed; rollback restored both members to zero bytes; detailed diagnostic unavailable" :
-											  "shader pack bootstrap failed; rollback failed or is indeterminate; detailed diagnostic unavailable");
-					} catch (...) {
-						// Physical recovery has already attempted and verified both
-						// members. An allocation failure may prevent textual reporting.
-					}
-				}
-			};
-			bool rollbackCompleted = false;
-			BootstrapRollbackResult rollbackResult;
+			bootstrapRollbackArmed = true;
 			try {
 				bool initialized = false;
 				std::string initializationError;
@@ -1076,31 +1107,12 @@ namespace Util::ShaderCachePack
 					initializationError = "shader pack bootstrap initialization raised an unknown exception";
 				}
 				if (!initialized) {
-					rollbackResult = restoreEmptyPair();
-					rollbackCompleted = true;
-					reportBootstrapFailure(initializationError, rollbackResult);
-					return false;
+					return failBootstrap(initializationError);
 				}
 			} catch (const std::exception& e) {
-				if (!rollbackCompleted) {
-					rollbackResult = restoreEmptyPair();
-					rollbackCompleted = true;
-				}
-				try {
-					reportBootstrapFailure(
-						std::format("shader pack bootstrap transaction raised an exception: {}", e.what()),
-						rollbackResult);
-				} catch (...) {
-					reportBootstrapFailure("shader pack bootstrap transaction raised an exception", rollbackResult);
-				}
-				return false;
+				return failBootstrap(e.what());
 			} catch (...) {
-				if (!rollbackCompleted) {
-					rollbackResult = restoreEmptyPair();
-					rollbackCompleted = true;
-				}
-				reportBootstrapFailure("shader pack bootstrap transaction raised an unknown exception", rollbackResult);
-				return false;
+				return failBootstrap("shader pack bootstrap transaction raised an unknown exception");
 			}
 		}
 		std::string degraded;
@@ -1118,6 +1130,8 @@ namespace Util::ShaderCachePack
 		try {
 #ifdef CSX_SHADER_CACHE_PACK_TESTING
 			if (ConsumeTestFailurePoint(TestFailurePoint::BeforeStoreAdmissionCommit)) {
+				if (bootstrapRollbackArmed)
+					return failBootstrap("injected failure before shader pack admission commit");
 				SetError(a_error, "injected failure before shader pack admission commit");
 				return false;
 			}
@@ -1142,10 +1156,20 @@ namespace Util::ShaderCachePack
 #ifdef CSX_SHADER_CACHE_PACK_TESTING
 			if (ConsumeTestFailurePoint(TestFailurePoint::DuringStoreAdmissionCommit))
 				throw std::runtime_error("injected failure during shader pack admission commit");
+			if (ConsumeTestFailurePoint(TestFailurePoint::DuringStoreIndexPublication))
+				throw std::runtime_error("injected failure during shader pack index publication");
 #endif
 			RebuildIndexes();
+			bootstrapRollbackArmed = false;
+		} catch (const std::exception& e) {
+			InvalidateStateLocked();
+			if (bootstrapRollbackArmed)
+				return failBootstrap(e.what());
+			throw;
 		} catch (...) {
 			InvalidateStateLocked();
+			if (bootstrapRollbackArmed)
+				return failBootstrap("shader pack admission raised an unknown exception");
 			throw;
 		}
 		if (!degraded.empty())
@@ -1487,8 +1511,20 @@ namespace Util::ShaderCachePack
 
 	bool Store::Compact(std::string* a_error)
 	{
+		InitializeProgress compactionProgress = InitializeProgress::Unchanged;
 		try {
 			std::unique_lock lock(mutex);
+			auto failAfterMutation = [&](std::string_view a_fallbackError = {}) noexcept {
+				InvalidateStateLocked();
+				ReleaseWriterLease();
+				if (!a_fallbackError.empty()) {
+					try {
+						SetError(a_error, std::string(a_fallbackError));
+					} catch (...) {
+					}
+				}
+				return false;
+			};
 			if (!opened || !fallback.exists) {
 				SetError(a_error, "both fixed A/B files are required for compaction");
 				return false;
@@ -1512,24 +1548,48 @@ namespace Util::ShaderCachePack
 				return false;
 			}
 			ScannedFile target = fallback;
-			if (!InitializeEmpty(target, active.generation + 1, a_error))
-				return false;
+			if (!InitializeEmpty(target, active.generation + 1, a_error, &compactionProgress))
+				return compactionProgress == InitializeProgress::Unchanged ? false : failAfterMutation();
 			std::uint64_t sequence = 1;
 			for (const auto& entry : live) {
 				if (!AppendLocked(target, entry, sequence++, false, a_error))
-					return false;
+					return failAfterMutation();
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+				if (ConsumeTestFailurePoint(TestFailurePoint::DuringCompactionCopy)) {
+					return failAfterMutation("injected failure during shader pack compaction copy");
+				}
+#endif
 				target.validSize = std::filesystem::file_size(target.path);
 			}
 			if (!DurableFlush(target.path)) {
-				SetError(a_error, "failed to durably checkpoint compacted shader pack");
+				return failAfterMutation("failed to durably checkpoint compacted shader pack");
+			}
+			if (!OpenLocked(false, a_error)) {
+				ReleaseWriterLease();
 				return false;
 			}
-			return OpenLocked(false, a_error);
+			return true;
 		} catch (const std::exception& e) {
-			SetError(a_error, e.what());
+			if (compactionProgress != InitializeProgress::Unchanged) {
+				std::unique_lock lock(mutex);
+				InvalidateStateLocked();
+				ReleaseWriterLease();
+			}
+			try {
+				SetError(a_error, e.what());
+			} catch (...) {
+			}
 			return false;
 		} catch (...) {
-			SetError(a_error, "unknown shader pack compaction failure");
+			if (compactionProgress != InitializeProgress::Unchanged) {
+				std::unique_lock lock(mutex);
+				InvalidateStateLocked();
+				ReleaseWriterLease();
+			}
+			try {
+				SetError(a_error, "unknown shader pack compaction failure");
+			} catch (...) {
+			}
 			return false;
 		}
 	}
@@ -1602,9 +1662,57 @@ namespace Util::ShaderCachePack
 			// file is cleanup only; a failure must not invalidate the new empty store.
 			ScannedFile oldGeneration = fallback;
 			std::string cleanupError;
-			if (!InitializeEmpty(oldGeneration, active.generation - 1, &cleanupError)) {
-				SetError(a_error, "managed pack reset committed; superseded generation cleanup failed: " + cleanupError);
+			auto retainAuthoritativeReset = [&]() noexcept {
+				opened = active.valid;
+				fallback.valid = false;
+				fallback.generation = 0;
+				fallback.fileSize = 0;
+				fallback.validSize = 0;
+				fallback.nextSequence = 1;
+				fallback.diagnostic.clear();
+				fallback.records.clear();
+				exactIndex.clear();
+				liveByLogical.clear();
+				activeLiveByLogical.clear();
+				stats = {
+					.available = opened,
+					.activeGeneration = active.generation,
+					.totalBytes = active.fileSize,
+					.corruptTailBytes = active.fileSize - active.validSize,
+				};
+			};
+			auto reportCleanupFailure = [&](std::string_view a_detail) noexcept {
+				retainAuthoritativeReset();
+				try {
+#ifdef CSX_SHADER_CACHE_PACK_TESTING
+					if (ConsumeTestFailurePoint(TestFailurePoint::ThrowDuringResetCleanupDiagnostic))
+						throw std::runtime_error("injected exception during shader pack reset cleanup diagnostic");
+#endif
+					SetError(a_error, std::format(
+										  "managed pack reset committed; superseded generation cleanup failed{}{}",
+										  a_detail.empty() ? "" : ": ",
+										  a_detail));
+				} catch (...) {
+					try {
+						SetError(a_error, "managed pack reset committed; superseded generation cleanup failed; detailed diagnostic unavailable");
+					} catch (...) {
+					}
+				}
 				return ResetDisposition::CommittedDegraded;
+			};
+			InitializeProgress cleanupProgress = InitializeProgress::Unchanged;
+			try {
+				if (!InitializeEmpty(
+						oldGeneration,
+						active.generation - 1,
+						&cleanupError,
+						&cleanupProgress,
+						InitializePurpose::ResetCleanup))
+					return reportCleanupFailure(cleanupError);
+			} catch (const std::exception& e) {
+				return reportCleanupFailure(e.what());
+			} catch (...) {
+				return reportCleanupFailure("unknown cleanup exception");
 			}
 			bool finalReopened = false;
 #ifdef CSX_SHADER_CACHE_PACK_TESTING

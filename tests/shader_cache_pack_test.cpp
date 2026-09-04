@@ -680,6 +680,50 @@ int main(int argc, char** argv)
 		Store recovered(first, second, Lane::Optimized, TestPackSetId());
 		assert(recovered.InitializeEmptyFilesAndOpen(&rollbackError));
 	}
+
+	// Bootstrap rollback remains armed until admission and index publication
+	// finish, rather than ending after the second file is initialized.
+	for (const auto failurePoint : {
+			 TestFailurePoint::BeforeStoreAdmissionCommit,
+			 TestFailurePoint::DuringStoreAdmissionCommit,
+			 TestFailurePoint::DuringStoreIndexPublication }) {
+		const auto rollbackRoot = root / ("bootstrap-admission-rollback-" + std::to_string(static_cast<std::uint32_t>(failurePoint)));
+		std::filesystem::create_directories(rollbackRoot);
+		const auto first = rollbackRoot / "Optimized.A.csxpack";
+		const auto second = rollbackRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		SetTestFailurePoints(static_cast<std::uint32_t>(failurePoint));
+		std::string rollbackError;
+		Store failed(first, second, Lane::Optimized, TestPackSetId());
+		assert(!failed.InitializeEmptyFilesAndOpen(&rollbackError));
+		assert(rollbackError.find("rollback restored") != std::string::npos);
+		assert(!failed.GetStats().available);
+		assert(std::filesystem::file_size(first) == 0);
+		assert(std::filesystem::file_size(second) == 0);
+
+		Store ordinary(first, second, Lane::Optimized, TestPackSetId());
+		assert(!ordinary.Open(&rollbackError));
+		Store recovered(first, second, Lane::Optimized, TestPackSetId());
+		assert(recovered.InitializeEmptyFilesAndOpen(&rollbackError));
+	}
+	{
+		const auto rollbackRoot = root / "bootstrap-admission-diagnostic-rollback";
+		std::filesystem::create_directories(rollbackRoot);
+		const auto first = rollbackRoot / "Optimized.A.csxpack";
+		const auto second = rollbackRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		SetTestFailurePoints(
+			static_cast<std::uint32_t>(TestFailurePoint::DuringStoreIndexPublication) |
+			static_cast<std::uint32_t>(TestFailurePoint::ThrowDuringBootstrapRollbackDiagnostic));
+		std::string rollbackError;
+		Store failed(first, second, Lane::Optimized, TestPackSetId());
+		assert(!failed.InitializeEmptyFilesAndOpen(&rollbackError));
+		assert(rollbackError.find("detailed diagnostic unavailable") != std::string::npos);
+		assert(std::filesystem::file_size(first) == 0);
+		assert(std::filesystem::file_size(second) == 0);
+	}
 #endif
 	{
 		const auto invalidLayoutRoot = root / "malformed-layout";
@@ -1058,6 +1102,68 @@ int main(int argc, char** argv)
 	assert(recovered.GetStats().activeGeneration == 3);
 	assert(recovered.Find("water|source=newest|provider=1", &error));
 
+	// A compaction failure proven to precede target mutation preserves the
+	// coherent Store. Every later failure withdraws Store-level authority before
+	// returning, independently of the caller's lane quarantine.
+	auto verifyCompactionFailure = [&](TestFailurePoint a_failurePoint, std::string_view a_name, bool a_secondRole) {
+		const auto compactRoot = root / (std::string("compact-failure-") + std::string(a_name) + (a_secondRole ? "-second" : "-first"));
+		std::filesystem::create_directories(compactRoot);
+		const auto first = compactRoot / "Optimized.A.csxpack";
+		const auto second = compactRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		std::string compactError;
+		Store failed(first, second, Lane::Optimized, TestPackSetId());
+		assert(failed.InitializeEmptyFilesAndOpen(&compactError));
+		assert(failed.Append(MakeEntry("compact", "compact-exact", 0x51), &compactError));
+		assert(failed.Checkpoint(&compactError));
+		if (a_secondRole) {
+			assert(failed.Compact(&compactError));
+			assert(failed.Append(MakeEntry("compact", "compact-newer", 0x52), &compactError));
+			assert(failed.Checkpoint(&compactError));
+		}
+
+		SetTestFailurePoints(static_cast<std::uint32_t>(a_failurePoint));
+		compactError.clear();
+		assert(!failed.Compact(&compactError));
+		assert(!compactError.empty());
+		assert(!failed.GetStats().available);
+		assert(!failed.Find(a_secondRole ? "compact-newer" : "compact-exact", &compactError));
+		const auto identities = failed.GetFileIdentityKeys();
+		assert(identities[0].empty() && identities[1].empty());
+	};
+	for (const auto [failurePoint, name] : {
+			 std::pair{ TestFailurePoint::AfterInitializeTruncate, "truncate-false" },
+			 std::pair{ TestFailurePoint::ThrowAfterInitializeTruncate, "truncate-throw" },
+			 std::pair{ TestFailurePoint::AfterInitializeWrite, "write-false" },
+			 std::pair{ TestFailurePoint::ThrowAfterInitializeWrite, "write-throw" },
+			 std::pair{ TestFailurePoint::AfterInitializeDurableFlush, "durable-false" },
+			 std::pair{ TestFailurePoint::ThrowAfterInitializeDurableFlush, "durable-throw" },
+			 std::pair{ TestFailurePoint::DuringCompactionCopy, "copy" },
+			 std::pair{ TestFailurePoint::BeforeStoreAdmissionCommit, "admission-false" },
+			 std::pair{ TestFailurePoint::DuringStoreAdmissionCommit, "admission-throw" },
+			 std::pair{ TestFailurePoint::DuringStoreIndexPublication, "index-throw" } }) {
+		verifyCompactionFailure(failurePoint, name, false);
+		verifyCompactionFailure(failurePoint, name, true);
+	}
+	{
+		const auto compactRoot = root / "compact-failure-before-mutation";
+		std::filesystem::create_directories(compactRoot);
+		const auto first = compactRoot / "Optimized.A.csxpack";
+		const auto second = compactRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		std::string compactError;
+		Store unchanged(first, second, Lane::Optimized, TestPackSetId());
+		assert(unchanged.InitializeEmptyFilesAndOpen(&compactError));
+		assert(unchanged.Append(MakeEntry("compact", "compact-exact", 0x53), &compactError));
+		assert(unchanged.Checkpoint(&compactError));
+		SetTestFailurePoints(static_cast<std::uint32_t>(TestFailurePoint::BeforeInitializeMutation));
+		assert(!unchanged.Compact(&compactError));
+		assert(unchanged.GetStats().available);
+		assert(unchanged.Find("compact-exact", &compactError));
+	}
+
 	// Reset first commits a new generation barrier, so a failed cleanup cannot
 	// make any record from the prior generation visible again.
 	assert(recovered.Reset(&error) == ResetDisposition::Complete);
@@ -1104,6 +1210,48 @@ int main(int argc, char** argv)
 		assert(resetError.find("generation gap") != std::string::npos);
 		assert(!restarted.Find("reset-exact", &resetError));
 	}
+
+	// Cleanup-only false returns and exceptions preserve the already reopened
+	// empty generation while excluding the uncertain superseded member.
+	auto verifyCleanupFailure = [&](std::uint32_t a_failurePoints, std::string_view a_name) {
+		const auto degradedRoot = root / (std::string("degraded-reset-") + std::string(a_name));
+		std::filesystem::create_directories(degradedRoot);
+		const auto first = degradedRoot / "Optimized.A.csxpack";
+		const auto second = degradedRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		std::string resetError;
+		Store degraded(first, second, Lane::Optimized, TestPackSetId());
+		assert(degraded.InitializeEmptyFilesAndOpen(&resetError));
+		assert(degraded.Append(MakeEntry("old", "old-exact", 0x61), &resetError));
+		assert(degraded.Checkpoint(&resetError));
+		SetTestFailurePoints(a_failurePoints);
+		resetError.clear();
+		assert(degraded.Reset(&resetError) == ResetDisposition::CommittedDegraded);
+		assert(!resetError.empty());
+		assert(degraded.GetStats().available);
+		assert(!degraded.Find("old-exact", &resetError));
+		assert(degraded.Append(MakeEntry("new", "new-exact", 0x62), &resetError));
+		assert(degraded.Checkpoint(&resetError));
+		assert(degraded.Find("new-exact", &resetError));
+		const auto identities = degraded.GetFileIdentityKeys();
+		assert(!identities[0].empty() && !identities[1].empty());
+	};
+	for (const auto [failurePoint, name] : {
+			 std::pair{ TestFailurePoint::BeforeResetCleanupMutation, "before-mutation" },
+			 std::pair{ TestFailurePoint::AfterResetCleanupTruncate, "truncate-false" },
+			 std::pair{ TestFailurePoint::ThrowAfterResetCleanupTruncate, "truncate-throw" },
+			 std::pair{ TestFailurePoint::AfterResetCleanupWrite, "write-false" },
+			 std::pair{ TestFailurePoint::ThrowAfterResetCleanupWrite, "write-throw" },
+			 std::pair{ TestFailurePoint::AfterResetCleanupDurableFlush, "durable-false" },
+			 std::pair{ TestFailurePoint::ThrowAfterResetCleanupDurableFlush, "durable-throw" },
+			 std::pair{ TestFailurePoint::ThrowBeforeResetCleanupVerification, "verification-throw" } }) {
+		verifyCleanupFailure(static_cast<std::uint32_t>(failurePoint), name);
+	}
+	verifyCleanupFailure(
+		static_cast<std::uint32_t>(TestFailurePoint::BeforeResetCleanupMutation) |
+			static_cast<std::uint32_t>(TestFailurePoint::ThrowDuringResetCleanupDiagnostic),
+		"diagnostic-throw");
 
 	// A committed barrier whose authoritative generation cannot be reopened is
 	// quarantined, while a later clean Store can reacquire and recover it.
