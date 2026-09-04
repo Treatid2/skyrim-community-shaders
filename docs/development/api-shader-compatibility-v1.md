@@ -87,7 +87,10 @@ the loose fallback until the installation is repaired or cleared; one fragment
 never silently suppresses an otherwise valid loose cache. Admission is
 read-only: zero-byte placeholders are rejected rather than initialized, and a
 global rejection releases every provisional lane lease without changing any
-member. Release tooling must ship all four files with valid headers.
+member. Direct lazy admission through append or reset has the same cleanup
+boundary: a rejected or exceptional admission releases its path guards,
+physical identities, process registration, and writer lease. Release tooling
+must ship all four files with valid headers.
 
 Every writable pack set has a nonzero 128-bit identity. Runtime header checks
 are unconditional, and mutation ownership combines canonical process-local
@@ -127,8 +130,10 @@ runtime scanner and packaging validator.
 Explicit cache clearing first commits a new empty generation barrier, then
 reinitializes the superseded file, rather than creating or deleting VFS entries.
 The result distinguishes complete cleanup, committed-but-degraded cleanup, and
-failure before commit. A committed degraded reset keeps the safe empty
-generation authoritative while emitting a bounded warning for later repair.
+failure before commit. Cleanup-only degradation keeps a successfully reopened
+empty generation authoritative. If either post-barrier reopen fails, the Store
+invalidates every pre-reset index, releases ownership, and quarantines the lane
+for source fallback until a clean admission succeeds.
 
 This storage transition is `engine-cache-v3-managed-pack` in
 `config/shader-cache-abi.json`. The generated pack manifest embeds the exact

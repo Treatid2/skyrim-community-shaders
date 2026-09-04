@@ -632,9 +632,11 @@ resolves relative names once, and retains non-delete-sharing parent and final
 file handles so admitted paths cannot be rebound or replaced while the lease is
 active. The four optimized/developer members must
 resolve to four distinct file identities, and any whole-layout rejection
-releases all provisional lane ownership. Explicit zero-byte bootstrap verifies
-both truncation and durable flush during rollback and reports a distinct
-rollback failure when the original empty state cannot be established.
+releases all provisional lane ownership. The same release applies when direct
+append or reset performs lazy admission and that admission rejects or throws.
+Explicit zero-byte bootstrap verifies both truncation and durable flush during
+ordinary or exceptional rollback and reports whether the original empty state
+was restored or could not be established.
 
 Schema-2 installation baselines require adjacent A/B generations. Later runtime
 compaction or reset may produce a larger actual generation gap. Record sequences
@@ -646,6 +648,13 @@ retains the previous loose-cache behavior. `Manifest.json` remains part of that
 compatibility path. An explicit clear resets existing pack files in place;
 normal source, feature, and external-contract changes never rotate or blanket
 delete the managed cache.
+
+A reset barrier becomes authoritative before superseded-file cleanup. If the
+empty generation reopens successfully but cleanup fails, the Store remains
+available with a degraded-cleanup diagnostic. If the first or final reopen
+fails, the Store clears all pre-reset indexes and statistics, releases its
+writer ownership, and the runtime quarantines that lane while compiling from
+source.
 
 Users can still compile local variants when:
 

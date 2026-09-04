@@ -858,12 +858,15 @@ namespace SIE
 				}
 
 				const bool laneAvailable = store->GetStats().available;
-				available.store(laneAvailable, std::memory_order_release);
+				if (laneAvailable)
+					available.store(true, std::memory_order_release);
+				else
+					QuarantineShaderPackLane(developerMode, error.empty() ? "reset reopen failed" : error);
 				if (disposition == Util::ShaderCachePack::ResetDisposition::CommittedDegraded) {
 					if (aggregate == Util::ShaderCachePack::ResetDisposition::Complete)
 						aggregate = disposition;
 					logger::warn(
-						"{} shader-pack reset committed with degraded cleanup (available={}): {}",
+						"{} shader-pack reset committed with degraded state (available={}): {}",
 						developerMode ? "Developer" : "Optimized",
 						laneAvailable,
 						error);

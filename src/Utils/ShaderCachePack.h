@@ -104,7 +104,11 @@ namespace Util::ShaderCachePack
 		None = 0,
 		AfterRegistryInsert = 1u << 0,
 		BeforeSecondBootstrapInitialization = 1u << 1,
-		DuringBootstrapRollback = 1u << 2
+		DuringBootstrapRollback = 1u << 2,
+		AfterFirstBootstrapInitialization = 1u << 3,
+		BeforeStoreAdmissionCommit = 1u << 4,
+		DuringStoreAdmissionCommit = 1u << 5,
+		BeforeFinalResetReopen = 1u << 6
 	};
 	void SetTestFailurePoints(std::uint32_t a_failurePoints);
 #endif
@@ -235,6 +239,7 @@ namespace Util::ShaderCachePack
 		bool OpenLocked(bool a_allowEmptyInitialization, std::string* a_error);
 		bool AcquireWriterLease(std::string* a_error);
 		void ReleaseWriterLease() noexcept;
+		void InvalidateStateLocked() noexcept;
 		bool Scan(const std::filesystem::path& a_path, ScannedFile& a_output, std::string* a_error) const;
 		bool InitializeEmpty(ScannedFile& a_file, std::uint64_t a_generation, std::string* a_error) const;
 		bool AppendLocked(ScannedFile& a_file, const Entry& a_entry, std::uint64_t a_sequence, bool a_checkpoint, std::string* a_error) const;

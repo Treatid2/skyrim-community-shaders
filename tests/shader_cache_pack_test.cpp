@@ -561,6 +561,54 @@ int main(int argc, char** argv)
 		assert(recovered.Open(&failureError));
 	}
 
+	// Lazy mutation admission has the same transactional ownership boundary as
+	// explicit Open: rejection and exceptions leave no guards or writer lease.
+	for (const auto operation : { "append", "reset" }) {
+		const auto admissionRoot = root / (std::string("lazy-admission-") + operation);
+		const auto movedRoot = root / (std::string("lazy-admission-moved-") + operation);
+		std::filesystem::create_directories(admissionRoot);
+		const auto first = admissionRoot / "Optimized.A.csxpack";
+		const auto second = admissionRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		std::string admissionError;
+		Store rejected(first, second, Lane::Optimized, TestPackSetId());
+		if (std::string_view(operation) == "append")
+			assert(!rejected.Append(MakeEntry("rejected", "rejected-exact", 0x75), &admissionError));
+		else
+			assert(rejected.Reset(&admissionError) == ResetDisposition::FailedBeforeCommit);
+		assert(!admissionError.empty());
+		std::error_code renameError;
+		std::filesystem::rename(admissionRoot, movedRoot, renameError);
+		assert(!renameError);
+		std::filesystem::rename(movedRoot, admissionRoot, renameError);
+		assert(!renameError);
+		Store recovered(first, second, Lane::Optimized, TestPackSetId());
+		assert(recovered.InitializeEmptyFilesAndOpen(&admissionError));
+	}
+	for (const auto operation : { "append", "reset" }) {
+		const auto admissionRoot = root / (std::string("lazy-admission-exception-") + operation);
+		std::filesystem::create_directories(admissionRoot);
+		const auto first = admissionRoot / "Optimized.A.csxpack";
+		const auto second = admissionRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		std::string admissionError;
+		{
+			Store setup(first, second, Lane::Optimized, TestPackSetId());
+			assert(setup.InitializeEmptyFilesAndOpen(&admissionError));
+		}
+		SetTestFailurePoints(static_cast<std::uint32_t>(TestFailurePoint::AfterRegistryInsert));
+		Store rejected(first, second, Lane::Optimized, TestPackSetId());
+		if (std::string_view(operation) == "append")
+			assert(!rejected.Append(MakeEntry("rejected", "rejected-exact", 0x76), &admissionError));
+		else
+			assert(rejected.Reset(&admissionError) == ResetDisposition::FailedBeforeCommit);
+		assert(admissionError.find("injected") != std::string::npos);
+		Store recovered(first, second, Lane::Optimized, TestPackSetId());
+		assert(recovered.Open(&admissionError));
+	}
+
 	// A failed isolated bootstrap reports when its attempted rollback cannot
 	// establish the original zero-byte state.
 	{
@@ -583,6 +631,27 @@ int main(int argc, char** argv)
 			assert(std::filesystem::file_size(second) == 0);
 		}
 		std::ofstream(first, std::ios::binary | std::ios::trunc).close();
+		Store recovered(first, second, Lane::Optimized, TestPackSetId());
+		assert(recovered.InitializeEmptyFilesAndOpen(&rollbackError));
+	}
+
+	// Exceptional bootstrap exits attempt and verify the same rollback as
+	// ordinary initialization failures.
+	{
+		const auto rollbackRoot = root / "bootstrap-exception-rollback";
+		std::filesystem::create_directories(rollbackRoot);
+		const auto first = rollbackRoot / "Optimized.A.csxpack";
+		const auto second = rollbackRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		SetTestFailurePoints(static_cast<std::uint32_t>(TestFailurePoint::AfterFirstBootstrapInitialization));
+		std::string rollbackError;
+		Store failed(first, second, Lane::Optimized, TestPackSetId());
+		assert(!failed.InitializeEmptyFilesAndOpen(&rollbackError));
+		assert(rollbackError.find("raised an exception") != std::string::npos);
+		assert(rollbackError.find("rollback restored") != std::string::npos);
+		assert(std::filesystem::file_size(first) == 0);
+		assert(std::filesystem::file_size(second) == 0);
 		Store recovered(first, second, Lane::Optimized, TestPackSetId());
 		assert(recovered.InitializeEmptyFilesAndOpen(&rollbackError));
 	}
@@ -1010,6 +1079,35 @@ int main(int argc, char** argv)
 		assert(resetError.find("generation gap") != std::string::npos);
 		assert(!restarted.Find("reset-exact", &resetError));
 	}
+
+	// A committed barrier whose authoritative generation cannot be reopened is
+	// quarantined, while a later clean Store can reacquire and recover it.
+	auto verifyQuarantinedReset = [&](TestFailurePoint a_failurePoint, std::string_view a_name) {
+		const auto resetRoot = root / (std::string("reset-reopen-") + std::string(a_name));
+		std::filesystem::create_directories(resetRoot);
+		const auto first = resetRoot / "Optimized.A.csxpack";
+		const auto second = resetRoot / "Optimized.B.csxpack";
+		std::ofstream(first, std::ios::binary).close();
+		std::ofstream(second, std::ios::binary).close();
+		std::string resetError;
+		Store failed(first, second, Lane::Optimized, TestPackSetId());
+		assert(failed.InitializeEmptyFilesAndOpen(&resetError));
+		assert(failed.Append(MakeEntry("old", "old-exact", 0x77), &resetError));
+		assert(failed.Checkpoint(&resetError));
+		SetTestFailurePoints(static_cast<std::uint32_t>(a_failurePoint));
+		assert(failed.Reset(&resetError) == ResetDisposition::CommittedDegraded);
+		assert(!resetError.empty());
+		assert(!failed.GetStats().available);
+		assert(!failed.Find("old-exact", &resetError));
+
+		Store recovered(first, second, Lane::Optimized, TestPackSetId());
+		assert(recovered.Open(&resetError));
+		assert(recovered.GetStats().available);
+		assert(!recovered.Find("old-exact", &resetError));
+	};
+	verifyQuarantinedReset(TestFailurePoint::BeforeStoreAdmissionCommit, "before-commit");
+	verifyQuarantinedReset(TestFailurePoint::DuringStoreAdmissionCommit, "during-commit");
+	verifyQuarantinedReset(TestFailurePoint::BeforeFinalResetReopen, "final-reopen");
 #endif
 
 	// The retained physical-identity guards prevent a backing path from being
