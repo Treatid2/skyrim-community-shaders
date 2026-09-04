@@ -30,6 +30,8 @@ MODULE_CONFIG_FILE = "ModuleConfig.xml"
 INFO_FILE = "info.xml"
 MANIFEST_FILE = "Manifest.json"
 CACHE_INFO_FILE = "Info.ini"
+CORE_BUILD_MANIFEST = Path("SKSE/Plugins/CSX.BuildManifest.json")
+SHADER_CACHE_ABI_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 RUNTIME_FLAG = "CSXRuntime"
 RUNTIME_VR = "VR"
@@ -237,7 +239,25 @@ def build_info(version: str) -> ET.ElementTree:
     return ET.ElementTree(root)
 
 
-def validate_cache_source(cache_directory: Path, expected_runtime: str) -> None:
+def core_shader_cache_abi(core: Path) -> str:
+    manifest_path = core / CORE_BUILD_MANIFEST
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        shader_cache_abi = manifest["identity"]["shaderCache"]["abiId"]
+    except (KeyError, OSError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"invalid core build manifest: {manifest_path}") from exc
+    if not isinstance(shader_cache_abi, str) or not SHADER_CACHE_ABI_PATTERN.fullmatch(
+        shader_cache_abi
+    ):
+        raise SystemExit(f"invalid core shader-cache ABI: {manifest_path}")
+    return shader_cache_abi
+
+
+def validate_cache_source(
+    cache_directory: Path,
+    expected_runtime: str,
+    expected_shader_cache_abi: str,
+) -> None:
     manifest_path = cache_directory / MANIFEST_FILE
     pack_manifest_path = cache_directory / PACK_MANIFEST_FILE
     info_path = cache_directory / CACHE_INFO_FILE
@@ -268,8 +288,11 @@ def validate_cache_source(cache_directory: Path, expected_runtime: str) -> None:
             f"cache {cache_directory} plugin version does not identify "
             f"runtime {contract_runtime}: {plugin_version!r}"
         )
-    if not shader_cache_abi:
-        raise SystemExit(f"cache {cache_directory} has no ShaderCacheABI")
+    if shader_cache_abi != expected_shader_cache_abi:
+        raise SystemExit(
+            f"shader cache ABI does not match the core AIO: {cache_directory} "
+            f"(core {expected_shader_cache_abi}, cache {shader_cache_abi!r})"
+        )
 
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -478,11 +501,13 @@ def validate_module_config(config_path: Path) -> None:
 
 
 def validate_staged_package(output: Path, version: str) -> None:
-    if not (output / CORE_DIRECTORY).is_dir():
+    core = output / CORE_DIRECTORY
+    if not core.is_dir():
         raise SystemExit("staged FOMOD is missing its AIO Core directory")
+    shader_cache_abi = core_shader_cache_abi(core)
     for variant in CACHE_VARIANTS:
         cache_directory = output / variant.staging_directory / CACHE_DIRECTORY
-        validate_cache_source(cache_directory, variant.runtime)
+        validate_cache_source(cache_directory, variant.runtime, shader_cache_abi)
 
     fomod_directory = output / FOMOD_DIRECTORY
     validate_module_config(fomod_directory / MODULE_CONFIG_FILE)
@@ -520,10 +545,11 @@ def stage_package(
             )
 
     runtime_roots = {RUNTIME_SE_AE: se_cache, RUNTIME_VR: vr_cache}
+    shader_cache_abi = core_shader_cache_abi(core)
     sources: dict[CacheVariant, Path] = {}
     for variant in CACHE_VARIANTS:
         source = runtime_roots[variant.runtime] / CACHE_DIRECTORY
-        validate_cache_source(source, variant.runtime)
+        validate_cache_source(source, variant.runtime, shader_cache_abi)
         sources[variant] = source
 
     try:

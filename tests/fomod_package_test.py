@@ -23,15 +23,21 @@ SPEC.loader.exec_module(BUILDER)
 
 
 class FomodPackageTests(unittest.TestCase):
+    SHADER_CACHE_ABI = "a" * 64
+
     @staticmethod
-    def _write_cache(cache_directory: Path, runtime: str) -> None:
+    def _write_cache(
+        cache_directory: Path,
+        runtime: str,
+        shader_cache_abi: str,
+    ) -> None:
         cache_directory.mkdir(parents=True, exist_ok=True)
         contract_runtime = "SE" if runtime == BUILDER.RUNTIME_SE_AE else "VR"
         pack_set_id = "0123456789abcdef0123456789abcdef"
         (cache_directory / BUILDER.CACHE_INFO_FILE).write_text(
             "[Cache]\n"
             f"PluginVersion = CSX 3.18-{contract_runtime}\n"
-            "ShaderCacheABI = test\n",
+            f"ShaderCacheABI = {shader_cache_abi}\n",
             encoding="utf-8",
         )
         (cache_directory / BUILDER.MANIFEST_FILE).write_text(
@@ -48,7 +54,7 @@ class FomodPackageTests(unittest.TestCase):
                     "hashAlgorithm": "sha256",
                     "packSetId": pack_set_id,
                     "runtime": contract_runtime,
-                    "shaderCacheABI": "test",
+                    "shaderCacheABI": shader_cache_abi,
                     "optimizedRecordCount": 0,
                     "developerRecordCount": 0,
                     "compatibilityVariants": ["default", "legacy-horizon-fix"],
@@ -91,13 +97,31 @@ class FomodPackageTests(unittest.TestCase):
         core = root / "core"
         core.mkdir()
         (core / "core-file.txt").write_text("core", encoding="utf-8")
+        build_manifest = core / BUILDER.CORE_BUILD_MANIFEST
+        build_manifest.parent.mkdir(parents=True)
+        build_manifest.write_text(
+            json.dumps(
+                {
+                    "identity": {
+                        "shaderCache": {"abiId": self.SHADER_CACHE_ABI}
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
 
         se_cache = root / "se"
         vr_cache = root / "vr"
         self._write_cache(
-            se_cache / BUILDER.CACHE_DIRECTORY, BUILDER.RUNTIME_SE_AE
+            se_cache / BUILDER.CACHE_DIRECTORY,
+            BUILDER.RUNTIME_SE_AE,
+            self.SHADER_CACHE_ABI,
         )
-        self._write_cache(vr_cache / BUILDER.CACHE_DIRECTORY, BUILDER.RUNTIME_VR)
+        self._write_cache(
+            vr_cache / BUILDER.CACHE_DIRECTORY,
+            BUILDER.RUNTIME_VR,
+            self.SHADER_CACHE_ABI,
+        )
         return core, se_cache, vr_cache
 
     def test_stages_one_page_two_managed_cache_fomod(self) -> None:
@@ -201,6 +225,20 @@ class FomodPackageTests(unittest.TestCase):
                     core, se_cache, vr_cache, root / "staged", "v3.18.0"
                 )
 
+    def test_rejects_cache_abi_that_does_not_match_core(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            core, se_cache, vr_cache = self._inputs(root)
+            self._write_cache(
+                vr_cache / BUILDER.CACHE_DIRECTORY,
+                BUILDER.RUNTIME_VR,
+                "b" * 64,
+            )
+            with self.assertRaises(SystemExit):
+                BUILDER.stage_package(
+                    core, se_cache, vr_cache, root / "staged", "v3.18.0"
+                )
+
     def test_rejects_residual_loose_compiled_shader(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -286,7 +324,11 @@ class FomodPackageTests(unittest.TestCase):
                 mutate(manifest)
                 manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
                 with self.assertRaises(SystemExit):
-                    BUILDER.validate_cache_source(cache, BUILDER.RUNTIME_VR)
+                    BUILDER.validate_cache_source(
+                        cache,
+                        BUILDER.RUNTIME_VR,
+                        self.SHADER_CACHE_ABI,
+                    )
 
     def test_refuses_to_replace_existing_staging_tree(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
