@@ -1840,6 +1840,63 @@ namespace
 		           successorGeneration;
 	}
 
+	bool CoversPostFailureVendorResetIdentity()
+	{
+		const auto acceptedFailureRemainsTerminal = [](
+														std::uint32_t a_failedGeneration) {
+			std::mutex resetMutex;
+			std::atomic<bool> resetPending{ false };
+			std::atomic<std::uint32_t> resetGeneration{ 0 };
+			VendorResetRequestIdentity terminalIdentity{};
+
+			const auto beforeFailure = LoadVendorResetRequestIdentity(
+				resetPending,
+				resetGeneration);
+			const bool accepted = TryCommitVendorResetFailure(
+				resetMutex,
+				resetPending,
+				resetGeneration,
+				a_failedGeneration,
+				[&]() {
+					terminalIdentity = LoadVendorResetRequestIdentity(
+						resetPending,
+						resetGeneration);
+				});
+			const auto afterFailure = LoadVendorResetRequestIdentity(
+				resetPending,
+				resetGeneration);
+			unsigned repeatedOperations = 0;
+			if (terminalIdentity != afterFailure)
+				++repeatedOperations;
+
+			return accepted && !beforeFailure.pending &&
+			       terminalIdentity.pending &&
+			       terminalIdentity.generation == a_failedGeneration &&
+			       terminalIdentity == afterFailure && repeatedOperations == 0;
+		};
+
+		constexpr std::uint32_t failedGeneration = 7;
+		constexpr std::uint32_t successorGeneration = 8;
+		std::mutex resetMutex;
+		std::atomic<bool> resetPending{ true };
+		std::atomic<std::uint32_t> resetGeneration{ failedGeneration };
+		const auto terminalIdentity = LoadVendorResetRequestIdentity(
+			resetPending,
+			resetGeneration);
+		{
+			const std::scoped_lock lock(resetMutex);
+			resetGeneration.store(successorGeneration, std::memory_order_release);
+		}
+		const auto afterSuccessor = LoadVendorResetRequestIdentity(
+			resetPending,
+			resetGeneration);
+
+		return acceptedFailureRemainsTerminal(0) &&
+		       acceptedFailureRemainsTerminal(failedGeneration) &&
+		       terminalIdentity != afterSuccessor &&
+		       afterSuccessor.generation == successorGeneration;
+	}
+
 	constexpr bool CoversVendorResetServiceOwnership()
 	{
 		VendorResetServiceAdmission state{
@@ -3794,5 +3851,8 @@ namespace
 
 int main()
 {
-	return CoversVendorResetFailureCommitTransaction() ? 0 : 1;
+	return CoversVendorResetFailureCommitTransaction() &&
+	               CoversPostFailureVendorResetIdentity() ?
+	           0 :
+	           1;
 }

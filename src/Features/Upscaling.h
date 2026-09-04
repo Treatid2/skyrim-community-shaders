@@ -1935,7 +1935,8 @@ public:
 		uint32_t a_failedGeneration,
 		VRVendorRuntimeLifecyclePhase a_phase,
 		const char* a_reason,
-		bool a_latchTerminalFailure);
+		bool a_latchTerminalFailure,
+		bool a_latchCommonResourceFailure = false);
 	bool TryClaimPendingVendorRuntimeReset(
 		UpscaleMethod a_upscaleMethod,
 		uint32_t a_expectedGeneration);

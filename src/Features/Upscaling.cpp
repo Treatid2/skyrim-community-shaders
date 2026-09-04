@@ -6153,13 +6153,12 @@ namespace
 			a_upscaleMethod));
 		add(a_upscaling.GetVRRenderScaleTransitionSnapshot().targetEpoch);
 		if (a_upscaleMethod == Upscaling::UpscaleMethod::kFSR) {
-			const bool resetPending =
-				a_upscaling.pendingFSRReset.load(std::memory_order_acquire);
-			add(resetPending);
-			add(resetPending ?
-					a_upscaling.pendingFSRResetGeneration.load(
-						std::memory_order_acquire) :
-					0u);
+			const auto resetIdentity =
+				VRVendorRelatchPolicy::LoadVendorResetRequestIdentity(
+					a_upscaling.pendingFSRReset,
+					a_upscaling.pendingFSRResetGeneration);
+			add(resetIdentity.pending);
+			add(resetIdentity.generation);
 		}
 		return hash;
 	}
@@ -37595,20 +37594,16 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 			if (a_result == FidelityFX::LifecycleResult::Ready)
 				return true;
 
-			HandleFSRLifecycleDeviceLoss(a_result, a_reason);
-
 			const uint32_t generation =
 				GetVRVendorEvaluationContractGeneration(UpscaleMethod::kFSR);
-			MarkVendorRuntimeResourcesDirty(UpscaleMethod::kFSR, generation);
-			RecordVRVendorRuntimeLifecycle(
-				UpscaleMethod::kFSR,
+			(void)TryCommitFSRRuntimeResetFailure(
+				generation,
 				a_result == FidelityFX::LifecycleResult::Pending ?
 					VRVendorRuntimeLifecyclePhase::WaitingForDrain :
 					VRVendorRuntimeLifecyclePhase::Failed,
-				generation,
-				a_reason);
-			if (a_result == FidelityFX::LifecycleResult::Failed)
-				fsrResourceFailureRequestKey = fsrResourceRequestKey;
+				a_reason,
+				a_result == FidelityFX::LifecycleResult::Failed);
+			HandleFSRLifecycleDeviceLoss(a_result, a_reason);
 			return false;
 		};
 
@@ -38170,13 +38165,21 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 		}
 
 		const auto latchMissingCommonFailure = [&](const char* a_reason) {
+			if (a_upscalemethod == UpscaleMethod::kFSR) {
+				const uint32_t generation =
+					GetVRVendorEvaluationContractGeneration(UpscaleMethod::kFSR);
+				(void)TryCommitFSRRuntimeResetFailure(
+					generation,
+					VRVendorRuntimeLifecyclePhase::Failed,
+					a_reason,
+					true,
+					true);
+				return;
+			}
+
 			commonResourceFailureRequestKey = commonResourceRequestKey;
 			if (a_upscalemethod == UpscaleMethod::kDLSS)
 				MarkVendorRuntimeResourcesDirty(UpscaleMethod::kDLSS);
-			else if (a_upscalemethod == UpscaleMethod::kFSR) {
-				MarkVendorRuntimeResourcesDirty(UpscaleMethod::kFSR);
-				fsrResourceFailureRequestKey = fsrResourceRequestKey;
-			}
 			RecordVRVendorRuntimeLifecycle(
 				a_upscalemethod,
 				VRVendorRuntimeLifecyclePhase::Failed,
@@ -54364,7 +54367,8 @@ bool Upscaling::TryCommitFSRRuntimeResetFailure(
 	uint32_t a_failedGeneration,
 	VRVendorRuntimeLifecyclePhase a_phase,
 	const char* a_reason,
-	bool a_latchTerminalFailure)
+	bool a_latchTerminalFailure,
+	bool a_latchCommonResourceFailure)
 {
 	return VRVendorRelatchPolicy::TryCommitVendorResetFailure(
 		vendorRuntimeResetMutex,
@@ -54385,6 +54389,12 @@ bool Upscaling::TryCommitFSRRuntimeResetFailure(
 			if (a_latchTerminalFailure) {
 				fsrResourceFailureRequestKey =
 					BuildFSRResourceLifecycleRequestKey(
+						*this,
+						UpscaleMethod::kFSR);
+			}
+			if (a_latchCommonResourceFailure) {
+				commonResourceFailureRequestKey =
+					BuildCommonResourceRecoveryRequestKey(
 						*this,
 						UpscaleMethod::kFSR);
 			}

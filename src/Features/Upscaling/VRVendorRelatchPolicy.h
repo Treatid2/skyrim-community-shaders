@@ -1397,6 +1397,28 @@ namespace VRVendorRelatchPolicy
 		return !a_resetPending || a_resetGeneration == a_failedGeneration;
 	}
 
+	struct VendorResetRequestIdentity
+	{
+		bool pending = false;
+		std::uint32_t generation = 0;
+
+		[[nodiscard]] constexpr bool operator==(
+			const VendorResetRequestIdentity&) const noexcept = default;
+	};
+
+	[[nodiscard]] inline VendorResetRequestIdentity LoadVendorResetRequestIdentity(
+		const std::atomic<bool>& a_resetPending,
+		const std::atomic<std::uint32_t>& a_resetGeneration) noexcept
+	{
+		const bool pending = a_resetPending.load(std::memory_order_acquire);
+		return {
+			.pending = pending,
+			.generation = pending ?
+			                  a_resetGeneration.load(std::memory_order_acquire) :
+			                  0u,
+		};
+	}
+
 	// Keep failure evidence in the same transaction as the reset-slot decision.
 	// A successor therefore publishes either wholly before or wholly after it.
 	template <class CommitFailureEvidence>
