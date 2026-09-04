@@ -1931,6 +1931,7 @@ public:
 	void MarkVendorRuntimeResourcesDirty(UpscaleMethod a_upscaleMethod, uint32_t a_generation = 0);
 	void MarkVendorRuntimeResourcesReady(UpscaleMethod a_upscaleMethod, uint32_t a_generation = 0);
 	void ClearVendorRuntimeResourcesDirty(UpscaleMethod a_upscaleMethod, bool a_clearRuntimeGeneration = false);
+	bool TryRepublishFSRRuntimeResetAfterFailure(uint32_t a_failedGeneration);
 	bool TryClaimPendingVendorRuntimeReset(
 		UpscaleMethod a_upscaleMethod,
 		uint32_t a_expectedGeneration);
@@ -3339,7 +3340,7 @@ public:
 	void AbandonDeferredVRRenderScalePostLoadRecovery(uint64_t a_expectedRecoveryEpoch = 0, const char* a_reason = nullptr);
 	void ServiceDeferredVRRenderScalePostLoadRecovery();
 	void CompleteVRRenderScalePostLoadRecovery(uint64_t a_recoveryEpoch, uint64_t a_transitionEpoch);
-	void RecordVRVendorRuntimeLifecycle(UpscaleMethod a_upscaleMethod, VRVendorRuntimeLifecyclePhase a_phase, uint32_t a_generation = 0, const char* a_reason = nullptr);
+	void RecordVRVendorRuntimeLifecycle(UpscaleMethod a_upscaleMethod, VRVendorRuntimeLifecyclePhase a_phase, uint32_t a_generation = 0, const char* a_reason = nullptr, bool a_requirePendingResetOwnership = false);
 	void RecordVRRenderScaleTransitionRetry(VRRenderScaleRetryKind a_kind);
 	void RecordVRRenderScaleTransitionFailure(VRRenderScaleFailureKind a_kind);
 	void ArchiveVRRenderScaleTransitionMetricsLocked(bool a_completed, bool a_superseded, uint32_t a_frame);

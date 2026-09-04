@@ -1384,6 +1384,16 @@ namespace VRVendorRelatchPolicy
 				   a_resetGeneration == a_providerGeneration);
 	}
 
+	// Failed work may reclaim an empty slot or its own slot. Any different
+	// publication, including generation zero, supersedes the failed operation.
+	[[nodiscard]] constexpr bool CanRepublishVendorResetAfterFailure(
+		bool a_resetPending,
+		std::uint32_t a_resetGeneration,
+		std::uint32_t a_failedGeneration) noexcept
+	{
+		return !a_resetPending || a_resetGeneration == a_failedGeneration;
+	}
+
 	struct VendorResetServiceAdmission
 	{
 		bool currentMethod = false;

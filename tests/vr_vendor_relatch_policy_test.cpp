@@ -1714,6 +1714,50 @@ namespace
 		       DoesPendingVendorResetInvalidateProvider(true, 0, 0);
 	}
 
+	constexpr bool CoversVendorResetFailureRepublication()
+	{
+		struct ResetSlot
+		{
+			bool pending = false;
+			std::uint32_t generation = 0;
+		};
+		const auto republishAfterFailure = [](ResetSlot& a_slot, std::uint32_t a_failedGeneration) {
+			if (!CanRepublishVendorResetAfterFailure(
+					a_slot.pending,
+					a_slot.generation,
+					a_failedGeneration)) {
+				return false;
+			}
+			if (!a_slot.pending) {
+				a_slot.generation = a_failedGeneration;
+				a_slot.pending = true;
+			}
+			return true;
+		};
+
+		constexpr std::uint32_t claimedGeneration = 7;
+		constexpr std::uint32_t successorGeneration = 8;
+		// Claim G, publish H, then fail G: H must remain authoritative.
+		ResetSlot successor{ true, successorGeneration };
+		if (republishAfterFailure(successor, claimedGeneration) ||
+			!successor.pending ||
+			successor.generation != successorGeneration) {
+			return false;
+		}
+
+		ResetSlot idle{};
+		ResetSlot same{ true, claimedGeneration };
+		ResetSlot conservative{ true, 0 };
+		return republishAfterFailure(idle, claimedGeneration) &&
+		       idle.pending && idle.generation == claimedGeneration &&
+		       republishAfterFailure(same, claimedGeneration) &&
+		       same.pending && same.generation == claimedGeneration &&
+		       !republishAfterFailure(conservative, claimedGeneration) &&
+		       conservative.pending && conservative.generation == 0 &&
+		       !CanRepublishVendorResetAfterFailure(true, claimedGeneration, 0) &&
+		       CanRepublishVendorResetAfterFailure(true, 0, 0);
+	}
+
 	constexpr bool CoversVendorResetServiceOwnership()
 	{
 		VendorResetServiceAdmission state{
@@ -3625,6 +3669,7 @@ namespace
 	static_assert(CoversInitialRelatchPacing());
 	static_assert(CoversStereoDispatchContractIdentity());
 	static_assert(CoversPendingVendorResetOwnership());
+	static_assert(CoversVendorResetFailureRepublication());
 	static_assert(CoversVendorResetServiceOwnership());
 	static_assert(CoversDLSSReadinessTiers());
 	static_assert(CoversDLSSSlotRecycleOwnership());
