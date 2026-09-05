@@ -30,6 +30,8 @@ MODULE_CONFIG_FILE = "ModuleConfig.xml"
 INFO_FILE = "info.xml"
 MANIFEST_FILE = "Manifest.json"
 CACHE_INFO_FILE = "Info.ini"
+CORE_BUILD_MANIFEST = Path("SKSE/Plugins/CSX.BuildManifest.json")
+SHADER_CACHE_ABI_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 RUNTIME_FLAG = "CSXRuntime"
 RUNTIME_VR = "VR"
@@ -237,7 +239,29 @@ def build_info(version: str) -> ET.ElementTree:
     return ET.ElementTree(root)
 
 
-def validate_cache_source(cache_directory: Path, expected_runtime: str) -> None:
+def core_shader_cache_abi(core: Path) -> str:
+    manifest_path = core / CORE_BUILD_MANIFEST
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        shader_cache_abi = manifest["identity"]["shaderCache"]["abiId"]
+    except (KeyError, OSError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"invalid core build manifest: {manifest_path}") from exc
+    if not isinstance(shader_cache_abi, str) or not SHADER_CACHE_ABI_PATTERN.fullmatch(
+        shader_cache_abi
+    ):
+        raise SystemExit(
+            f"invalid core shader-cache ABI in {manifest_path}: observed "
+            f"{type(shader_cache_abi).__name__} {shader_cache_abi!r}; expected "
+            "lowercase 64-character hexadecimal"
+        )
+    return shader_cache_abi
+
+
+def validate_cache_source(
+    cache_directory: Path,
+    expected_runtime: str,
+    expected_shader_cache_abi: str,
+) -> None:
     manifest_path = cache_directory / MANIFEST_FILE
     pack_manifest_path = cache_directory / PACK_MANIFEST_FILE
     info_path = cache_directory / CACHE_INFO_FILE
@@ -263,13 +287,18 @@ def validate_cache_source(cache_directory: Path, expected_runtime: str) -> None:
         else None
     )
     contract_runtime = "SE" if expected_runtime == RUNTIME_SE_AE else "VR"
-    if version_match is None or version_match.group("runtime") != contract_runtime:
+    observed_runtime = version_match.group("runtime") if version_match else None
+    if observed_runtime != contract_runtime:
         raise SystemExit(
-            f"cache {cache_directory} plugin version does not identify "
-            f"runtime {contract_runtime}: {plugin_version!r}"
+            f"shader cache runtime does not match its FOMOD slot: {info_path} "
+            f"(expected {contract_runtime!r}, observed {observed_runtime!r}; "
+            f"PluginVersion {plugin_version!r})"
         )
-    if not shader_cache_abi:
-        raise SystemExit(f"cache {cache_directory} has no ShaderCacheABI")
+    if shader_cache_abi != expected_shader_cache_abi:
+        raise SystemExit(
+            f"shader cache ABI does not match the core AIO: {info_path} "
+            f"(core {expected_shader_cache_abi}, cache {shader_cache_abi!r})"
+        )
 
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -287,7 +316,23 @@ def validate_cache_source(cache_directory: Path, expected_runtime: str) -> None:
         pack_manifest = json.loads(pack_manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise SystemExit(f"invalid managed pack manifest {pack_manifest_path}: {exc}") from exc
-    pack_set_id = pack_manifest.get("packSetId") if isinstance(pack_manifest, dict) else None
+    if not isinstance(pack_manifest, dict):
+        raise SystemExit(f"invalid managed pack manifest: {pack_manifest_path}")
+    pack_runtime = pack_manifest.get("runtime")
+    if pack_runtime != contract_runtime:
+        raise SystemExit(
+            f"managed shader cache runtime does not match its FOMOD slot: "
+            f"{pack_manifest_path} (expected {contract_runtime!r}, "
+            f"observed {pack_runtime!r})"
+        )
+    pack_shader_cache_abi = pack_manifest.get("shaderCacheABI")
+    if pack_shader_cache_abi != expected_shader_cache_abi:
+        raise SystemExit(
+            f"managed shader cache ABI does not match the core AIO: "
+            f"{pack_manifest_path} (core {expected_shader_cache_abi}, "
+            f"cache {pack_shader_cache_abi!r})"
+        )
+    pack_set_id = pack_manifest.get("packSetId")
     if not SHADER_CACHE_CONTRACT.valid_pack_set_id(pack_set_id):
         raise SystemExit(
             f"managed pack manifest does not match its runtime metadata: "
@@ -327,7 +372,7 @@ def validate_cache_source(cache_directory: Path, expected_runtime: str) -> None:
         SHADER_CACHE_CONTRACT.validate_pack_manifest_contract(
             pack_manifest,
             contract_runtime,
-            shader_cache_abi,
+            expected_shader_cache_abi,
             pack_stats,
         )
     except SystemExit as exc:
@@ -478,11 +523,13 @@ def validate_module_config(config_path: Path) -> None:
 
 
 def validate_staged_package(output: Path, version: str) -> None:
-    if not (output / CORE_DIRECTORY).is_dir():
+    core = output / CORE_DIRECTORY
+    if not core.is_dir():
         raise SystemExit("staged FOMOD is missing its AIO Core directory")
+    shader_cache_abi = core_shader_cache_abi(core)
     for variant in CACHE_VARIANTS:
         cache_directory = output / variant.staging_directory / CACHE_DIRECTORY
-        validate_cache_source(cache_directory, variant.runtime)
+        validate_cache_source(cache_directory, variant.runtime, shader_cache_abi)
 
     fomod_directory = output / FOMOD_DIRECTORY
     validate_module_config(fomod_directory / MODULE_CONFIG_FILE)
@@ -520,10 +567,11 @@ def stage_package(
             )
 
     runtime_roots = {RUNTIME_SE_AE: se_cache, RUNTIME_VR: vr_cache}
+    shader_cache_abi = core_shader_cache_abi(core)
     sources: dict[CacheVariant, Path] = {}
     for variant in CACHE_VARIANTS:
         source = runtime_roots[variant.runtime] / CACHE_DIRECTORY
-        validate_cache_source(source, variant.runtime)
+        validate_cache_source(source, variant.runtime, shader_cache_abi)
         sources[variant] = source
 
     try:
