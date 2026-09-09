@@ -60,8 +60,22 @@ namespace CSX::Api
 	{
 		std::string canonical;
 		std::string digest;
+		std::string domainCanonical;
+		std::string domainDigest;
 		std::vector<std::uint64_t> handles;
+		std::vector<ShaderCompatibilityRegistration> registrations;
 	};
+
+	/**
+	 * Returns true when every cached provider contract has the same stable
+	 * domain and an overlapping supported minor-version range in the current
+	 * requirement set.
+	 */
+	bool AreShaderCompatibilityRequirementSetsCompatible(
+		const ShaderCompatibilityRequirementSet& a_cached,
+		const ShaderCompatibilityRequirementSet& a_current);
+	ShaderCompatibilityRequirementSet BuildShaderCompatibilityRequirementSet(
+		std::vector<ShaderCompatibilityRegistration> a_registrations);
 
 	class ShaderCompatibilityRegistry
 	{

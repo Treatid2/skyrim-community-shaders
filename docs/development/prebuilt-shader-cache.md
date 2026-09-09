@@ -14,8 +14,8 @@ so it is not tied to a particular GPU vendor. It is tied to all of the
 following:
 
 -   the SE or VR runtime;
--   the exact CSX plugin version;
--   installed feature versions and enabled states;
+-   the explicit global and feature shader ABI contracts;
+-   enabled feature states that affect compilation;
 -   the shipped shader source and recursive includes;
 -   compiler flags and custom shader defines;
 -   the permutation inventory in the matching validation YAML.
@@ -212,12 +212,13 @@ This compiles HLSL but does not build the C++ plugin. The builder:
 3. compiles standard and Horizon Fix inputs for each shipped runtime, and one
    input for named profiles, with pinned hlslkit;
 4. remaps runtime ImageSpace directories;
-5. writes `Manifest.json` from source and recursive-include content;
-6. writes `Info.ini` with plugin and feature versions;
+5. writes a temporary `Manifest.json` from source, recursive includes, global
+   ABI, and enabled feature ABI contracts;
+6. writes `Info.ini` with provenance and explicit feature shader ABI values;
 7. validates metadata, every manifest entry, every blob, the `DXBC` signature,
    and the bounded Water-only delta between each runtime's inputs;
 8. writes optimized and developer A/B packs, verifies every SHA-256 committed
-   record and generation, and removes the thousands of loose runtime blobs;
+   record and generation, and removes the loose blobs and temporary manifest;
 9. packages each runtime's managed cache into a raw archive with no installer
    metadata or automatic runtime detection;
 10. publishes output only after every requested runtime has passed the earlier
@@ -239,7 +240,6 @@ dist/shader-cache/
 |-- SE/
 |   |-- ShaderCache/
 |   |   |-- Info.ini
-|   |   |-- Manifest.json
 |   |   |-- PackManifest.json
 |   |   |-- Optimized.A.csxpack
 |   |   |-- Optimized.B.csxpack
@@ -248,7 +248,6 @@ dist/shader-cache/
 |-- VR/
 |   |-- ShaderCache/
 |   |   |-- Info.ini
-|   |   |-- Manifest.json
 |   |   |-- PackManifest.json
 |   |   |-- Optimized.A.csxpack
 |   |   |-- Optimized.B.csxpack
@@ -408,13 +407,14 @@ Successful builder completion already proves:
 -   every requested single-cache named profile contains at least one compiled
     blob;
 -   every `.pso`, `.vso`, and `.cso` starts with `DXBC`;
--   `Manifest.json` uses the supported schema;
+-   the temporary loose-cache manifest uses the supported schema and is removed
+    after its content contracts are embedded in pack records;
 -   every blob has exactly one valid 32-character lowercase digest;
 -   the manifest contains no entry without a blob;
 -   `Info.ini` contains the requested plugin version;
 -   the archive was created and is nonempty;
--   every archive contains `ShaderCache/Info.ini`, `Manifest.json`,
-    `PackManifest.json`, and all four managed pack files;
+-   every archive contains exactly six cache-root files:
+    `ShaderCache/Info.ini`, `PackManifest.json`, and all four managed pack files;
 -   raw runtime archives contain no `fomod` installer tree;
 -   every pack header, SHA-256 record, commit trailer, record count, lane, and
     A/B generation validates using the same binary layout consumed by C++.
@@ -475,10 +475,16 @@ to and to declare the same shader-cache ABI as the core AIO's
 `SKSE/Plugins/CSX.BuildManifest.json`. A disagreement fails the release before
 the FOMOD archive can replace the plain AIO.
 
-The plugin independently validates cache identity, shader ABI, source content,
-and registered compatibility requirements. A missing or mismatched record is
-compiled locally. Enabling or disabling Horizon Fix does not require reinstalling
-the cache because both compatible Water records coexist in the managed pack.
+The plugin validates the managed container's runtime and storage format, then
+selects records by shader ABI, feature ABI, source content, compile settings,
+and registered compatibility requirements. The pack manifest's seed ABI is
+provenance; it does not discard the container merely because the DLL changed.
+An exact or overlapping-range-compatible record is reused. Only a missing or
+incompatible record is compiled locally and appended, while older versions
+remain available until compaction. Enabling or disabling Horizon Fix does not
+require reinstalling the cache because both compatible Water records coexist.
+A partial or corrupt installed layout fails closed to source-only compilation
+without producing a legacy loose-cache tree beside the managed files.
 
 Ship the caches, DLL, shaders, compatibility manifest, and feature metadata from
 the same ref. Do not package a cache from one commit with the AIO from another.

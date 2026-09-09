@@ -371,7 +371,6 @@ namespace Util::ShaderCachePack
 	std::optional<ManifestContract> ParseManifestContract(
 		const nlohmann::json& a_manifest,
 		std::string_view a_expectedRuntime,
-		std::string_view a_expectedShaderCacheABI,
 		std::string* a_error)
 	{
 		auto reject = [&](std::string a_reason) -> std::optional<ManifestContract> {
@@ -381,6 +380,7 @@ namespace Util::ShaderCachePack
 		try {
 			const auto schemaVersionValue = a_manifest.find("schemaVersion");
 			const auto formatVersionValue = a_manifest.find("formatVersion");
+			const auto seedShaderCacheABI = a_manifest.find("shaderCacheABI");
 			const auto schemaVersion = schemaVersionValue == a_manifest.end() ? std::nullopt : ReadUnsigned(*schemaVersionValue);
 			const auto formatVersion = formatVersionValue == a_manifest.end() ? std::nullopt : ReadUnsigned(*formatVersionValue);
 			if (!a_manifest.is_object() ||
@@ -390,8 +390,9 @@ namespace Util::ShaderCachePack
 				a_manifest.value("fileStateSemantics", std::string{}) != "installation-baseline-v1" ||
 				a_manifest.value("hashAlgorithm", std::string{}) != "sha256" ||
 				a_manifest.value("runtime", std::string{}) != a_expectedRuntime ||
-				a_manifest.value("shaderCacheABI", std::string{}) != a_expectedShaderCacheABI) {
-				return reject("managed shader pack manifest metadata does not match this runtime, ABI, or format");
+				seedShaderCacheABI == a_manifest.end() || !seedShaderCacheABI->is_string() ||
+				seedShaderCacheABI->get_ref<const std::string&>().empty()) {
+				return reject("managed shader pack manifest metadata does not match this runtime or format");
 			}
 
 			const auto packSetValue = a_manifest.find("packSetId");
@@ -683,6 +684,7 @@ namespace Util::ShaderCachePack
 		active = {};
 		fallback = {};
 		exactIndex.clear();
+		recordsByLogical.clear();
 		liveByLogical.clear();
 		activeLiveByLogical.clear();
 		stats = {};
@@ -1180,6 +1182,7 @@ namespace Util::ShaderCachePack
 	void Store::RebuildIndexes()
 	{
 		exactIndex.clear();
+		recordsByLogical.clear();
 		liveByLogical.clear();
 		activeLiveByLogical.clear();
 		stats = { .available = opened, .activeGeneration = active.generation };
@@ -1205,6 +1208,14 @@ namespace Util::ShaderCachePack
 		}
 		for (const auto& [_, record] : activeLiveByLogical)
 			stats.liveBytes += record.totalSize;
+		for (const auto& [_, record] : exactIndex)
+			recordsByLogical[record.logicalKey].push_back(record);
+		for (auto& [_, records] : recordsByLogical) {
+			std::ranges::sort(records, [](const RecordLocation& a_left, const RecordLocation& a_right) {
+				return std::pair{ a_left.generation, a_left.sequence } >
+				       std::pair{ a_right.generation, a_right.sequence };
+			});
+		}
 		stats.liveRecordCount = activeLiveByLogical.size();
 		stats.supersededBytes = stats.committedBytes > stats.liveBytes ? stats.committedBytes - stats.liveBytes : 0;
 	}
@@ -1304,6 +1315,32 @@ namespace Util::ShaderCachePack
 			return std::nullopt;
 		} catch (...) {
 			SetError(a_error, "unknown shader pack read failure");
+			return std::nullopt;
+		}
+	}
+
+	std::optional<Entry> Store::FindCompatible(
+		std::string_view a_logicalKey,
+		const std::function<bool(std::string_view)>& a_acceptMetadata,
+		std::string* a_error) const
+	{
+		try {
+			std::shared_lock lock(mutex);
+			if (!opened)
+				return std::nullopt;
+			const auto found = recordsByLogical.find(std::string(a_logicalKey));
+			if (found == recordsByLogical.end())
+				return std::nullopt;
+			for (const auto& record : found->second) {
+				if (a_acceptMetadata(record.metadata))
+					return Read(record, a_error);
+			}
+			return std::nullopt;
+		} catch (const std::exception& e) {
+			SetError(a_error, e.what());
+			return std::nullopt;
+		} catch (...) {
+			SetError(a_error, "unknown compatible shader pack read failure");
 			return std::nullopt;
 		}
 	}
@@ -1451,6 +1488,11 @@ namespace Util::ShaderCachePack
 			stats.liveRecordCount = activeLiveByLogical.size();
 			stats.supersededBytes = stats.committedBytes > stats.liveBytes ? stats.committedBytes - stats.liveBytes : 0;
 			exactIndex.insert_or_assign(location.exactKey, location);
+			auto& compatibleRecords = recordsByLogical[location.logicalKey];
+			std::erase_if(compatibleRecords, [&](const RecordLocation& a_record) {
+				return a_record.exactKey == location.exactKey;
+			});
+			compatibleRecords.insert(compatibleRecords.begin(), location);
 			const auto live = liveByLogical.find(location.logicalKey);
 			if (live == liveByLogical.end() || std::pair{ location.generation, location.sequence } >=
 												   std::pair{ live->second.generation, live->second.sequence })
@@ -1672,6 +1714,7 @@ namespace Util::ShaderCachePack
 				fallback.diagnostic.clear();
 				fallback.records.clear();
 				exactIndex.clear();
+				recordsByLogical.clear();
 				liveByLogical.clear();
 				activeLiveByLogical.clear();
 				stats = {

@@ -66,6 +66,28 @@ int main()
 	assert(unrelatedSet.handles.empty());
 	assert(waterSet.digest != unrelatedSet.digest);
 
+	auto cachedRegistration = waterSet.registrations.front();
+	cachedRegistration.currentMinor = 2;
+	cachedRegistration.minimumCompatibleMinor = 1;
+	cachedRegistration.maximumCompatibleMinor = 4;
+	auto currentRegistration = cachedRegistration;
+	currentRegistration.currentMinor = 5;
+	currentRegistration.minimumCompatibleMinor = 4;
+	currentRegistration.maximumCompatibleMinor = 7;
+	const auto cachedCompatible = Api::BuildShaderCompatibilityRequirementSet({ cachedRegistration });
+	const auto currentCompatible = Api::BuildShaderCompatibilityRequirementSet({ currentRegistration });
+	assert(cachedCompatible.digest != currentCompatible.digest);
+	assert(cachedCompatible.domainDigest == currentCompatible.domainDigest);
+	assert(Api::AreShaderCompatibilityRequirementSetsCompatible(cachedCompatible, currentCompatible));
+
+	currentRegistration.minimumCompatibleMinor = 5;
+	const auto disjoint = Api::BuildShaderCompatibilityRequirementSet({ currentRegistration });
+	assert(!Api::AreShaderCompatibilityRequirementSetsCompatible(cachedCompatible, disjoint));
+	currentRegistration = cachedRegistration;
+	currentRegistration.resourceFingerprint = "resource:changed";
+	const auto changedResource = Api::BuildShaderCompatibilityRequirementSet({ currentRegistration });
+	assert(!Api::AreShaderCompatibilityRequirementSetsCompatible(cachedCompatible, changedResource));
+
 	const ShaderCompatibilityAPI::Scope001 reservedScopes[]{
 		{
 			.structSize = sizeof(ShaderCompatibilityAPI::Scope001),

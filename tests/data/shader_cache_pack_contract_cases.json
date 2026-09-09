@@ -3,6 +3,11 @@
     "cases": [
         { "name": "installation-baseline", "accepted": true },
         {
+            "name": "different-seed-shader-abi",
+            "accepted": true,
+            "manifestOverrides": { "/shaderCacheABI": "previous-build-abi" }
+        },
+        {
             "name": "post-append-and-checkpoint",
             "accepted": true,
             "fileOverrides": { "Optimized.A.csxpack": { "recordCount": 4 } }

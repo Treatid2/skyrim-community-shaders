@@ -15,6 +15,7 @@
 #include <d3dcompiler.h>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -438,6 +439,17 @@ namespace SIE
 			state += "ShaderCacheABI=";
 			state += BuildProvenance::GetShaderCacheAbiId();
 			state += ';';
+			std::vector<std::pair<std::string, std::string>> featureAbis;
+			for (auto* feature : Feature::GetFeatureList()) {
+				if (!feature->loaded)
+					continue;
+				const auto abi = feature->GetShaderCacheAbiVersion();
+				if (!abi.empty())
+					featureAbis.emplace_back(feature->GetShortName(), abi);
+			}
+			std::ranges::sort(featureAbis);
+			for (const auto& [name, abi] : featureAbis)
+				state += std::format("FeatureShaderABI={}:{};", name, abi);
 			state += a_snapshot.shaderDefines->canonicalText;
 			return Util::ContentHash::HashString(state);
 		}
@@ -528,7 +540,94 @@ namespace SIE
 			std::string logicalKey;
 			std::string exactKey;
 			std::string metadata;
+			std::string contentContract;
+			CSX::Api::ShaderCompatibilityRequirementSet compatibility;
 		};
+
+		nlohmann::json SerializeCompatibilityRanges(
+			const CSX::Api::ShaderCompatibilityRequirementSet& a_requirements)
+		{
+			auto ranges = nlohmann::json::array();
+			for (const auto& registration : a_requirements.registrations) {
+				ranges.push_back({
+					{ "identity", registration.identity },
+					{ "contractMajor", registration.contractMajor },
+					{ "currentMinor", registration.currentMinor },
+					{ "minimumCompatibleMinor", registration.minimumCompatibleMinor },
+					{ "maximumCompatibleMinor", registration.maximumCompatibleMinor },
+				});
+			}
+			return ranges;
+		}
+
+		std::optional<std::uint32_t> ReadMetadataVersion(const nlohmann::json& a_value)
+		{
+			if (!a_value.is_number_unsigned())
+				return std::nullopt;
+			const auto value = a_value.get<std::uint64_t>();
+			if (value > (std::numeric_limits<std::uint32_t>::max)())
+				return std::nullopt;
+			return static_cast<std::uint32_t>(value);
+		}
+
+		bool IsCompatibleShaderPackMetadata(
+			std::string_view a_metadata,
+			const ShaderPackIdentity& a_requested)
+		{
+			try {
+				const auto metadata = nlohmann::json::parse(a_metadata);
+				if (!metadata.is_object() || metadata.value("schemaVersion", 0) != 3 ||
+					metadata.value("contentContract", std::string{}) != a_requested.contentContract ||
+					metadata.value("compatibilityDomain", std::string{}) != a_requested.compatibility.domainCanonical)
+					return false;
+
+				const auto ranges = metadata.find("compatibilityRanges");
+				if (ranges == metadata.end() || !ranges->is_array() ||
+					ranges->size() != a_requested.compatibility.registrations.size())
+					return false;
+
+				std::vector<CSX::Api::ShaderCompatibilityRegistration> cachedRegistrations;
+				cachedRegistrations.reserve(ranges->size());
+				for (std::size_t index = 0; index < ranges->size(); ++index) {
+					const auto& range = (*ranges)[index];
+					if (!range.is_object())
+						return false;
+					const auto identity = range.find("identity");
+					const auto major = range.find("contractMajor");
+					const auto current = range.find("currentMinor");
+					const auto minimum = range.find("minimumCompatibleMinor");
+					const auto maximum = range.find("maximumCompatibleMinor");
+					if (identity == range.end() || !identity->is_string() ||
+						major == range.end() || current == range.end() || minimum == range.end() || maximum == range.end())
+						return false;
+					const auto majorValue = ReadMetadataVersion(*major);
+					const auto currentValue = ReadMetadataVersion(*current);
+					const auto minimumValue = ReadMetadataVersion(*minimum);
+					const auto maximumValue = ReadMetadataVersion(*maximum);
+					const auto& requested = a_requested.compatibility.registrations[index];
+					if (!majorValue || !currentValue || !minimumValue || !maximumValue ||
+						*majorValue == 0 || *minimumValue > *currentValue || *currentValue > *maximumValue ||
+						identity->get_ref<const std::string&>() != requested.identity)
+						return false;
+
+					auto cached = requested;
+					cached.contractMajor = *majorValue;
+					cached.currentMinor = *currentValue;
+					cached.minimumCompatibleMinor = *minimumValue;
+					cached.maximumCompatibleMinor = *maximumValue;
+					cachedRegistrations.push_back(std::move(cached));
+				}
+
+				auto cached = CSX::Api::BuildShaderCompatibilityRequirementSet(
+					std::move(cachedRegistrations));
+				if (cached.canonical != metadata.value("compatibilityRequirementSet", std::string{}))
+					return false;
+				return CSX::Api::AreShaderCompatibilityRequirementSetsCompatible(
+					cached, a_requested.compatibility);
+			} catch (...) {
+				return false;
+			}
+		}
 
 		std::string GetShaderPackFamily(const std::wstring& a_diskPath)
 		{
@@ -597,7 +696,6 @@ namespace SIE
 					const auto contract = Util::ShaderCachePack::ParseManifestContract(
 						manifest,
 						expectedRuntime,
-						BuildProvenance::GetShaderCacheAbiId(),
 						&manifestError);
 					if (!contract) {
 						logger::error("Managed shader pack manifest is invalid; retaining legacy loose-cache fallback: {}", manifestError);
@@ -688,6 +786,12 @@ namespace SIE
 			return ManagedPacks().layoutState == Util::ShaderCachePack::LayoutState::Complete;
 		}
 
+		bool ManagedShaderPackLayoutPresent()
+		{
+			InitializeManagedPacks();
+			return ManagedPacks().layoutState != Util::ShaderCachePack::LayoutState::Absent;
+		}
+
 		void QuarantineShaderPackLane(bool a_developerMode, std::string_view a_cause)
 		{
 			auto& packs = ManagedPacks();
@@ -716,16 +820,21 @@ namespace SIE
 			const auto sourceDigest = GetShaderContentDigest(a_shaderPath, ShaderSourceRoot());
 			if (!sourceDigest)
 				return std::nullopt;
-			const auto compatibility = CSX::Api::GetShaderCompatibilityRequirementSet(
+			auto compatibility = CSX::Api::GetShaderCompatibilityRequirementSet(
 				GetShaderPackFamily(a_diskPath), a_shaderPath.string());
 			const auto contentContract = Util::ContentHash::CombineHashes(*sourceDigest, a_compileStateDigest).ToHex();
 			ShaderPackIdentity identity;
-			identity.logicalKey = std::format("{}|compat={}", GetManifestKey(a_diskPath), compatibility.digest);
-			identity.exactKey = std::format("{}|content={}", identity.logicalKey, contentContract);
+			identity.logicalKey = std::format("{}|compat-domain={}", GetManifestKey(a_diskPath), compatibility.domainDigest);
+			identity.exactKey = std::format(
+				"{}|content={}|compat={}", identity.logicalKey, contentContract, compatibility.digest);
+			identity.contentContract = contentContract;
+			identity.compatibility = compatibility;
 			identity.metadata = nlohmann::json{
+				{ "compatibilityDomain", compatibility.domainCanonical },
+				{ "compatibilityRanges", SerializeCompatibilityRanges(compatibility) },
 				{ "compatibilityRequirementSet", compatibility.canonical },
 				{ "contentContract", contentContract },
-				{ "schemaVersion", 2 }
+				{ "schemaVersion", 3 }
 			}
 			                        .dump();
 			return identity;
@@ -743,16 +852,27 @@ namespace SIE
 				if (!identity)
 					return nullptr;
 				std::string error;
-				const auto entry = a_store.Find(identity->exactKey, &error);
+				auto entry = a_store.Find(identity->exactKey, &error);
+				const bool exactMatch = entry.has_value();
+				if (!entry && error.empty()) {
+					entry = a_store.FindCompatible(
+						identity->logicalKey,
+						[&](std::string_view a_metadata) {
+							return IsCompatibleShaderPackMetadata(a_metadata, *identity);
+						},
+						&error);
+				}
 				if (!entry) {
 					if (!error.empty())
 						QuarantineShaderPackLane(a_developerMode, error);
 					return nullptr;
 				}
-				if (entry->metadata != identity->metadata) {
+				if (exactMatch && entry->metadata != identity->metadata) {
 					QuarantineShaderPackLane(a_developerMode, "managed shader pack metadata disagrees with the requested canonical identity");
 					return nullptr;
 				}
+				if (!exactMatch)
+					logger::debug("Reused managed shader record through an overlapping external compatibility range: {}", identity->logicalKey);
 				ID3DBlob* blob = nullptr;
 				if (FAILED(D3DCreateBlob(entry->bytecode.size(), &blob)) || !blob)
 					return nullptr;
@@ -923,9 +1043,9 @@ namespace SIE
 					return false;
 				return true;
 			}
-			if (ManagedShaderPackLayoutInstalled()) {
+			if (ManagedShaderPackLayoutPresent()) {
 				logger::debug(
-					"Skipped loose shader-cache fallback write for quarantined managed {} lane: {}",
+					"Skipped loose shader-cache write because a managed layout owns persistence for the {} lane: {}",
 					a_developerMode ? "developer" : "optimized",
 					Util::WStringToString(a_diskPath));
 				return false;
@@ -2307,7 +2427,6 @@ namespace SIE
 			}
 
 			auto compileState = CaptureGlobalCompileState();
-			const auto packCompileStateDigest = compileState.digest;
 			const auto shaderSourcePath = GetShaderPath(
 				shader.shaderType == RE::BSShader::Type::ImageSpace ?
 					static_cast<const RE::BSImagespaceShader&>(shader).originalShaderName :
@@ -2317,11 +2436,12 @@ namespace SIE
 				descriptor,
 				shaderClass,
 				compileState.shaderDefines->canonicalText);
+			const auto packCompileStateDigest = compileState.digest;
 			const auto compatibility = CSX::Api::GetShaderCompatibilityRequirementSet(
 				GetShaderPackFamily(diskPath),
 				Util::WStringToString(shaderSourcePath));
 			compileState.digest = Util::ContentHash::CombineHashes(
-				compileState.digest,
+				packCompileStateDigest,
 				Util::ContentHash::HashString(compatibility.canonical));
 			const uint64_t diskCacheGeneration = GetDiskCacheGeneration();
 			auto& cache = ShaderCache::Instance();
@@ -2371,7 +2491,7 @@ namespace SIE
 				managedPack = GetShaderPackStore(compileState.developerMode);
 			}
 
-			if (Util::ShaderCachePack::ShouldReadLooseBlob(useDiskCache, ManagedShaderPackLayoutInstalled()) &&
+			if (Util::ShaderCachePack::ShouldReadLooseBlob(useDiskCache, ManagedShaderPackLayoutPresent()) &&
 				std::filesystem::exists(diskPath)) {
 				// Determine whether the disk-cached shader is still valid.
 				bool diskCacheOutdated = false;

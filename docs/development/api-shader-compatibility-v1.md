@@ -44,8 +44,17 @@ cache; the registry then freezes. A late new registration is rejected with
 
 For each shader, CSX selects registrations whose scopes apply, sorts them by
 identity, and serializes their exact shader-facing contracts into a canonical
-requirement set. Its SHA-256 digest is part of that shader record's cache identity. A
+requirement set. The record's logical identity contains the stable provider
+domain (identity, major contract, resource fingerprint, and scopes), while its
+exact identity also contains the current and supported minor range. A
 Water-only provider therefore cannot invalidate Grass or Lighting records.
+
+An exact lookup is attempted first. If it misses, CSX searches retained records
+in the same provider domain and accepts the newest record whose supported minor
+range overlaps the current range. A major-contract, resource, scope, source,
+compile-state, or feature-ABI change still causes a miss. Compatible and
+incompatible versions may coexist until ordinary pack compaction retains the
+newest record for each logical shader identity.
 
 The canonical data, not a friendly label or timestamp, is authoritative.
 Digests are lookup accelerators and corruption checks. Pack records retain the
@@ -79,14 +88,14 @@ releases ownership before the caller quarantines that lane.
 
 The managed layout is authoritative only when the manifest and all four fixed
 files are present and the manifest passes the same strict identity, runtime,
-ABI, variant, file-entry, lane, generation, and record-count contract used by
+format, variant, file-entry, lane, generation, and record-count contract used by
 packaging. No managed members means the established loose cache remains active.
 Authority is latched only after the manifest and all four fixed regular files
 open successfully, their headers and identities validate, and their per-file
 state satisfies the manifest contract. A partial, unreadable, non-file,
-malformed, or otherwise invalid layout is diagnosed explicitly and also retains
-the loose fallback until the installation is repaired or cleared; one fragment
-never silently suppresses an otherwise valid loose cache. Admission is
+malformed, or otherwise invalid layout is diagnosed explicitly and fails closed
+to source-only compilation until the installation is repaired or cleared. It
+never creates a loose-cache tree beside installed managed members. Admission is
 read-only: zero-byte placeholders are rejected rather than initialized, and a
 global rejection releases every provisional lane lease without changing any
 member. Direct lazy admission through append or reset has the same cleanup
@@ -115,7 +124,7 @@ loose blobs.
 
 `PackManifest.json` is immutable installation metadata. Schema 2 requires
 `fileStateSemantics: installation-baseline-v1`; its schema, format,
-runtime, shader ABI, identity, variants, fixed filenames, lanes, aggregate
+runtime, seed shader ABI, identity, variants, fixed filenames, lanes, aggregate
 counts, and each file's generation/count describe the shipped baseline. Runtime
 appends may increase the count at that same generation. Compaction and reset may
 advance a file generation and may reduce its count; they do not rewrite the
@@ -141,6 +150,12 @@ durable, or has been verified. Only the first state may preserve the old Store
 and report failure before commit; every changed or uncertain state clears old
 authority and releases ownership.
 
-This storage transition is `engine-cache-v3-managed-pack` in
-`config/shader-cache-abi.json`. The generated pack manifest embeds the exact
-derived shader-cache ABI and packaging rejects disagreement with `Info.ini`.
+The manifest's shader ABI is seed provenance, not a container-admission gate.
+The ABI is already embedded in every record's content contract, so admitting an
+older container preserves its reusable records and permits new records to be
+appended alongside them. Packaging still requires a newly generated pack,
+`Info.ini`, and the core build manifest to agree before release.
+
+This compatibility transition is `engine-cache-v4-compatible-records` in
+`config/shader-cache-abi.json`. A distributed managed cache contains exactly six
+root files: `Info.ini`, `PackManifest.json`, and the four A/B pack members.

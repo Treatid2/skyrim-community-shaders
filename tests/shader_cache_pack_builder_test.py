@@ -147,6 +147,7 @@ def main() -> int:
         manifest = json.loads(
             (standard / "PackManifest.json").read_text(encoding="utf-8")
         )
+        assert not (standard / "Manifest.json").exists()
         assert manifest["compatibilityVariants"] == [
             "default",
             "legacy-horizon-fix",
@@ -159,7 +160,6 @@ def main() -> int:
         builder.validate_pack_manifest_contract(
             manifest,
             "VR",
-            "a" * 64,
             {
                 "Optimized.A.csxpack": optimized_a,
                 "Optimized.B.csxpack": optimized_b,
@@ -177,7 +177,7 @@ def main() -> int:
         def rejected(candidate_manifest, candidate_stats=pack_stats) -> None:
             try:
                 builder.validate_pack_manifest_contract(
-                    candidate_manifest, "VR", "a" * 64, candidate_stats
+                    candidate_manifest, "VR", candidate_stats
                 )
                 raise AssertionError("invalid managed pack contract was accepted")
             except SystemExit:
@@ -207,17 +207,17 @@ def main() -> int:
         # advance a generation while changing its record count.
         appended = copy.deepcopy(pack_stats)
         appended["Optimized.A.csxpack"]["recordCount"] = 4
-        builder.validate_pack_manifest_contract(manifest, "VR", "a" * 64, appended)
+        builder.validate_pack_manifest_contract(manifest, "VR", appended)
         compacted = copy.deepcopy(pack_stats)
         compacted["Optimized.B.csxpack"]["generation"] = 2
         compacted["Optimized.B.csxpack"]["recordCount"] = 2
-        builder.validate_pack_manifest_contract(manifest, "VR", "a" * 64, compacted)
+        builder.validate_pack_manifest_contract(manifest, "VR", compacted)
         reset = copy.deepcopy(pack_stats)
         reset["Optimized.A.csxpack"]["generation"] = 5
         reset["Optimized.A.csxpack"]["recordCount"] = 0
         reset["Optimized.B.csxpack"]["generation"] = 3
         reset["Optimized.B.csxpack"]["recordCount"] = 0
-        builder.validate_pack_manifest_contract(manifest, "VR", "a" * 64, reset)
+        builder.validate_pack_manifest_contract(manifest, "VR", reset)
 
         regressed = copy.deepcopy(pack_stats)
         regressed["Optimized.A.csxpack"]["recordCount"] = 2
@@ -240,7 +240,7 @@ def main() -> int:
             )
             try:
                 builder.validate_pack_manifest_contract(
-                    candidate_manifest, "VR", "a" * 64, candidate_stats
+                    candidate_manifest, "VR", candidate_stats
                 )
                 accepted = True
             except SystemExit:
@@ -267,8 +267,9 @@ def main() -> int:
         if len(sys.argv) == 2:
             default_requirement = builder.canonical_compatibility_requirement_set([])
             exact_key = (
-                "Water/1.pso|compat="
-                f"{builder.sha256_hex(default_requirement)}|content={'1' * 32}"
+                "Water/1.pso|compat-domain="
+                f"{builder.sha256_hex(builder.canonical_compatibility_domain_set([]))}"
+                f"|content={'1' * 32}|compat={builder.sha256_hex(default_requirement)}"
             )
             subprocess.run(
                 [

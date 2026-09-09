@@ -41,10 +41,6 @@ class FomodPackageTests(unittest.TestCase):
             f"ShaderCacheABI = {shader_cache_abi}\n",
             encoding="utf-8",
         )
-        (cache_directory / BUILDER.MANIFEST_FILE).write_text(
-            json.dumps({"schemaVersion": 1, "entries": {}}),
-            encoding="utf-8",
-        )
         (cache_directory / BUILDER.PACK_MANIFEST_FILE).write_text(
             json.dumps(
                 {
@@ -228,6 +224,18 @@ class FomodPackageTests(unittest.TestCase):
             core, se_cache, vr_cache = self._inputs(root)
             (vr_cache / BUILDER.CACHE_DIRECTORY / BUILDER.PACK_FILES[0]).write_bytes(
                 b"pack"
+            )
+            with self.assertRaises(SystemExit):
+                BUILDER.stage_package(
+                    core, se_cache, vr_cache, root / "staged", "v3.18.0"
+                )
+
+    def test_rejects_legacy_manifest_as_a_seventh_root_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            core, se_cache, vr_cache = self._inputs(root)
+            (vr_cache / BUILDER.CACHE_DIRECTORY / "Manifest.json").write_text(
+                "{}", encoding="utf-8"
             )
             with self.assertRaises(SystemExit):
                 BUILDER.stage_package(

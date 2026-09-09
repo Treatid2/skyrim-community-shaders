@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <nlohmann/json_fwd.hpp>
 #include <optional>
@@ -88,7 +89,6 @@ namespace Util::ShaderCachePack
 	std::optional<ManifestContract> ParseManifestContract(
 		const nlohmann::json& a_manifest,
 		std::string_view a_expectedRuntime,
-		std::string_view a_expectedShaderCacheABI,
 		std::string* a_error = nullptr);
 	bool ValidateManifestFileStates(
 		const ManifestContract& a_contract,
@@ -134,12 +134,12 @@ namespace Util::ShaderCachePack
 	void SetTestFailurePoints(std::uint32_t a_failurePoints);
 #endif
 
-	// A complete, readable managed pack set is authoritative. A miss in that
-	// set means the exact shader contract must be compiled; consulting a legacy
-	// loose blob would bypass pack identity and compatibility validation.
-	constexpr bool ShouldReadLooseBlob(bool a_diskCacheEnabled, bool a_managedPackAvailable)
+	// Any installed managed-pack member suppresses loose persistence. A complete
+	// set serves compatible records; a partial set fails closed to source so a
+	// damaged installation cannot silently regenerate thousands of loose files.
+	constexpr bool ShouldReadLooseBlob(bool a_diskCacheEnabled, bool a_managedPackPresent)
 	{
-		return a_diskCacheEnabled && !a_managedPackAvailable;
+		return a_diskCacheEnabled && !a_managedPackPresent;
 	}
 
 	struct Entry
@@ -199,6 +199,11 @@ namespace Util::ShaderCachePack
 		std::array<PackFileState, 2> GetFileStates() const;
 		std::array<std::string, 2> GetFileIdentityKeys() const;
 		std::optional<Entry> Find(std::string_view a_exactKey, std::string* a_error = nullptr) const;
+		/** Returns the newest retained record whose metadata satisfies the caller's compatibility contract. */
+		std::optional<Entry> FindCompatible(
+			std::string_view a_logicalKey,
+			const std::function<bool(std::string_view)>& a_acceptMetadata,
+			std::string* a_error = nullptr) const;
 		bool Append(const Entry& a_entry, std::string* a_error = nullptr);
 		/** Durably commits all records appended since the previous checkpoint. */
 		bool Checkpoint(std::string* a_error = nullptr);
@@ -253,6 +258,7 @@ namespace Util::ShaderCachePack
 		ScannedFile active;
 		ScannedFile fallback;
 		std::unordered_map<std::string, RecordLocation> exactIndex;
+		std::unordered_map<std::string, std::vector<RecordLocation>> recordsByLogical;
 		std::unordered_map<std::string, RecordLocation> liveByLogical;
 		std::unordered_map<std::string, RecordLocation> activeLiveByLogical;
 		Stats stats;

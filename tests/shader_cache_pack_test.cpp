@@ -322,14 +322,17 @@ int main(int argc, char** argv)
 	{
 		std::string manifestError;
 		const auto valid = MakePackManifest();
-		const auto contract = ParseManifestContract(valid, "VR", "test-abi", &manifestError);
+		const auto contract = ParseManifestContract(valid, "VR", &manifestError);
 		assert(contract);
 		assert(contract->files[0].lane == Lane::Optimized);
 		assert(contract->files[0].generation == 1);
 		assert(contract->files[0].recordCount == 3);
+		auto previousSeedAbi = valid;
+		previousSeedAbi["shaderCacheABI"] = "previous-build-abi";
+		assert(ParseManifestContract(previousSeedAbi, "VR", &manifestError));
 		auto expectRejected = [&](nlohmann::json manifest) {
 			manifestError.clear();
-			assert(!ParseManifestContract(manifest, "VR", "test-abi", &manifestError));
+			assert(!ParseManifestContract(manifest, "VR", &manifestError));
 			assert(!manifestError.empty());
 		};
 
@@ -405,7 +408,7 @@ int main(int argc, char** argv)
 			}
 
 			std::string diagnostic;
-			const auto contract = ParseManifestContract(manifest, "VR", "test-abi", &diagnostic);
+			const auto contract = ParseManifestContract(manifest, "VR", &diagnostic);
 			bool accepted = false;
 			if (contract) {
 				std::array<PackFileState, 4> states{
@@ -1043,14 +1046,14 @@ int main(int argc, char** argv)
 		assert(store.Append(MakeEntry("water|provider=1", "water|source=new|provider=1", 0x22), &error));
 		assert(store.Append(MakeEntry("water|provider=2", "water|source=new|provider=2", 0x33), &error));
 		assert(store.Checkpoint(&error));
-		const auto contract = ParseManifestContract(MakePackManifest(), "VR", "test-abi", &error);
+		const auto contract = ParseManifestContract(MakePackManifest(), "VR", &error);
 		assert(contract);
 		assert(ValidateOptimizedStore(store, *contract, &error));
 		auto swappedManifest = MakePackManifest();
 		std::swap(
 			swappedManifest["files"]["Optimized.A.csxpack"],
 			swappedManifest["files"]["Optimized.B.csxpack"]);
-		const auto swappedContract = ParseManifestContract(swappedManifest, "VR", "test-abi", &error);
+		const auto swappedContract = ParseManifestContract(swappedManifest, "VR", &error);
 		assert(swappedContract);
 		assert(!ValidateOptimizedStore(store, *swappedContract, &error));
 
@@ -1059,6 +1062,12 @@ int main(int argc, char** argv)
 		assert(old && current);
 		assert(old->bytecode.front() == std::byte{ 0x11 });
 		assert(current->bytecode.front() == std::byte{ 0x22 });
+		auto compatible = store.FindCompatible(
+			"water|provider=1",
+			[](std::string_view a_metadata) { return a_metadata == "{\"schema\":1}"; },
+			&error);
+		assert(compatible && compatible->bytecode.front() == std::byte{ 0x22 });
+		assert(!store.FindCompatible("water|provider=1", [](std::string_view) { return false; }, &error));
 		const auto before = store.GetStats();
 		assert(before.recordCount == 3 && before.liveRecordCount == 2 && before.supersededBytes > 0);
 	}
@@ -1074,13 +1083,18 @@ int main(int argc, char** argv)
 	assert(recovered.Open(&error));
 	assert(!error.empty());
 	assert(recovered.Find("water|source=new|provider=1", &error));
+	const auto compatibleAfterReopen = recovered.FindCompatible(
+		"water|provider=1",
+		[](std::string_view) { return true; },
+		&error);
+	assert(compatibleAfterReopen && compatibleAfterReopen->bytecode.front() == std::byte{ 0x22 });
 	assert(recovered.GetStats().corruptTailBytes > 0);
 
 	// Compaction retains the latest exact record per logical/compatibility key in
 	// the new generation while the previous generation remains searchable.
 	assert(recovered.Compact(&error));
 	{
-		const auto contract = ParseManifestContract(MakePackManifest(), "VR", "test-abi", &error);
+		const auto contract = ParseManifestContract(MakePackManifest(), "VR", &error);
 		assert(contract);
 		assert(ValidateOptimizedStore(recovered, *contract, &error));
 	}
@@ -1168,7 +1182,7 @@ int main(int argc, char** argv)
 	// make any record from the prior generation visible again.
 	assert(recovered.Reset(&error) == ResetDisposition::Complete);
 	{
-		const auto contract = ParseManifestContract(MakePackManifest(), "VR", "test-abi", &error);
+		const auto contract = ParseManifestContract(MakePackManifest(), "VR", &error);
 		assert(contract);
 		assert(ValidateOptimizedStore(recovered, *contract, &error));
 	}
