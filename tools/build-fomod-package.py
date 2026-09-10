@@ -28,7 +28,6 @@ CACHE_DIRECTORY = "ShaderCache"
 FOMOD_DIRECTORY = "fomod"
 MODULE_CONFIG_FILE = "ModuleConfig.xml"
 INFO_FILE = "info.xml"
-MANIFEST_FILE = "Manifest.json"
 CACHE_INFO_FILE = "Info.ini"
 CORE_BUILD_MANIFEST = Path("SKSE/Plugins/CSX.BuildManifest.json")
 SHADER_CACHE_ABI_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -262,15 +261,12 @@ def validate_cache_source(
     expected_runtime: str,
     expected_shader_cache_abi: str,
 ) -> None:
-    manifest_path = cache_directory / MANIFEST_FILE
     pack_manifest_path = cache_directory / PACK_MANIFEST_FILE
     info_path = cache_directory / CACHE_INFO_FILE
     if not cache_directory.is_dir():
         raise SystemExit(f"missing shader cache directory: {cache_directory}")
     if not info_path.is_file():
         raise SystemExit(f"missing shader cache metadata: {info_path}")
-    if not manifest_path.is_file():
-        raise SystemExit(f"missing shader cache manifest: {manifest_path}")
     if not pack_manifest_path.is_file():
         raise SystemExit(f"missing managed pack manifest: {pack_manifest_path}")
     info = configparser.ConfigParser(interpolation=None)
@@ -300,18 +296,6 @@ def validate_cache_source(
             f"(core {expected_shader_cache_abi}, cache {shader_cache_abi!r})"
         )
 
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise SystemExit(
-            f"invalid shader cache manifest {manifest_path}: {exc}"
-        ) from exc
-    if (
-        not isinstance(manifest, dict)
-        or manifest.get("schemaVersion") != 1
-        or not isinstance(manifest.get("entries"), dict)
-    ):
-        raise SystemExit(f"unsupported shader cache manifest: {manifest_path}")
     try:
         pack_manifest = json.loads(pack_manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -348,6 +332,18 @@ def validate_cache_source(
             + ", ".join(missing_packs)
         )
 
+    allowed_root_files = {CACHE_INFO_FILE, PACK_MANIFEST_FILE, *PACK_FILES}
+    unexpected_root_files = sorted(
+        path.name
+        for path in cache_directory.iterdir()
+        if path.is_file() and path.name not in allowed_root_files
+    )
+    if unexpected_root_files:
+        raise SystemExit(
+            f"managed shader cache {cache_directory} contains unexpected root files: "
+            + ", ".join(unexpected_root_files)
+        )
+
     loose_blobs = sorted(
         path
         for path in cache_directory.rglob("*")
@@ -372,7 +368,6 @@ def validate_cache_source(
         SHADER_CACHE_CONTRACT.validate_pack_manifest_contract(
             pack_manifest,
             contract_runtime,
-            expected_shader_cache_abi,
             pack_stats,
         )
     except SystemExit as exc:

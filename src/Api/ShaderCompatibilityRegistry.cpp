@@ -113,6 +113,17 @@ namespace
 		return value.str();
 	}
 
+	std::string BuildDomainCanonical(const ShaderCompatibilityRegistration& a_registration)
+	{
+		std::ostringstream value;
+		value << "identity=" << a_registration.identity
+			  << "\ncontract-major=" << a_registration.contractMajor
+			  << "\nresource=" << a_registration.resourceFingerprint;
+		for (const auto& scope : a_registration.scopes)
+			value << "\nscope=" << ScopeName(scope.kind) << ':' << scope.value;
+		return value.str();
+	}
+
 	ShaderCompatibilityResult Failure(Status a_status, std::string a_reason, std::string a_message)
 	{
 		return { .status = a_status, .reasonCode = std::move(a_reason), .message = std::move(a_message) };
@@ -275,17 +286,62 @@ namespace CSX::Api
 				applicable.push_back(&registration);
 		}
 		std::ranges::sort(applicable, {}, [](const auto* a_registration) { return a_registration->identity; });
-		ShaderCompatibilityRequirementSet result;
-		std::ostringstream canonical;
-		for (const auto* registration : applicable) {
-			canonical << registration->canonical.size() << ':' << registration->canonical << '\n';
-			result.handles.push_back(registration->handle);
-		}
-		result.canonical = canonical.str();
-		result.digest = Util::CryptoHash::Sha256Hex(result.canonical);
+		std::vector<ShaderCompatibilityRegistration> requirements;
+		requirements.reserve(applicable.size());
+		for (const auto* registration : applicable)
+			requirements.push_back(*registration);
+		auto result = BuildShaderCompatibilityRequirementSet(std::move(requirements));
 		if (phase == ShaderCompatibilityAPI::Phase::kFrozen)
 			requirementCache.insert_or_assign(cacheKey, result);
 		return result;
+	}
+
+	ShaderCompatibilityRequirementSet BuildShaderCompatibilityRequirementSet(
+		std::vector<ShaderCompatibilityRegistration> a_registrations)
+	{
+		std::ranges::sort(a_registrations, {}, &ShaderCompatibilityRegistration::identity);
+		ShaderCompatibilityRequirementSet result;
+		std::ostringstream canonical;
+		std::ostringstream domainCanonical;
+		for (auto& registration : a_registrations) {
+			registration.canonical = BuildCanonical(registration);
+			registration.digest = Util::CryptoHash::Sha256Hex(registration.canonical);
+			canonical << registration.canonical.size() << ':' << registration.canonical << '\n';
+			const auto domain = BuildDomainCanonical(registration);
+			domainCanonical << domain.size() << ':' << domain << '\n';
+			result.handles.push_back(registration.handle);
+		}
+		result.canonical = canonical.str();
+		result.digest = Util::CryptoHash::Sha256Hex(result.canonical);
+		result.domainCanonical = domainCanonical.str();
+		result.domainDigest = Util::CryptoHash::Sha256Hex(result.domainCanonical);
+		result.registrations = std::move(a_registrations);
+		return result;
+	}
+
+	bool AreShaderCompatibilityRequirementSetsCompatible(
+		const ShaderCompatibilityRequirementSet& a_cached,
+		const ShaderCompatibilityRequirementSet& a_current)
+	{
+		if (a_cached.domainCanonical != a_current.domainCanonical ||
+			a_cached.registrations.size() != a_current.registrations.size())
+			return false;
+
+		for (std::size_t index = 0; index < a_current.registrations.size(); ++index) {
+			const auto& cached = a_cached.registrations[index];
+			const auto& current = a_current.registrations[index];
+			if (cached.identity != current.identity ||
+				cached.contractMajor != current.contractMajor ||
+				cached.resourceFingerprint != current.resourceFingerprint ||
+				cached.scopes != current.scopes)
+				return false;
+
+			const auto minimum = (std::max)(cached.minimumCompatibleMinor, current.minimumCompatibleMinor);
+			const auto maximum = (std::min)(cached.maximumCompatibleMinor, current.maximumCompatibleMinor);
+			if (minimum > maximum)
+				return false;
+		}
+		return true;
 	}
 
 	void ShaderCompatibilityRegistry::Freeze()

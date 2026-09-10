@@ -92,6 +92,10 @@ FEATURE_SHADER_DEFINE_PATTERN = re.compile(
     r'GetShaderDefineName[^\{]*\{\s*return\s+"([^"]+)"',
     re.DOTALL,
 )
+FEATURE_SHADER_ABI_PATTERN = re.compile(
+    r'GetShaderCacheAbiVersion[^\{]*\{\s*return\s+"([^"]+)"',
+    re.DOTALL,
+)
 
 
 RUNTIME_EXCLUDED_FEATURES = {
@@ -158,6 +162,7 @@ class FeatureContract:
     short_name: str
     package_name: str
     shader_define: str | None
+    shader_abi: str | None
 
 
 @dataclass(frozen=True)
@@ -306,6 +311,37 @@ def canonical_compatibility_requirement_set(registrations: list[dict[str, Any]])
     return "".join(f"{len(value)}:{value}\n" for _, value in canonical)
 
 
+def canonical_compatibility_domain_registration(
+    registration: dict[str, Any],
+) -> str:
+    canonical = canonical_compatibility_registration(registration)
+    lines = canonical.splitlines()
+    return "\n".join(
+        (
+            lines[0],
+            f"contract-major={registration['contractMajor']}",
+            *(
+                line
+                for line in lines
+                if line.startswith("resource=") or line.startswith("scope=")
+            ),
+        )
+    )
+
+
+def canonical_compatibility_domain_set(
+    registrations: list[dict[str, Any]],
+) -> str:
+    canonical = sorted(
+        (
+            registration["identity"],
+            canonical_compatibility_domain_registration(registration),
+        )
+        for registration in registrations
+    )
+    return "".join(f"{len(value)}:{value}\n" for _, value in canonical)
+
+
 def compatibility_registration_applies(
     registration: dict[str, Any],
     shader_family: str,
@@ -350,6 +386,27 @@ def canonical_compatibility_requirement_for_shader(
         )
     ]
     return canonical_compatibility_requirement_set(applicable)
+
+
+def applicable_compatibility_registrations(
+    registrations: list[dict[str, Any]],
+    shader_family: str,
+    shader_source: str,
+    features: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    return sorted(
+        (
+            registration
+            for registration in registrations
+            if compatibility_registration_applies(
+                registration,
+                shader_family,
+                shader_source,
+                features or set(),
+            )
+        ),
+        key=lambda registration: registration["identity"],
+    )
 
 
 def sha256_hex(value: str) -> str:
@@ -413,6 +470,7 @@ def validate_shader_pack(
             or record_reserved
             or record_reserved2
             or sequence == 0
+            or sequence == 0xFFFFFFFFFFFFFFFF
             or not logical_size
             or not exact_size
             or not bytecode_size
@@ -454,7 +512,6 @@ def valid_pack_set_id(value: object) -> bool:
 def validate_pack_manifest_contract(
     pack_manifest: object,
     expected_runtime: str,
-    expected_shader_cache_abi: str,
     pack_stats: dict[str, dict[str, int | str]],
 ) -> dict[str, Any]:
     """Validate the canonical manifest/file contract used by all packagers."""
@@ -490,7 +547,8 @@ def validate_pack_manifest_contract(
         or pack_manifest.get("fileStateSemantics") != "installation-baseline-v1"
         or pack_manifest.get("hashAlgorithm") != "sha256"
         or pack_manifest.get("runtime") != expected_runtime
-        or pack_manifest.get("shaderCacheABI") != expected_shader_cache_abi
+        or not isinstance(pack_manifest.get("shaderCacheABI"), str)
+        or not pack_manifest["shaderCacheABI"]
         or not valid_pack_set_id(pack_set_id)
         or not isinstance(variants, list)
         or not variants
@@ -537,6 +595,24 @@ def validate_pack_manifest_contract(
         if lane != expected_lane:
             raise SystemExit(
                 f"managed pack manifest has the wrong lane for {file_name}"
+            )
+
+    def adjacent_generations(first: int, second: int) -> bool:
+        return abs(first - second) == 1
+
+    for first, second in (
+        ("Optimized.A.csxpack", "Optimized.B.csxpack"),
+        ("Developer.A.csxpack", "Developer.B.csxpack"),
+    ):
+        first_generation = manifest_count(
+            manifest_files[first]["generation"], f"{first}.generation"
+        )
+        second_generation = manifest_count(
+            manifest_files[second]["generation"], f"{second}.generation"
+        )
+        if not adjacent_generations(first_generation, second_generation):
+            raise SystemExit(
+                f"managed pack manifest has ambiguous A/B baseline generations: {first}, {second}"
             )
 
     if (
@@ -682,20 +758,46 @@ def build_managed_shader_packs(
                 if horizon_enabled
                 else variants["default"]["registrations"]
             )
-            requirement = canonical_compatibility_requirement_for_shader(
+            applicable_registrations = applicable_compatibility_registrations(
                 registrations,
                 family,
                 source,
             )
+            requirement = canonical_compatibility_requirement_set(
+                applicable_registrations
+            )
+            compatibility_domain = canonical_compatibility_domain_set(
+                applicable_registrations
+            )
             compatibility_digest = sha256_hex(requirement)
-            logical_key = f"{relative}|compat={compatibility_digest}"
-            exact_key = f"{logical_key}|content={content_contract}"
+            logical_key = (
+                f"{relative}|compat-domain={sha256_hex(compatibility_domain)}"
+            )
+            exact_key = (
+                f"{logical_key}|content={content_contract}"
+                f"|compat={compatibility_digest}"
+            )
             bytecode = blob_path.read_bytes()
             metadata = json.dumps(
                 {
-                    "schemaVersion": 2,
+                    "schemaVersion": 3,
                     "contentContract": content_contract,
+                    "compatibilityDomain": compatibility_domain,
                     "compatibilityRequirementSet": requirement,
+                    "compatibilityRanges": [
+                        {
+                            "identity": registration["identity"],
+                            "contractMajor": registration["contractMajor"],
+                            "currentMinor": registration["currentMinor"],
+                            "minimumCompatibleMinor": registration[
+                                "minimumCompatibleMinor"
+                            ],
+                            "maximumCompatibleMinor": registration[
+                                "maximumCompatibleMinor"
+                            ],
+                        }
+                        for registration in applicable_registrations
+                    ],
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -777,10 +879,7 @@ def build_managed_shader_packs(
     ):
         if not any(directory.iterdir()):
             directory.rmdir()
-    (standard_cache / MANIFEST_FILE_NAME).write_text(
-        json.dumps({"schemaVersion": MANIFEST_SCHEMA_VERSION, "entries": {}}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    (standard_cache / MANIFEST_FILE_NAME).unlink(missing_ok=True)
     if horizon_cache is not None:
         shutil.rmtree(horizon_cache)
     print(
@@ -1064,7 +1163,11 @@ def feature_contracts(source_root: Path) -> dict[str, FeatureContract]:
 
         define_match = FEATURE_SHADER_DEFINE_PATTERN.search(contents)
         shader_define = define_match.group(1) if define_match else None
-        contract = FeatureContract(short_name, packages[short_name], shader_define)
+        abi_match = FEATURE_SHADER_ABI_PATTERN.search(contents)
+        shader_abi = abi_match.group(1) if abi_match else ("1" if shader_define else None)
+        contract = FeatureContract(
+            short_name, packages[short_name], shader_define, shader_abi
+        )
         previous = contracts.setdefault(short_name, contract)
         if previous != contract:
             raise SystemExit(
@@ -1528,6 +1631,24 @@ def write_shader_cache_manifest(
     global_defines_state = ("VR;" if runtime == "VR" else "") + (
         f"ShaderCacheABI={shader_cache_abi};"
     )
+    info = configparser.ConfigParser(interpolation=None)
+    try:
+        with (cache_dir / INFO_FILE_NAME).open("r", encoding="utf-8-sig") as stream:
+            info.read_file(stream)
+    except (configparser.Error, OSError, UnicodeError) as exc:
+        raise SystemExit(
+            f"cannot derive feature shader ABI state from {cache_dir / INFO_FILE_NAME}: {exc}"
+        ) from exc
+    feature_abis = sorted(
+        (section, info.get(section, "ShaderCacheABI"))
+        for section in info.sections()
+        if section != "Cache"
+        and info.getboolean(section, "Enabled", fallback=False)
+        and info.has_option(section, "ShaderCacheABI")
+    )
+    global_defines_state += "".join(
+        f"FeatureShaderABI={name}:{abi};" for name, abi in feature_abis
+    )
     count = write_manifest(
         cache_dir,
         shader_root,
@@ -1561,6 +1682,7 @@ def prune_non_cache_files(cache_dir: Path) -> None:
 def write_info_ini(
     cache_dir: Path,
     stage: Path,
+    source_root: Path,
     plugin_version: str,
     runtime: str,
     profile: CacheProfile,
@@ -1586,6 +1708,7 @@ def write_info_ini(
         else frozenset(excluded_features)
     )
     enabled_overrides = enabled_overrides or {}
+    contracts = feature_contracts(source_root)
 
     for ini_path in sorted((stage / "Features").glob("*.ini")):
         stem = ini_path.stem
@@ -1610,7 +1733,11 @@ def write_info_ini(
             stem not in profile.disabled_features,
         )
         enabled = "true" if is_enabled else "false"
-        lines += [f"[{stem}]", f"Enabled = {enabled}", f"Version = {version}", "", ""]
+        lines += [f"[{stem}]", f"Enabled = {enabled}", f"Version = {version}"]
+        if contract := contracts.get(stem):
+            if contract.shader_abi:
+                lines.append(f"ShaderCacheABI = {contract.shader_abi}")
+        lines += ["", ""]
         count += 1
 
     required_features = set(profile.disabled_features) | set(enabled_overrides)
@@ -2159,7 +2286,7 @@ def validate_cache_archive(
         *(
             f"{variant.directory}/{metadata}"
             for variant in variants
-            for metadata in (INFO_FILE_NAME, MANIFEST_FILE_NAME)
+            for metadata in (INFO_FILE_NAME,)
         ),
         *(f"{CACHE_DIRECTORY}/{name}" for name in PACK_FILE_NAMES),
         f"{CACHE_DIRECTORY}/{PACK_MANIFEST_FILE_NAME}",
@@ -2180,7 +2307,21 @@ def validate_cache_archive(
             f"{', '.join(duplicate_required_entries)}"
         )
 
-    flattened_entries = sorted({INFO_FILE_NAME, MANIFEST_FILE_NAME} & entries)
+    cache_prefix = f"{CACHE_DIRECTORY}/"
+    unexpected_cache_files = sorted(
+        entry
+        for entry in entries
+        if entry.startswith(cache_prefix)
+        and not entry.endswith("/")
+        and entry not in required_entries
+    )
+    if unexpected_cache_files:
+        raise SystemExit(
+            f"packaged {runtime} cache contains unexpected managed-cache files: "
+            f"{', '.join(unexpected_cache_files)}"
+        )
+
+    flattened_entries = sorted({INFO_FILE_NAME, PACK_MANIFEST_FILE_NAME} & entries)
     if flattened_entries:
         raise SystemExit(
             f"packaged {runtime} cache contains flattened metadata: "
@@ -2268,7 +2409,6 @@ def validate_cache_archive(
             validate_pack_manifest_contract(
                 pack_manifest,
                 runtime,
-                archived_shader_abi,
                 pack_stats,
             )
         except SystemExit as exc:
@@ -2512,6 +2652,17 @@ def build_runtime(
 
         prune_non_cache_files(cache_dir)
         imagespace_remap = remap_imagespace_dirs(cache_dir, runtime)
+        section_count = write_info_ini(
+            cache_dir,
+            stage,
+            source_root,
+            plugin_version,
+            runtime,
+            profile,
+            shader_cache_abi,
+            excluded_features=excluded_features,
+            enabled_overrides=enabled_overrides,
+        )
         write_shader_cache_manifest(
             cache_dir,
             stage,
@@ -2519,17 +2670,6 @@ def build_runtime(
             imagespace_remap,
             write_manifest,
             shader_cache_abi,
-        )
-
-        section_count = write_info_ini(
-            cache_dir,
-            stage,
-            plugin_version,
-            runtime,
-            profile,
-            shader_cache_abi,
-            excluded_features=excluded_features,
-            enabled_overrides=enabled_overrides,
         )
         blob_count = validate_cache(
             cache_dir,
