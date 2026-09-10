@@ -13,6 +13,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
+from urllib.parse import quote
 
 
 SCHEMA_VERSION = 2
@@ -664,6 +665,23 @@ def canonical_distribution_runs(runs: Any, tag_name: str) -> list[dict[str, Any]
     return canonical
 
 
+def parse_distribution_run_pages(inventory: str) -> list[dict[str, Any]]:
+    """Flatten the complete paginated Actions response without truncation."""
+    try:
+        pages = json.loads(inventory or "[]")
+    except json.JSONDecodeError as error:
+        raise StateError("GitHub returned malformed workflow-run JSON") from error
+    if not isinstance(pages, list):
+        raise StateError("GitHub workflow-run inventory must be a page array")
+
+    runs: list[dict[str, Any]] = []
+    for page in pages:
+        if not isinstance(page, dict) or not isinstance(page.get("workflow_runs"), list):
+            raise StateError("GitHub returned a malformed workflow-run page")
+        runs.extend(page["workflow_runs"])
+    return runs
+
+
 def ensure_distribution_dispatch(
     *,
     repository_slug: str,
@@ -690,28 +708,23 @@ def ensure_distribution_dispatch(
         inventory = _checked_output(
             [
                 "gh",
-                "run",
-                "list",
-                "--repo",
-                repository_slug,
-                "--workflow",
-                workflow,
-                "--commit",
-                allocation_sha,
-                "--event",
-                "workflow_dispatch",
-                "--limit",
-                "20",
-                "--json",
-                "databaseId,status,conclusion,headSha,headBranch",
+                "api",
+                "--method",
+                "GET",
+                "--paginate",
+                "--slurp",
+                f"repos/{repository_slug}/actions/workflows/{quote(workflow, safe='')}/runs",
+                "-f",
+                "event=workflow_dispatch",
+                "-f",
+                f"head_sha={allocation_sha}",
+                "-f",
+                "per_page=100",
             ],
             runner=runner,
             description="cannot reconcile distribution workflow runs",
         )
-        try:
-            runs = json.loads(inventory or "[]")
-        except json.JSONDecodeError as error:
-            raise StateError("GitHub returned malformed workflow-run JSON") from error
+        runs = parse_distribution_run_pages(inventory)
         runs = canonical_distribution_runs(runs, tag_name)
         decision = dispatch_decision(
             runs,
@@ -805,17 +818,19 @@ def verify_test_distribution(
 
 def write_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", newline="\n", dir=path.parent, delete=False
-    ) as handle:
-        json.dump(state, handle, indent=4)
-        handle.write("\n")
-        temporary = Path(handle.name)
+    temporary: Path | None = None
     try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", newline="\n", dir=path.parent, delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(state, handle, indent=4)
+            handle.write("\n")
         temporary.replace(path)
-    except OSError:
+    except BaseException:
         try:
-            temporary.unlink(missing_ok=True)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         except OSError as cleanup_error:
             print(
                 f"error: cannot remove temporary state {temporary}: {cleanup_error}",
@@ -834,7 +849,7 @@ def emit(values: dict[str, str], github_output: Path | None) -> None:
 
 
 def make_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     read_parser = subparsers.add_parser("read", help="validate and report state")
@@ -842,7 +857,9 @@ def make_parser() -> argparse.ArgumentParser:
     read_parser.add_argument("--github-output", type=Path)
 
     allocate_parser = subparsers.add_parser(
-        "allocate", help="allocate the next identity for changed product source"
+        "allocate",
+        help="allocate the next identity for changed product source",
+        allow_abbrev=False,
     )
     allocate_parser.add_argument("--state", type=Path, required=True)
     allocate_parser.add_argument("--base-version", required=True)
@@ -853,9 +870,7 @@ def make_parser() -> argparse.ArgumentParser:
         type=parse_date,
         default=dt.datetime.now(dt.timezone.utc).date().isoformat(),
     )
-    allocate_parser.add_argument("--pr", type=int, action="append", default=[])
-    allocate_parser.add_argument("--discover-git-range", action="store_true")
-    allocate_parser.add_argument("--repository-slug")
+    allocate_parser.add_argument("--repository-slug", required=True)
     allocate_parser.add_argument("--github-output", type=Path)
 
     verify_parser = subparsers.add_parser(
@@ -933,17 +948,11 @@ def main(argv: list[str] | None = None) -> int:
             emit(output_values(state, allocated=False), args.github_output)
             return 0
 
-        prs = set(args.pr)
-        if args.discover_git_range:
-            if not args.repository_slug:
-                raise StateError("--repository-slug is required for complete discovery")
-            prs.update(
-                discover_pull_requests(
-                    state["sourceSha"],
-                    args.source_sha,
-                    args.repository_slug,
-                )
-            )
+        prs = discover_pull_requests(
+            state["sourceSha"],
+            args.source_sha,
+            args.repository_slug,
+        )
         updated, changed = allocate(
             state,
             base_version=args.base_version,

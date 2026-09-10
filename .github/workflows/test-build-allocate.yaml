@@ -127,7 +127,6 @@ jobs:
                     --source-sha "$SOURCE_SHA" \
                     --previous-state-sha "$LAST_STATE_SHA" \
                     --date "$(date -u +%Y-%m-%d)" \
-                    --discover-git-range \
                     --repository-slug "${{ github.repository }}" \
                     --github-output "$GITHUB_OUTPUT"
 

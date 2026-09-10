@@ -21,7 +21,9 @@ from tools.csx_test_build import (
     discover_pull_requests_from_subjects,
     dispatch_decision,
     ensure_distribution_dispatch,
+    main,
     output_values,
+    parse_distribution_run_pages,
     parse_state,
     validate_state,
     verify_allocation_commit,
@@ -43,6 +45,10 @@ SEED = {
     "previousStateSha": None,
     "includedPullRequests": [],
 }
+
+
+def run_pages(runs: list[dict[str, object]]) -> str:
+    return json.dumps([{"total_count": len(runs), "workflow_runs": runs}])
 
 
 def completed(
@@ -112,6 +118,35 @@ class TestBuildStateTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "blocked"):
                     write_state(state_path, SEED)
             self.assertEqual(list(Path(temporary).iterdir()), [])
+
+    def test_failed_atomic_write_removes_temporary_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "test-build.json"
+            with mock.patch("tools.csx_test_build.json.dump", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    write_state(state_path, SEED)
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+
+    def test_manual_pr_provenance_cannot_be_injected(self) -> None:
+        with self.assertRaises(SystemExit) as raised:
+            main(
+                [
+                    "allocate",
+                    "--state",
+                    "version/test-build.json",
+                    "--base-version",
+                    "3.19-VR",
+                    "--source-sha",
+                    "a" * 40,
+                    "--previous-state-sha",
+                    "b" * 40,
+                    "--repository-slug",
+                    "owner/repository",
+                    "--pr",
+                    "999",
+                ]
+            )
+        self.assertEqual(raised.exception.code, 2)
 
     def test_counter_remains_global_when_base_version_changes(self) -> None:
         initial, _ = allocate(
@@ -394,6 +429,18 @@ class AllocationCommitTests(unittest.TestCase):
 
 
 class DispatchTests(unittest.TestCase):
+    def test_paginated_inventory_is_flattened(self) -> None:
+        inventory = json.dumps(
+            [
+                {"workflow_runs": [{"databaseId": 1}]},
+                {"workflow_runs": [{"databaseId": 2}]},
+            ]
+        )
+        self.assertEqual(
+            [run["databaseId"] for run in parse_distribution_run_pages(inventory)],
+            [1, 2],
+        )
+
     def test_active_or_successful_run_is_idempotent(self) -> None:
         self.assertEqual(dispatch_decision([{"status": "queued"}]), "existing")
         self.assertEqual(
@@ -428,9 +475,11 @@ class DispatchTests(unittest.TestCase):
 
         def runner(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
             nonlocal dispatches, inventories
-            if args[:3] == ["gh", "run", "list"]:
+            if args[:2] == ["gh", "api"]:
                 inventories += 1
-                return completed(args, stdout=json.dumps(runs))
+                self.assertIn("--paginate", args)
+                self.assertIn("--slurp", args)
+                return completed(args, stdout=run_pages(runs))
             if args[:3] == ["gh", "workflow", "run"]:
                 dispatches += 1
                 return completed(args, returncode=1, stderr="transport uncertain")
@@ -453,7 +502,7 @@ class DispatchTests(unittest.TestCase):
 
         def runner(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
             nonlocal dispatches
-            if args[:3] == ["gh", "run", "list"]:
+            if args[:2] == ["gh", "api"]:
                 runs = (
                     [
                         {
@@ -464,7 +513,7 @@ class DispatchTests(unittest.TestCase):
                     ]
                     if dispatches == 3 else []
                 )
-                return completed(args, stdout=json.dumps(runs))
+                return completed(args, stdout=run_pages(runs))
             if args[:3] == ["gh", "workflow", "run"]:
                 dispatches += 1
                 return completed(args, returncode=1, stderr="transport uncertain")
@@ -489,7 +538,7 @@ class DispatchTests(unittest.TestCase):
 
         def runner(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
             nonlocal calls
-            if args[:3] == ["gh", "run", "list"]:
+            if args[:2] == ["gh", "api"]:
                 calls += 1
                 runs = (
                     []
@@ -502,7 +551,7 @@ class DispatchTests(unittest.TestCase):
                         }
                     ]
                 )
-                return completed(args, stdout=json.dumps(runs))
+                return completed(args, stdout=run_pages(runs))
             if args[:3] == ["gh", "workflow", "run"]:
                 return completed(args, returncode=1, stderr="transport uncertain")
             raise AssertionError(args)
@@ -524,7 +573,7 @@ class DispatchTests(unittest.TestCase):
 
         def runner(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
             nonlocal dispatches
-            if args[:3] == ["gh", "run", "list"]:
+            if args[:2] == ["gh", "api"]:
                 runs = [
                     {
                         "status": "queued",
@@ -532,7 +581,7 @@ class DispatchTests(unittest.TestCase):
                         "headBranch": "arbitrary-branch",
                     }
                 ]
-                return completed(args, stdout=json.dumps(runs))
+                return completed(args, stdout=run_pages(runs))
             if args[:3] == ["gh", "workflow", "run"]:
                 dispatches += 1
                 return completed(args)
@@ -552,7 +601,7 @@ class DispatchTests(unittest.TestCase):
 
     def test_canonical_ref_with_wrong_sha_fails_closed(self) -> None:
         def runner(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-            if args[:3] == ["gh", "run", "list"]:
+            if args[:2] == ["gh", "api"]:
                 runs = [
                     {
                         "status": "queued",
@@ -560,7 +609,7 @@ class DispatchTests(unittest.TestCase):
                         "headBranch": TAG_NAME,
                     }
                 ]
-                return completed(args, stdout=json.dumps(runs))
+                return completed(args, stdout=run_pages(runs))
             raise AssertionError(args)
 
         with self.assertRaisesRegex(StateError, "different allocation"):
