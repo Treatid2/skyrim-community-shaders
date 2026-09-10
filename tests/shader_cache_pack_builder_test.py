@@ -68,6 +68,53 @@ def apply_contract_case(base_manifest: dict, base_stats: dict, case: dict) -> tu
 
 def main() -> int:
     builder = load_builder()
+    variants = builder.compatibility_variant_manifest(REPO)
+
+    def packaged_record(relative: str, content: str, variant: str, bytecode: bytes) -> dict:
+        return {
+            **builder.shader_pack_record_identity(relative, content, variants[variant]["registrations"]),
+            "bytecode": bytecode,
+        }
+
+    standard_water = packaged_record("Water/1.pso", "1" * 32, "default", b"DXBC-standard")
+    horizon_water = packaged_record("Water/1.pso", "1" * 32, "legacy-horizon-fix", b"DXBC-horizon")
+    pair = [standard_water, horizon_water]
+    inventory_cases = (
+        ("preserved-pair-after-append", 1, [
+            *pair,
+            packaged_record("Water/1.pso", "2" * 32, "default", b"DXBC-updated"),
+        ], 0, [], True),
+        ("unaffected-permutation", 1, [
+            *pair,
+            packaged_record("Water/2.pso", "1" * 32, "default", b"DXBC-identical"),
+            packaged_record("Water/2.pso", "1" * 32, "legacy-horizon-fix", b"DXBC-identical"),
+        ], 0, [], True),
+        ("last-exact-record-wins", 1, [
+            *pair, {**horizon_water, "bytecode": standard_water["bytecode"]},
+        ], 0, [], False),
+        ("active-exact-record-wins", 2, pair, 1, [
+            {**horizon_water, "metadata": "invalid"},
+        ], True),
+        ("obsolete-generation-ignored", 5, pair, 1, [
+            {**horizon_water, "exactKey": "obsolete", "metadata": "invalid"},
+        ], True),
+    )
+    for name, active_generation, active_records, fallback_generation, fallback_records, expected in inventory_cases:
+        inventory = builder.PackagedCompatibilityInventory(REPO, ["default", "legacy-horizon-fix"])
+        for file_name, entries in (("Optimized.A.csxpack", active_records), ("Optimized.B.csxpack", fallback_records)):
+            inspect = inventory.inspector(file_name)
+            for entry in entries:
+                inspect(entry["logicalKey"], entry["exactKey"], entry["metadata"], entry["bytecode"])
+        try:
+            inventory.validate({
+                "Optimized.A.csxpack": {"generation": active_generation},
+                "Optimized.B.csxpack": {"generation": fallback_generation},
+            })
+            accepted = True
+        except SystemExit:
+            accepted = False
+        assert accepted is expected, name
+
     scoped_registration = {
         "identity": "org.example.scope",
         "owner": "test",
@@ -88,6 +135,78 @@ def main() -> int:
         try:
             builder.canonical_compatibility_registration(unsupported)
             raise AssertionError("reserved compatibility scope was accepted")
+        except SystemExit:
+            pass
+    family_registration = {
+        **scoped_registration,
+        "scopes": [{"kind": "shader-family", "value": "Water"}],
+    }
+    for field in (
+        "contractMajor", "currentMinor", "minimumCompatibleMinor", "maximumCompatibleMinor"
+    ):
+        for value in (True, -1, 0x100000000):
+            invalid = {**family_registration, field: value}
+            try:
+                builder.canonical_compatibility_registration(invalid)
+                raise AssertionError(f"invalid uint32 {field} was accepted: {value!r}")
+            except SystemExit:
+                pass
+    for control in ("\0", "\n", "\r", "\t", "\x7f"):
+        for field in ("resourceFingerprint", "scopes"):
+            invalid = copy.deepcopy(family_registration)
+            if field == "scopes":
+                invalid[field][0]["value"] += control + "scope=family:water"
+            else:
+                invalid[field] = control + "scope=family:water"
+            try:
+                builder.canonical_compatibility_registration(invalid)
+                raise AssertionError("control character in canonical compatibility text was accepted")
+            except SystemExit:
+                pass
+    unicode_registration = {**family_registration, "resourceFingerprint": "éclair"}
+    for canonicalize in (
+        builder.canonical_compatibility_requirement_set,
+        builder.canonical_compatibility_domain_set,
+    ):
+        length, value = canonicalize([unicode_registration]).split(":", 1)
+        assert int(length) == len(value[:-1].encode("utf-8"))
+    for separator in ("\x85", "\u2028", "\u2029"):
+        registration = {
+            **family_registration,
+            "resourceFingerprint": f"resource{separator}segment",
+            "scopes": [{"kind": "shader-family", "value": f"Water{separator}family"}],
+        }
+        domain = builder.canonical_compatibility_domain_registration(registration)
+        assert f"resource=resource{separator}segment" in domain
+        assert f"scope=family:water{separator}family" in domain
+    upper_unicode_family = {
+        **family_registration,
+        "scopes": [{"kind": "shader-family", "value": "WÄTER"}],
+    }
+    assert "scope=family:wÄter" in builder.canonical_compatibility_registration(upper_unicode_family)
+    for field in ("resourceFingerprint", "scopes"):
+        invalid = copy.deepcopy(family_registration)
+        if field == "scopes":
+            invalid[field][0]["value"] = "é" * 257
+        else:
+            invalid[field] = "é" * 257
+        try:
+            builder.canonical_compatibility_registration(invalid)
+            raise AssertionError("oversized UTF-8 canonical compatibility text was accepted")
+        except SystemExit:
+            pass
+    with tempfile.TemporaryDirectory(prefix="csx-compatibility-input-test-") as temporary:
+        source = Path(temporary)
+        path = source / builder.COMPATIBILITY_VARIANTS_FILE
+        path.parent.mkdir()
+        document = json.loads((REPO / builder.COMPATIBILITY_VARIANTS_FILE).read_text(encoding="utf-8"))
+        invalid = copy.deepcopy(family_registration)
+        invalid["scopes"][0]["value"] = "unmatched\nfamily"
+        document["variants"][0]["registrations"] = [invalid]
+        path.write_text(json.dumps(document), encoding="utf-8")
+        try:
+            builder.compatibility_variant_manifest(source)
+            raise AssertionError("invalid unmatched provider was silently dropped")
         except SystemExit:
             pass
     with tempfile.TemporaryDirectory(prefix="csx-pack-builder-test-") as temporary:
@@ -133,10 +252,15 @@ def main() -> int:
         assert developer_b["generation"] == 0 and developer_b["recordCount"] == 0
 
         sequence_pack = root / "sequence-domain.csxpack"
-        sequence_bytes = bytearray((standard / "Optimized.A.csxpack").read_bytes())
+        builder.write_shader_pack(
+            sequence_pack, 1, 1,
+            [{"logicalKey": "logical", "exactKey": "exact", "metadata": "{}", "bytecode": b"shader"}],
+            optimized_a["packSetId"],
+        )
+        sequence_bytes = bytearray(sequence_pack.read_bytes())
         struct.pack_into("<Q", sequence_bytes, 96, 0xFFFFFFFFFFFFFFFE)
         sequence_pack.write_bytes(sequence_bytes)
-        assert builder.validate_shader_pack(sequence_pack, 1)["recordCount"] == 3
+        assert builder.validate_shader_pack(sequence_pack, 1)["recordCount"] == 1
         struct.pack_into("<Q", sequence_bytes, 96, 0xFFFFFFFFFFFFFFFF)
         sequence_pack.write_bytes(sequence_bytes)
         try:
@@ -144,6 +268,15 @@ def main() -> int:
             raise AssertionError("exhausted record sequence was accepted")
         except SystemExit:
             pass
+        for first_sequence in (2, 3):
+            sequence_bytes = bytearray((standard / "Optimized.A.csxpack").read_bytes())
+            struct.pack_into("<Q", sequence_bytes, 96, first_sequence)
+            sequence_pack.write_bytes(sequence_bytes)
+            try:
+                builder.validate_shader_pack(sequence_pack, 1)
+                raise AssertionError("non-increasing pack record sequence was accepted")
+            except SystemExit:
+                pass
         manifest = json.loads(
             (standard / "PackManifest.json").read_text(encoding="utf-8")
         )
