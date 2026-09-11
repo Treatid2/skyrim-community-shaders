@@ -214,7 +214,6 @@ ScreenshotApi::ScreenshotApi() :
 		{ .maximumCommands = kMaximumCommands, .maximumEvents = kMaximumEvents, .commandRetention = kRetention })
 {
 	manifestWorkerState = std::make_shared<ManifestWorkerState>();
-	manifestWorker = std::thread(&ScreenshotApi::ManifestWorkerLoop, manifestWorkerState);
 	service.SetServerMetadataProvider([this] {
 		auto metadata = BuildProvenance::GetProducer();
 		metadata.update(json{
@@ -232,8 +231,13 @@ ScreenshotApi::ScreenshotApi() :
 		});
 		return metadata;
 	});
+	// Start the non-throwing-stop service loops before the isolated std::thread.
+	// Constructor unwinding can then stop and join them if its creation fails.
+	manifestResultDrainer = std::jthread(
+		[this](std::stop_token token) { ManifestResultLoop(token); });
 	dispatchDeadlineWatchdog = std::jthread(
 		[this](std::stop_token token) { DispatchDeadlineLoop(token); });
+	manifestWorker = std::thread(&ScreenshotApi::ManifestWorkerLoop, manifestWorkerState);
 }
 
 ScreenshotApi::~ScreenshotApi()
@@ -245,6 +249,10 @@ ScreenshotApi::~ScreenshotApi()
 	const auto state = manifestWorkerState;
 	if (!state)
 		return;
+	manifestResultDrainer.request_stop();
+	state->condition.notify_all();
+	if (manifestResultDrainer.joinable())
+		manifestResultDrainer.join();
 	{
 		std::lock_guard lock(state->mutex);
 		for (auto& [_, sequence] : sequences) {
@@ -339,6 +347,24 @@ void ScreenshotApi::ManifestWorkerLoop(std::shared_ptr<ManifestWorkerState> a_st
 	a_state->condition.notify_all();
 }
 
+void ScreenshotApi::ManifestResultLoop(std::stop_token a_stopToken)
+{
+	const auto state = manifestWorkerState;
+	while (!a_stopToken.stop_requested()) {
+		{
+			std::unique_lock workerLock(state->mutex);
+			state->condition.wait(workerLock, a_stopToken, [&] {
+				return !state->results.empty();
+			});
+			if (a_stopToken.stop_requested())
+				break;
+		}
+		std::lock_guard lock(mutex);
+		DrainManifestResultsLocked();
+		TrimLocked();
+	}
+}
+
 ScreenshotApi::json ScreenshotApi::HandleRequest(ScreenshotFeature& a_feature, const json& a_request)
 {
 	return service.Dispatch(
@@ -355,6 +381,7 @@ ScreenshotApi::json ScreenshotApi::HandleRequest(ScreenshotFeature& a_feature, c
 		},
 		[this](std::string_view requestId) {
 			std::lock_guard lock(mutex);
+			DrainManifestResultsLocked();
 			return LookupReceiptLocked(requestId);
 		});
 }

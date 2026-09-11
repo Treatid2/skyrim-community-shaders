@@ -22,6 +22,8 @@ namespace VRSubmitInputReusePolicy
 		{
 			return scopeToken != 0 && source.compositorCycle != 0 && eye < 2 &&
 			       source.submitFrame != std::numeric_limits<std::uint32_t>::max() &&
+			       source.lastWorldRenderFrame == source.submitFrame &&
+			       source.lastCompletedWorldRenderFrame == source.submitFrame &&
 			       source.colorSource != 0 && source.depthSource != 0 &&
 			       source.motionVectorSource != 0 && source.sourceWidth != 0 &&
 			       source.sourceHeight != 0 && source.sourceMipLevels != 0 &&
@@ -35,8 +37,11 @@ namespace VRSubmitInputReusePolicy
 		const ProducerAdmission& a_source,
 		const SubmitBoundaryIdentity& a_boundary,
 		std::uint32_t a_eye,
-		const EyeRegion& a_region) noexcept
+		const EyeRegion& a_region,
+		bool a_regionCorrespondenceProven) noexcept
 	{
+		if (!a_regionCorrespondenceProven)
+			return {};
 		CurrentEyeIdentity identity{
 			.source = a_source,
 			.scopeToken = a_boundary.scopeToken,
@@ -114,6 +119,46 @@ namespace VRSubmitInputReusePolicy
 		{
 			return a_identity.eye < 2 &&
 			       MatchesCurrentEyeIdentity(identities[a_identity.eye], a_identity);
+		}
+	};
+
+	/** Binds optional two-eye consumers to finalized outputs from one producer scope. */
+	struct FinalizedEyePair
+	{
+		std::array<CurrentEyeIdentity, 2> identities{};
+
+		constexpr void Invalidate(std::uint32_t a_eyeMask = 0x3u) noexcept
+		{
+			for (std::uint32_t eye = 0; eye < identities.size(); ++eye) {
+				if ((a_eyeMask & (1u << eye)) != 0)
+					identities[eye] = {};
+			}
+		}
+
+		constexpr void Record(const CurrentEyeIdentity& a_identity) noexcept
+		{
+			if (!a_identity.IsValid() || a_identity.eye >= identities.size())
+				return;
+			const auto peer = a_identity.eye ^ 1u;
+			if (identities[peer].IsValid() &&
+				!SharesCurrentEyeProducerScope(identities[peer], a_identity)) {
+				identities[peer] = {};
+			}
+			identities[a_identity.eye] = a_identity;
+		}
+
+		[[nodiscard]] constexpr bool IsComplete() const noexcept
+		{
+			return identities[0].eye == 0 && identities[1].eye == 1 &&
+			       SharesCurrentEyeProducerScope(identities[0], identities[1]);
+		}
+
+		[[nodiscard]] constexpr bool Consume() noexcept
+		{
+			const bool complete = IsComplete();
+			if (complete)
+				Invalidate();
+			return complete;
 		}
 	};
 }

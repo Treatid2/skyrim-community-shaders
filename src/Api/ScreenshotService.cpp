@@ -1,18 +1,19 @@
 #include "Api/ScreenshotService.h"
 
-#include "Api/RuntimeThreadAffinity.h"
 #include "Api/MainThreadDispatchState.h"
+#include "Api/RuntimeThreadAffinity.h"
 #include "Api/ServiceRegistry.h"
 #include "Features/ScreenshotFeature.h"
 #include "Globals.h"
-#include "VRAPI/CSserviceapi.h"
 #include "VRAPI/CSscreenshotapi.h"
+#include "VRAPI/CSserviceapi.h"
 
 #include <SKSE/SKSE.h>
 #include <nlohmann/json.hpp>
 
-#include <limits>
 #include <chrono>
+#include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -35,14 +36,39 @@ namespace
 		auto* tasks = SKSE::GetTaskInterface();
 		if (!tasks)
 			return std::nullopt;
+		using DispatchState = CSX::Api::MainThreadDispatchState<nlohmann::json>;
+		auto state = std::make_shared<DispatchState>();
 		try {
-			return CSX::Api::DispatchMainThreadTask(
-				[tasks](auto a_task) { tasks->AddTask(std::move(a_task)); },
-				[handle = std::move(handle)]() mutable {
-					CSX::Api::EnterRuntimeMainThreadTask();
-					return handle();
-				},
-				kMainThreadTimeout);
+			tasks->AddTask([state, handle = std::move(handle)]() mutable {
+				CSX::Api::EnterRuntimeMainThreadTask();
+				if (!state->TryBegin())
+					return;
+				try {
+					state->Complete(handle());
+				} catch (...) {
+					state->Fail(std::current_exception());
+				}
+			});
+		} catch (...) {
+			return std::nullopt;
+		}
+		const auto deadline = std::chrono::steady_clock::now() + kMainThreadTimeout;
+		const auto phase = state->WaitUntil(deadline);
+		if (phase == DispatchState::Phase::queued && state->CancelIfQueued())
+			return std::nullopt;
+		if (state->WaitForTerminalUntil(deadline) == DispatchState::Phase::running) {
+			return nlohmann::json{
+				{ "ok", false },
+				{ "error", {
+							   { "code", "dispatcher_admitted" },
+							   { "message", "main-thread execution began but did not complete within 5000ms" },
+							   { "retryable", false },
+							   { "details", { { "executionMayComplete", true } } },
+						   } },
+			};
+		}
+		try {
+			return state->WaitForCompletion();
 		} catch (...) {
 			return std::nullopt;
 		}
@@ -167,9 +193,9 @@ namespace CSX::Api
 			return {
 				{ "ok", false },
 				{ "error", {
-					{ "code", "transport_error" },
-					{ "transportStatus", static_cast<std::uint32_t>(status) },
-				} },
+							   { "code", "transport_error" },
+							   { "transportStatus", static_cast<std::uint32_t>(status) },
+						   } },
 			};
 		return nlohmann::json::parse(response.jsonUtf8, response.jsonUtf8 + response.jsonBytes);
 	}

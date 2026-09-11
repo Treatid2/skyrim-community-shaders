@@ -166,7 +166,7 @@ private:
 	struct ManifestWorkerState
 	{
 		std::mutex mutex;
-		std::condition_variable condition;
+		std::condition_variable_any condition;
 		std::deque<ManifestJob> jobs;
 		std::deque<std::shared_ptr<const ManifestChildNode>> retiredChildren;
 		std::deque<ManifestResult> results;
@@ -211,7 +211,9 @@ private:
 	bool acceptingRequests = true;
 	std::shared_ptr<ManifestWorkerState> manifestWorkerState;
 	std::thread manifestWorker;
-	// Declared last so destruction stops it before coordinator state is released.
+	// Both service loops are explicitly stopped and joined before coordinator
+	// state or the isolated manifest worker can be released.
+	std::jthread manifestResultDrainer;
 	std::jthread dispatchDeadlineWatchdog;
 
 	static constexpr uint32_t kContractMajor = 1;
@@ -265,6 +267,7 @@ private:
 	void QueueSequenceManifestLocked(SequenceRecord& a_sequence, bool a_final);
 	void DrainManifestResultsLocked();
 	static void ManifestWorkerLoop(std::shared_ptr<ManifestWorkerState> a_state);
+	void ManifestResultLoop(std::stop_token a_stopToken);
 	std::optional<DueFrame> PrepareDueFrameLocked(uint64_t a_engineFrame);
 	std::optional<DispatchEntry> PopDispatchLocked();
 	void RequeueDispatchLocked(DispatchEntry a_entry, bool a_manual);
