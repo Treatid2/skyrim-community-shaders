@@ -57126,7 +57126,7 @@ bool Upscaling::IsOpenCompositeUpscalingBlocked(bool a_forceRefresh) const
 	});
 }
 
-void Upscaling::Upscale()
+Upscaling::MainPassUpscaleResult Upscaling::Upscale()
 {
 	ZoneScoped;
 	dlssUpscaleOutputInSharpenerTexture = false;
@@ -57146,7 +57146,7 @@ void Upscaling::Upscale()
 #ifdef DEVBENCH_BRIDGE_ENABLED
 		recordMainPassStage(VRMainPassDispatchStage::MissingGlobals);
 #endif
-		return;
+		return MainPassUpscaleResult::Failed;
 	}
 	EnsureRuntimeResolutionStateCurrent();
 	// Settings can change from the CS menu after ConfigureUpscaling has latched
@@ -57189,7 +57189,7 @@ void Upscaling::Upscale()
 #ifdef DEVBENCH_BRIDGE_ENABLED
 		recordMainPassStage(VRMainPassDispatchStage::LifecycleDeferred);
 #endif
-		return;
+		return MainPassUpscaleResult::Deferred;
 	}
 	// A gate owns backend mutation, not a compatible authoritative provider.
 	// Continue evaluating RC173's existing physical contract while a replacement
@@ -57199,7 +57199,7 @@ void Upscaling::Upscale()
 #ifdef DEVBENCH_BRIDGE_ENABLED
 		recordMainPassStage(VRMainPassDispatchStage::LifecycleDeferred);
 #endif
-		return;
+		return MainPassUpscaleResult::Deferred;
 	}
 
 	const bool vrRenderScaleSubmitStageOwnsOutput =
@@ -57219,7 +57219,7 @@ void Upscaling::Upscale()
 #ifdef DEVBENCH_BRIDGE_ENABLED
 		recordMainPassStage(VRMainPassDispatchStage::SubmitStageOwned);
 #endif
-		return;
+		return MainPassUpscaleResult::Deferred;
 	}
 
 	if (globals::game::isVR && upscaleMethod == UpscaleMethod::kDLSS && pendingDLSSHistoryReset.exchange(false, std::memory_order_relaxed)) {
@@ -57241,7 +57241,7 @@ void Upscaling::Upscale()
 #ifdef DEVBENCH_BRIDGE_ENABLED
 		recordMainPassStage(VRMainPassDispatchStage::MissingMotionVectors);
 #endif
-		return;
+		return MainPassUpscaleResult::Failed;
 	}
 
 	auto dispatchCount = Util::GetScreenDispatchCount(true);
@@ -57473,12 +57473,13 @@ void Upscaling::Upscale()
 	};
 
 	if (!encodeUpscalingTextures(false))
-		return;
+		return MainPassUpscaleResult::Failed;
 
 	{
 		ID3D11Resource* motionVectorResource = globals::game::isVR ? motionVector.texture : motionVectorCopyTexture->resource.get();
 		bool dispatched = false;
 		bool vendorDispatchCompleted = false;
+		bool fsrDispatchDeferred = false;
 		static bool loggedFoveatedFallback = false;
 		// VR-only resets can leave vendor upscalers with stale viewport state.
 		if (!vendorLifecycleMutationDeferred &&
@@ -57486,7 +57487,7 @@ void Upscaling::Upscale()
 #ifdef DEVBENCH_BRIDGE_ENABLED
 			recordMainPassStage(VRMainPassDispatchStage::VendorResetBlocked);
 #endif
-			return;
+			return MainPassUpscaleResult::Deferred;
 		}
 
 		if (foveatedDispatchRequested) {
@@ -57514,7 +57515,7 @@ void Upscaling::Upscale()
 #ifdef DEVBENCH_BRIDGE_ENABLED
 					recordMainPassStage(VRMainPassDispatchStage::LifecycleDeferred);
 #endif
-					return;
+					return MainPassUpscaleResult::Deferred;
 				}
 				dispatched = foveatedResult == FidelityFX::UpscaleResult::Ready;
 			}
@@ -57577,6 +57578,7 @@ void Upscaling::Upscale()
 						VRMainPassDispatchStage::FidelityDispatchFailed);
 #endif
 				if (fsrResult == FidelityFX::UpscaleResult::Deferred) {
+					fsrDispatchDeferred = true;
 					RequestHistoryReset();
 				} else if (fsrResult == FidelityFX::UpscaleResult::Failed) {
 					HandleFSRLifecycleDeviceLoss(
@@ -57596,13 +57598,23 @@ void Upscaling::Upscale()
 			recordMainPassStage(VRMainPassDispatchStage::Completed);
 		}
 #endif
+		return vendorDispatchCompleted ?
+		           MainPassUpscaleResult::Ready :
+		       fsrDispatchDeferred ? MainPassUpscaleResult::Deferred :
+		                             MainPassUpscaleResult::Failed;
 	}
 }
 
-void Upscaling::PerformUpscaling()
+Upscaling::MainPassUpscaleResult Upscaling::PerformUpscaling()
 {
 	CS_GPU_PASS("Upscaling::PerformUpscaling");
-	Upscale();
+	const auto result = Upscale();
+	if (runtimeResolutionPlan.upscaleMethod == UpscaleMethod::kFSR &&
+		result == MainPassUpscaleResult::Deferred) {
+		// Leave dynamic resolution active so the engine can present this frame
+		// through its complete current-input temporal fallback.
+		return result;
+	}
 	UpscaleDepth();
 
 	auto& runtimeData = globals::game::graphicsState->GetRuntimeData();
@@ -57612,6 +57624,7 @@ void Upscaling::PerformUpscaling()
 
 	// Updates the PerFrame constant buffer so that dynamic resolution settings are disabled
 	UpdateCameraData();
+	return result;
 }
 
 void Upscaling::UpdateDepthUpscaleKernelState(JitterCB& a_jitterData, bool a_enableWideKernelLogic)
@@ -58128,7 +58141,7 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 		if (upscaling.ShouldUseFrameGenerationThisFrame())
 			upscaling.CopySharedD3D12Resources();
 
-		upscaling.PerformUpscaling();
+		(void)upscaling.PerformUpscaling();
 
 		const uint32_t currentFrame = globals::state ? globals::state->frameCount : 0u;
 		const bool vendorDispatchCompleted =
@@ -58222,7 +58235,18 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 	// the vendor dispatch and produced periodic lighting/shadow corruption with
 	// OCU ASW.
 	if (upscaleMethod != UpscaleMethod::kNONE && upscaleMethod != UpscaleMethod::kTAA) {
-		upscaling.PerformUpscaling();
+		const auto mainPassResult = upscaling.PerformUpscaling();
+		if (upscaleMethod == UpscaleMethod::kFSR &&
+			mainPassResult == MainPassUpscaleResult::Deferred) {
+			// The FSR provider has not produced full-size color. Keep dynamic
+			// resolution unlocked and let Skyrim's temporal path own this frame.
+			auto imageSpaceManager = RE::ImageSpaceManager::GetSingleton();
+			GET_INSTANCE_MEMBER(BSImagespaceShaderISTemporalAA, imageSpaceManager);
+			BSImagespaceShaderISTemporalAA->taaEnabled = true;
+			func(a_this, a3, a_target, a_4, a_5);
+			BSImagespaceShaderISTemporalAA->taaEnabled = false;
+			return;
+		}
 	} else if (globals::game::isVR) {
 		upscaling.UpscaleDepth();
 	}
