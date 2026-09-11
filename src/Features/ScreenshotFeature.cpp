@@ -2823,14 +2823,17 @@ bool ScreenshotFeature::QueueScreenshot(PendingScreenshot&& screenshot)
 		logger::error("Screenshot was queued without a reserved encoder slot.");
 		return false;
 	}
+	bool queueCommitted = false;
+	const SKSE::stl::scope_exit releaseQueueSlotOnExit([this, &queueCommitted]() noexcept {
+		if (!queueCommitted)
+			ReleaseScreenshotSlot();
+	});
 
 	std::lock_guard lifecycleLock(screenshotWorkerLifecycleMutex);
 
 	{
 		std::lock_guard queueLock(screenshotWorkerState->mutex);
 		if (!screenshotWorkerState->accepting) {
-			if (screenshotWorkerState->outstandingCount > 0)
-				--screenshotWorkerState->outstandingCount;
 			return false;
 		}
 	}
@@ -2841,18 +2844,26 @@ bool ScreenshotFeature::QueueScreenshot(PendingScreenshot&& screenshot)
 		} catch (const std::exception& e) {
 			logger::error("Failed to start screenshot worker: {}", e.what());
 			screenshot = {};
-			ReleaseScreenshotSlot();
 			return false;
 		} catch (...) {
 			logger::error("Failed to start screenshot worker.");
 			screenshot = {};
-			ReleaseScreenshotSlot();
 			return false;
 		}
 	}
 
-	const auto queuedRequestId = screenshot.requestId;
-	const auto queuedPath = screenshot.outputPath;
+	std::string queuedRequestId;
+	std::filesystem::path queuedPath;
+	try {
+		queuedRequestId = screenshot.requestId;
+		queuedPath = screenshot.outputPath;
+	} catch (const std::exception& e) {
+		logger::error("Failed to prepare screenshot queue metadata: {}", e.what());
+		return false;
+	} catch (...) {
+		logger::error("Failed to prepare screenshot queue metadata.");
+		return false;
+	}
 	{
 		std::lock_guard queueLock(screenshotWorkerState->mutex);
 		try {
@@ -2860,19 +2871,14 @@ bool ScreenshotFeature::QueueScreenshot(PendingScreenshot&& screenshot)
 		} catch (const std::exception& e) {
 			logger::error("Failed to enqueue screenshot: {}", e.what());
 			screenshot = {};
-			if (screenshotWorkerState->outstandingCount > 0) {
-				--screenshotWorkerState->outstandingCount;
-			}
 			return false;
 		} catch (...) {
 			logger::error("Failed to enqueue screenshot.");
 			screenshot = {};
-			if (screenshotWorkerState->outstandingCount > 0) {
-				--screenshotWorkerState->outstandingCount;
-			}
 			return false;
 		}
 	}
+	queueCommitted = true;
 	screenshotWorkerState->condition.notify_one();
 	if (!queuedRequestId.empty()) {
 		EnsureScreenshotApi();
