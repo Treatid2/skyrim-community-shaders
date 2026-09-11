@@ -21,7 +21,8 @@ foreach(CONTRACT IN LISTS REQUIRED_LIGHTING_CONTRACTS)
 endforeach()
 
 set(REQUIRED_CACHE_CONTRACTS
-    "PuddleMaskCachePolicy::CanReuse("
+    "PuddleMaskCachePolicy::Evaluate("
+    "PuddleMaskCachePolicy::Decision::RefreshResourcePublication"
     "g_cachedCommonBufferPuddleMaskGeneration = puddleMaskResourceGeneration;"
 )
 
@@ -42,9 +43,10 @@ if(GENERATION_ADVANCE_POSITION EQUAL -1)
 endif()
 
 set(REQUIRED_FALLBACK_CONTRACTS
-    "effectivePuddleMaskMode == PuddleMaskMode::Textured"
-    "effectivePuddleMaskMode == PuddleMaskMode::TexturedHighQuality"
-    "effectivePuddleMaskMode = PuddleMaskMode::Simple;"
+    "ResolveEffectivePuddleMaskMode("
+    "effectiveMode == Wetterness::PuddleMaskMode::Textured"
+    "effectiveMode == Wetterness::PuddleMaskMode::TexturedHighQuality"
+    "effectiveMode = Wetterness::PuddleMaskMode::Simple;"
 )
 
 foreach(CONTRACT IN LISTS REQUIRED_FALLBACK_CONTRACTS)

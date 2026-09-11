@@ -128,6 +128,19 @@ namespace
 		           Wetterness::PuddleMaskMode::Textured;
 	}
 
+	Wetterness::PuddleMaskMode ResolveEffectivePuddleMaskMode(
+		Wetterness::PuddleMaskMode a_selectedMode,
+		bool a_resourceAvailable)
+	{
+		auto effectiveMode = SanitizePuddleMaskMode(static_cast<int64_t>(a_selectedMode));
+		if (!a_resourceAvailable &&
+			(effectiveMode == Wetterness::PuddleMaskMode::Textured ||
+				effectiveMode == Wetterness::PuddleMaskMode::TexturedHighQuality)) {
+			effectiveMode = Wetterness::PuddleMaskMode::Simple;
+		}
+		return effectiveMode;
+	}
+
 	struct WetternessUiPresetDefinition
 	{
 		const char* name;
@@ -2180,12 +2193,23 @@ Wetterness::PerFrame Wetterness::GetCommonBufferData() const
 		g_cachedCommonBufferFrame,
 		g_cachedCommonBufferPuddleMaskGeneration
 	};
-	if (PuddleMaskCachePolicy::CanReuse(
-			canUseFrameCache,
-			g_hasCachedCommonBufferData,
-			cachedCacheStamp,
-			currentCacheStamp)) {
+	const auto cacheDecision = PuddleMaskCachePolicy::Evaluate(
+		canUseFrameCache,
+		g_hasCachedCommonBufferData,
+		cachedCacheStamp,
+		currentCacheStamp);
+	if (cacheDecision == PuddleMaskCachePolicy::Decision::Reuse) {
 		return g_cachedCommonBufferData;
+	}
+	if (cacheDecision == PuddleMaskCachePolicy::Decision::RefreshResourcePublication) {
+		PerFrame data = g_cachedCommonBufferData;
+		data.PuddleMaskMode = static_cast<uint32_t>(
+			ResolveEffectivePuddleMaskMode(puddleMaskMode, puddleMaskSrv != nullptr));
+		g_lastFrameData = data;
+		g_hasLastFrameData = true;
+		g_cachedCommonBufferData = data;
+		g_cachedCommonBufferPuddleMaskGeneration = puddleMaskResourceGeneration;
+		return data;
 	}
 
 	if (!loaded || settings.EnableWetterness == 0u) {
@@ -2606,12 +2630,8 @@ Wetterness::PerFrame Wetterness::GetCommonBufferData() const
 	data.GrassWetnessPhase = grassLightingWetnessPhase;
 	data.GrassWetRoughness = std::clamp(1.0f - wetGrassGlossiness * 0.01f, 0.0f, 1.0f);
 	data.GrassWetDarkeningStrength = ClampRainGrassDarkening(rainGrassDarkening);
-	auto effectivePuddleMaskMode = SanitizePuddleMaskMode(static_cast<uint32_t>(puddleMaskMode));
-	if ((effectivePuddleMaskMode == PuddleMaskMode::Textured || effectivePuddleMaskMode == PuddleMaskMode::TexturedHighQuality) &&
-		!puddleMaskSrv) {
-		effectivePuddleMaskMode = PuddleMaskMode::Simple;
-	}
-	data.PuddleMaskMode = static_cast<uint32_t>(effectivePuddleMaskMode);
+	data.PuddleMaskMode = static_cast<uint32_t>(
+		ResolveEffectivePuddleMaskMode(puddleMaskMode, puddleMaskSrv != nullptr));
 	const float activePuddleSkyReflectionScale = masterWetnessEnabled ?
 	                                                 ClampFiniteOrDefault(
 														 puddleSkyReflectionScale,
