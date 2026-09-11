@@ -1,4 +1,5 @@
-#pragma once
+#ifndef CS_WETTERNESS_PUDDLE_MASK_HLSLI
+#define CS_WETTERNESS_PUDDLE_MASK_HLSLI
 
 #include "Common/Random.hlsli"
 
@@ -20,6 +21,7 @@ namespace Wetterness
 		uint maskMode,
 		SamplerState maskSampler)
 	{
+		float puddleNoiseSignal = 0.0;
 		[branch] if (maskMode == PUDDLE_MASK_LEGACY_PROCEDURAL)
 		{
 			float3 layoutSeed = float3(12.7, 19.1, 23.3) * puddleLayout;
@@ -30,21 +32,25 @@ namespace Wetterness
 			}
 			float3 puddlePatternOffset = float3(31.0, 17.0, 43.0) * layoutT;
 			float3 puddleCoords = puddleCoordsBase * layoutFrequency + layoutWarp * float3(0.20, 0.14, 0.18) * layoutWarpStrength + puddlePatternOffset;
-			return Random::perlinNoise(puddleCoords) * 0.5 + 0.5;
+			puddleNoiseSignal = Random::perlinNoise(puddleCoords) * 0.5 + 0.5;
 		}
-
-		float2 puddleTextureCoords = puddleCoordsBase.xy * layoutFrequency * 0.25 + float2(7.3, 11.9) * layoutT;
-		float2 puddleMaskSample = TexPuddleMask.SampleLevel(maskSampler, frac(puddleTextureCoords), 0).rg;
-		float puddleNoiseSignal = saturate(puddleMaskSample.r + (puddleMaskSample.g - 0.5) * 0.18);
-		[branch] if (maskMode == PUDDLE_MASK_TEXTURED_HIGH_QUALITY)
+		else
 		{
-			float2 puddleTextureUvHighQuality = frac(float2(-puddleTextureCoords.y, puddleTextureCoords.x) * 1.73 + float2(0.37, 0.61));
-			float2 puddleMaskHighQuality = TexPuddleMask.SampleLevel(maskSampler, puddleTextureUvHighQuality, 0).rg;
-			puddleNoiseSignal = saturate(
-				puddleNoiseSignal +
-				(puddleMaskHighQuality.r - 0.5) * 0.22 +
-				(puddleMaskHighQuality.g - 0.5) * 0.10);
+			float2 puddleTextureCoords = puddleCoordsBase.xy * layoutFrequency * 0.25 + float2(7.3, 11.9) * layoutT;
+			float2 puddleMaskSample = TexPuddleMask.SampleLevel(maskSampler, frac(puddleTextureCoords), 0).rg;
+			puddleNoiseSignal = saturate(puddleMaskSample.r + (puddleMaskSample.g - 0.5) * 0.18);
+			[branch] if (maskMode == PUDDLE_MASK_TEXTURED_HIGH_QUALITY)
+			{
+				float2 puddleTextureUvHighQuality = frac(float2(-puddleTextureCoords.y, puddleTextureCoords.x) * 1.73 + float2(0.37, 0.61));
+				float2 puddleMaskHighQuality = TexPuddleMask.SampleLevel(maskSampler, puddleTextureUvHighQuality, 0).rg;
+				puddleNoiseSignal = saturate(
+					puddleNoiseSignal +
+					(puddleMaskHighQuality.r - 0.5) * 0.22 +
+					(puddleMaskHighQuality.g - 0.5) * 0.10);
+			}
 		}
 		return puddleNoiseSignal;
 	}
 }
+
+#endif
