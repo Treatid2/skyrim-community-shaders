@@ -67,6 +67,7 @@ struct ScreenshotApi
 		--sequence.inFlight;
 		TryFinalizeSequenceLocked(sequence);
 	}
+	void SignalDispatchQueueChangedLocked() {}
 	void MarkSequenceCancellationLocked(SequenceRecord&);
 	void CancelQueuedDispatchesLocked(std::string_view, std::string_view);
 	void OnFeatureDisabled(std::string_view);

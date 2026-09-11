@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -94,6 +95,48 @@ namespace CSX::ScreenshotPolicy
 		Fail,
 		Cancel
 	};
+
+	enum class SequenceTerminationIntent : std::uint8_t
+	{
+		Natural,
+		Stop,
+		Cancel,
+		PolicyAbort
+	};
+
+	inline bool CanAcceptSequenceCommand(bool a_finalizationCommitted)
+	{
+		return !a_finalizationCommitted;
+	}
+
+	template <class Clock, class Duration>
+	inline bool HasDispatchDeadlineElapsed(
+		const std::chrono::time_point<Clock, Duration>& a_now,
+		const std::chrono::time_point<Clock, Duration>& a_deadline)
+	{
+		return a_now >= a_deadline;
+	}
+
+	inline std::string_view ResolveSequenceTerminalOutcome(
+		SequenceTerminationIntent a_intent,
+		std::uint32_t a_written,
+		bool a_childFailure,
+		bool a_dropped,
+		bool a_warning,
+		bool a_previewUnsupported)
+	{
+		if (a_intent == SequenceTerminationIntent::Cancel)
+			return a_written == 0 ? "cancelled" : "cancelled_partial";
+		if (a_intent == SequenceTerminationIntent::PolicyAbort)
+			return a_written == 0 ? "failed" : "failed_partial";
+		if (a_intent == SequenceTerminationIntent::Stop)
+			return "stopped";
+		if (a_childFailure)
+			return a_written == 0 ? "failed" : "failed_partial";
+		if (a_dropped || a_warning || a_previewUnsupported)
+			return "completed_with_warnings";
+		return "completed";
+	}
 
 	inline BusyDispatchDisposition ResolveBusyDispatch(
 		bool a_sequenceFrame,

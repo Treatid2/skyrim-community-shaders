@@ -1,26 +1,77 @@
 #include "ScreenshotDevBenchBridge.h"
 
+#include "Api/MainThreadDispatchState.h"
 #include "Features/ScreenshotFeature.h"
 #include "Globals.h"
 
 #ifdef DEVBENCH_BRIDGE_ENABLED
-#	include "Api/DevBenchMainThreadDispatch.h"
 #	include <DevBenchAPI.h>
 #	include <nlohmann/json.hpp>
 
 #	include <atomic>
+#	include <chrono>
 #	include <exception>
 #	include <functional>
 
 namespace
 {
 	using json = nlohmann::json;
+	constexpr auto kMainThreadTimeout = std::chrono::milliseconds(5000);
 	std::atomic_bool g_installAttempted{ false };
 	std::atomic_bool g_registered{ false };
 
 	json RunOnMainThread(std::function<json()> a_run)
 	{
-		return CSX::Api::RunDevBenchMainThreadTask(SKSE::GetTaskInterface(), std::move(a_run), CSX::Api::DevBenchDispatchErrorFormat::screenshot);
+		auto* tasks = SKSE::GetTaskInterface();
+		if (!tasks)
+			return { { "ok", false }, { "error", { { "code", "dispatcher_unavailable" }, { "message", "SKSE task interface unavailable" } } } };
+
+		using DispatchState = CSX::Api::MainThreadDispatchState<json>;
+		auto state = std::make_shared<DispatchState>();
+		try {
+			tasks->AddTask([state, run = std::move(a_run)]() mutable {
+				if (!state->TryBegin())
+					return;
+				try {
+					state->Complete(run());
+				} catch (...) {
+					state->Fail(std::current_exception());
+				}
+			});
+		} catch (const std::exception& error) {
+			return { { "ok", false }, { "error", { { "code", "dispatcher_failed" }, { "message", error.what() } } } };
+		} catch (...) {
+			return { { "ok", false }, { "error", { { "code", "dispatcher_failed" }, { "message", "unknown task-queue failure" } } } };
+		}
+
+		const auto deadline = std::chrono::steady_clock::now() + kMainThreadTimeout;
+		auto phase = state->WaitUntil(deadline);
+		if (phase == DispatchState::Phase::queued) {
+			if (state->CancelIfQueued())
+				return { { "ok", false }, { "error", { { "code", "dispatcher_timeout" }, { "message", "main thread did not begin within 5000ms" }, { "retryable", true } } } };
+			// Admission raced the deadline cancellation; observe its now-committed
+			// phase before choosing the response.
+			phase = state->WaitForTerminalUntil(deadline);
+		}
+		if (phase == DispatchState::Phase::running &&
+			state->WaitForTerminalUntil(deadline) == DispatchState::Phase::running) {
+			return {
+				{ "ok", false },
+				{ "error", {
+							   { "code", "dispatcher_admitted" },
+							   { "message", "main-thread execution began but did not complete within 5000ms" },
+							   { "retryable", false },
+							   { "details", { { "executionMayComplete", true } } },
+						   } },
+			};
+		}
+		try {
+			return state->WaitForCompletion();
+		} catch (const std::exception& error) {
+			return { { "ok", false }, { "error", { { "code", "dispatcher_failed" }, { "message", error.what() } } } };
+		} catch (...) {
+			return { { "ok", false }, { "error", { { "code", "dispatcher_failed" }, { "message", "unknown main-thread failure" } } } };
+		}
 	}
 
 	void ToolHandler(void*, const char* a_argsJson, void* a_sink, DevBenchAPI::WriteFn a_write) noexcept
