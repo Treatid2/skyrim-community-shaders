@@ -81,6 +81,24 @@ if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     )
 endif()
 
+# Register the full-install reset before dependencies can emit install actions.
+set(AIO_DIR "${CMAKE_CURRENT_BINARY_DIR}/aio")
+set(AIO_INSTALL_RESET_SCRIPT
+    "${CMAKE_CURRENT_BINARY_DIR}/cmake/ResetAioInstallPrefix.cmake"
+)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ResetAioInstallPrefix.cmake"
+    "${AIO_INSTALL_RESET_SCRIPT}"
+    COPYONLY
+)
+install(
+    CODE
+        "
+    set(CSX_AIO_EXPECTED_PREFIX [==[${AIO_DIR}]==])
+    include([==[${AIO_INSTALL_RESET_SCRIPT}]==])
+"
+)
+
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
 # ########################################################################################################################
@@ -669,9 +687,6 @@ else()
     set(CSX_PACKAGE_STAMP "${UTC_NOW}")
 endif()
 
-# Set AIO directory path used by multiple targets below
-set(AIO_DIR "${CMAKE_CURRENT_BINARY_DIR}/aio")
-
 # Robocopy wrapper for Windows incremental file copy (used by deployment targets).
 # Invoke through cmd /c with the absolute path: CMake may strip binary-dir
 # command paths in generated MSBuild rules, and Windows will not run a script
@@ -693,9 +708,7 @@ endif()
 set(FEATURE_PATHS_SLASH ${FEATURE_PATHS})
 list(TRANSFORM FEATURE_PATHS_SLASH APPEND /)
 
-# Install logic for AIO package
-# To copy AIO package at a folder do `${CMAKE_COMMAND} --install ${CMAKE_BINARY_DIR} --prefix ${AIO_DIR}`
-install(CODE "file(REMOVE_RECURSE \${CMAKE_INSTALL_PREFIX})")
+# Install payload for the isolated AIO staging package.
 install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION SKSE/Plugins COMPONENT SKSE)
 install(
     FILES "${CSX_PROVENANCE_FINAL_MANIFEST}"
@@ -1589,6 +1602,14 @@ if(BUILD_CONTROLLER_TESTS)
             "${PROJECT_SOURCE_DIR}/tests/wetterness_puddle_strength_contract_test.cmake"
     )
     add_test(
+        NAME AioInstallResetPolicy
+        COMMAND
+            "${CMAKE_COMMAND}" "-DRESET_SCRIPT=${AIO_INSTALL_RESET_SCRIPT}"
+            "-DINSTALL_SCRIPT=${CMAKE_BINARY_DIR}/cmake_install.cmake"
+            "-DTEST_ROOT=${CMAKE_BINARY_DIR}/aio-install-reset-policy-test" -P
+            "${PROJECT_SOURCE_DIR}/tests/aio_install_reset_policy_test.cmake"
+    )
+    add_test(
         NAME PerformanceTuningDevBenchContract
         COMMAND
             "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}" -P
@@ -1606,6 +1627,7 @@ if(BUILD_CONTROLLER_TESTS)
         VRMenuUiContract
         FeaturePresetCompatibilityContract
         WetternessPuddleStrengthContract
+        AioInstallResetPolicy
         PROPERTIES LABELS "ControllerTests"
     )
     add_test(
@@ -2248,8 +2270,9 @@ message("  Build cmake targets:")
 message("    - Package-Core: Core package")
 message("    - Package-AIO-Manual: AIO package (manual)")
 message("    - Package-<Feature>: Individual feature packages")
-message("  Or use cmake --install for custom deployment:")
-message("    cmake --install ./build/ALL --prefix <TARGET_DIR>")
+message("  To refresh the isolated AIO staging directory:")
+message("    cmake --install ./build/<preset> --config <Debug|Release>")
+message("  Deploy with an auto-deployment preset or copy build/<preset>/aio.")
 if(BUILD_SHADER_TESTS)
     message("To run shader tests manually:")
     message(
