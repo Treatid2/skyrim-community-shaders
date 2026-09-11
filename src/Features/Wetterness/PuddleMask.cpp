@@ -90,7 +90,8 @@ void Wetterness::SetupResources()
 	puddleMaskSrv = nullptr;
 	auto device = globals::d3d::device;
 	if (!device) {
-		logger::warn("Wetterness puddle mask has no D3D device; using Simple puddles.");
+		logger::warn(
+			"Wetterness puddle mask has no D3D device; Textured/HQ modes fall back to Simple; Legacy Procedural remains active.");
 		return;
 	}
 
@@ -122,9 +123,13 @@ void Wetterness::SetupResources()
 		Util::SetResourceName(puddleMaskSrv.get(), "Wetterness::PuddleMask SRV");
 	} catch (const winrt::hresult_error& error) {
 		puddleMaskSrv = nullptr;
-		logger::warn("Wetterness puddle mask creation failed (HRESULT {}); using Simple puddles.", error.code().value);
+		logger::warn(
+			"Wetterness puddle mask creation failed (HRESULT {}); Textured/HQ modes fall back to Simple; Legacy Procedural remains active.",
+			error.code().value);
 	} catch (const std::exception& error) {
 		puddleMaskSrv = nullptr;
-		logger::warn("Wetterness puddle mask creation failed ({}); using Simple puddles.", error.what());
+		logger::warn(
+			"Wetterness puddle mask creation failed ({}); Textured/HQ modes fall back to Simple; Legacy Procedural remains active.",
+			error.what());
 	}
 }

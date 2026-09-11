@@ -55,3 +55,27 @@ foreach(CONTRACT IN LISTS REQUIRED_FALLBACK_CONTRACTS)
         message(FATAL_ERROR "Missing puddle fallback contract: ${CONTRACT}")
     endif()
 endforeach()
+
+string(REGEX MATCHALL
+    "Textured/HQ modes fall back to Simple"
+    FALLBACK_DIAGNOSTICS
+    "${PUDDLE_MASK_SOURCE}"
+)
+list(LENGTH FALLBACK_DIAGNOSTICS FALLBACK_DIAGNOSTIC_COUNT)
+if(NOT FALLBACK_DIAGNOSTIC_COUNT EQUAL 3)
+    message(FATAL_ERROR
+        "Every puddle texture setup failure must describe Textured/HQ fallback without misreporting Legacy"
+    )
+endif()
+
+string(REGEX MATCHALL
+    "Legacy Procedural remains active"
+    LEGACY_DIAGNOSTICS
+    "${PUDDLE_MASK_SOURCE}"
+)
+list(LENGTH LEGACY_DIAGNOSTICS LEGACY_DIAGNOSTIC_COUNT)
+if(NOT LEGACY_DIAGNOSTIC_COUNT EQUAL 3)
+    message(FATAL_ERROR
+        "Every puddle texture setup failure must preserve the Legacy Procedural diagnostic"
+    )
+endif()

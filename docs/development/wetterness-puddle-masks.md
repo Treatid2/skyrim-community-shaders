@@ -52,11 +52,13 @@ For experimental configurations containing `EnableProceduralPuddleNoise`
 but no `PuddleMaskMode`, false selects Simple and true selects Textured.
 An explicit mode takes precedence.
 
-If allocation or D3D resource creation fails, a warning is logged and the
-effective shader mode falls back to Simple. The selected setting remains
-unchanged and the menu reports the fallback. The remaining wetness effect
-continues to run. Same-frame resource failure and recovery republish only the
-effective mode; they do not replay weather progression or raindrop time.
+If allocation or D3D resource creation fails while Textured or Textured High
+Quality is selected, a warning is logged and the effective shader mode falls
+back to Simple. The selected setting remains unchanged and the menu reports
+the fallback. Simple and Legacy Procedural remain on their own
+texture-independent paths. The remaining wetness effect continues to run.
+Same-frame resource failure and recovery republish only the effective mode;
+they do not replay weather progression or raindrop time.
 
 ## Performance evidence
 
