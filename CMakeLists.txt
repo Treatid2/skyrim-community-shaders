@@ -1596,6 +1596,12 @@ if(BUILD_CONTROLLER_TESTS)
             "${PROJECT_SOURCE_DIR}/tests/feature_preset_compatibility_contract_test.cmake"
     )
     add_test(
+        NAME WetternessPuddleStrengthContract
+        COMMAND
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}" -P
+            "${PROJECT_SOURCE_DIR}/tests/wetterness_puddle_strength_contract_test.cmake"
+    )
+    add_test(
         NAME PerformanceTuningDevBenchContract
         COMMAND
             "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}" -P
@@ -1612,6 +1618,7 @@ if(BUILD_CONTROLLER_TESTS)
         PerformanceTuningDevBenchContract
         VRMenuUiContract
         FeaturePresetCompatibilityContract
+        WetternessPuddleStrengthContract
         PROPERTIES LABELS "ControllerTests"
     )
     add_test(
@@ -1765,6 +1772,11 @@ if(BUILD_CONTROLLER_TESTS)
         cache_invalidation_test
         CacheInvalidation
         tests/cache_invalidation_test.cpp
+    )
+    add_controller_test(
+        wetterness_puddle_mask_cache_policy_test
+        WetternessPuddleMaskCachePolicy
+        tests/wetterness_puddle_mask_cache_policy_test.cpp
     )
     add_controller_test(
         shader_compilation_scheduling_policy_test
@@ -2208,6 +2220,7 @@ if(BUILD_CONTROLLER_TESTS)
             shader_cache_enable_policy_test
             shader_cache_provenance_test
             cache_invalidation_test
+            wetterness_puddle_mask_cache_policy_test
             shader_compilation_scheduling_policy_test
             volumetric_lighting_tuning_policy_test
             vr_depth_culling_cache_refresh_policy_test

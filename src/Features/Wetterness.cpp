@@ -4,6 +4,7 @@
 #include "State.h"
 #include "Utils/UI.h"
 #include "WeatherPicker.h"
+#include "Wetterness/PuddleMaskCachePolicy.h"
 
 #include <algorithm>
 #include <array>
@@ -191,6 +192,7 @@ namespace
 	Wetterness::PerFrame g_cachedCommonBufferData{};
 	bool g_hasCachedCommonBufferData = false;
 	uint32_t g_cachedCommonBufferFrame = 0;
+	std::uint64_t g_cachedCommonBufferPuddleMaskGeneration = 0;
 	REX::W32::XMFLOAT4X4 g_lastValidOcclusionViewProj{};
 	bool g_hasLastValidOcclusionViewProj = false;
 	uint32_t g_lastValidOcclusionViewProjFrame = 0;
@@ -1179,6 +1181,7 @@ void Wetterness::ResetRuntimeState() const
 	g_cachedCommonBufferData = {};
 	g_hasCachedCommonBufferData = false;
 	g_cachedCommonBufferFrame = 0;
+	g_cachedCommonBufferPuddleMaskGeneration = 0;
 	g_lastValidOcclusionViewProj = {};
 	g_hasLastValidOcclusionViewProj = false;
 	g_lastValidOcclusionViewProjFrame = 0;
@@ -2172,7 +2175,16 @@ Wetterness::PerFrame Wetterness::GetCommonBufferData() const
 {
 	const bool canUseFrameCache = globals::state != nullptr;
 	const uint32_t frameIndex = canUseFrameCache ? globals::state->frameCount : 0u;
-	if (canUseFrameCache && g_hasCachedCommonBufferData && g_cachedCommonBufferFrame == frameIndex) {
+	const PuddleMaskCachePolicy::Stamp currentCacheStamp{ frameIndex, puddleMaskResourceGeneration };
+	const PuddleMaskCachePolicy::Stamp cachedCacheStamp{
+		g_cachedCommonBufferFrame,
+		g_cachedCommonBufferPuddleMaskGeneration
+	};
+	if (PuddleMaskCachePolicy::CanReuse(
+			canUseFrameCache,
+			g_hasCachedCommonBufferData,
+			cachedCacheStamp,
+			currentCacheStamp)) {
 		return g_cachedCommonBufferData;
 	}
 
@@ -2185,6 +2197,7 @@ Wetterness::PerFrame Wetterness::GetCommonBufferData() const
 			g_cachedCommonBufferData = data;
 			g_hasCachedCommonBufferData = true;
 			g_cachedCommonBufferFrame = frameIndex;
+			g_cachedCommonBufferPuddleMaskGeneration = puddleMaskResourceGeneration;
 		}
 		return data;
 	}
@@ -2659,6 +2672,7 @@ Wetterness::PerFrame Wetterness::GetCommonBufferData() const
 		g_cachedCommonBufferData = data;
 		g_hasCachedCommonBufferData = true;
 		g_cachedCommonBufferFrame = frameIndex;
+		g_cachedCommonBufferPuddleMaskGeneration = puddleMaskResourceGeneration;
 	}
 
 	return data;

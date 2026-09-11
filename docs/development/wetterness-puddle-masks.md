@@ -14,7 +14,8 @@ not the weather simulation, drying model, wet BRDF, or cubemap schedule.
 Radius and Layout do not affect Simple mode. Textured modes retain these
 controls but produce a different pattern from Legacy. The HQ lookup adds
 variation; it is not an exact reconstruction of the procedural pattern.
-All modes retain the existing wetness, material, slope, and shelter gates.
+All modes retain the existing puddle-strength, wetness, material, slope, and
+shelter gates, including automatic fallback to Simple.
 
 ## Resource and shader contract
 
