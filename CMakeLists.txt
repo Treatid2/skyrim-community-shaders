@@ -1590,6 +1590,12 @@ if(BUILD_CONTROLLER_TESTS)
             "${PROJECT_SOURCE_DIR}/tests/feature_preset_compatibility_contract_test.cmake"
     )
     add_test(
+        NAME WetternessPuddleStrengthContract
+        COMMAND
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}" -P
+            "${PROJECT_SOURCE_DIR}/tests/wetterness_puddle_strength_contract_test.cmake"
+    )
+    add_test(
         NAME PerformanceTuningDevBenchContract
         COMMAND
             "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}" -P
@@ -1606,6 +1612,7 @@ if(BUILD_CONTROLLER_TESTS)
         PerformanceTuningDevBenchContract
         VRMenuUiContract
         FeaturePresetCompatibilityContract
+        WetternessPuddleStrengthContract
         PROPERTIES LABELS "ControllerTests"
     )
     add_test(
@@ -1831,7 +1838,9 @@ if(BUILD_CONTROLLER_TESTS)
         FSRTemporalTuningPolicy
         tests/fsr_temporal_tuning_policy_test.cpp
     )
-    set(_fsr_temporal_test_dir "${CMAKE_CURRENT_BINARY_DIR}/generated/fsr-temporal-tuning")
+    set(_fsr_temporal_test_dir
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/fsr-temporal-tuning"
+    )
     set(_fsr_temporal_headers
         "${_fsr_temporal_test_dir}/temporal_settings_load_under_test.h"
         "${_fsr_temporal_test_dir}/temporal_provider_query_under_test.h"
@@ -1839,21 +1848,37 @@ if(BUILD_CONTROLLER_TESTS)
     )
     add_custom_command(
         OUTPUT ${_fsr_temporal_headers}
-        COMMAND "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}"
+        COMMAND
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}"
             "-DOUTPUT_DIRECTORY=${_fsr_temporal_test_dir}" -P
             "${PROJECT_SOURCE_DIR}/tests/extract_fsr_temporal_tuning.cmake"
-        DEPENDS src/Features/Upscaling.cpp src/Features/Upscaling/FidelityFX.cpp
+        DEPENDS
+            src/Features/Upscaling.cpp
+            src/Features/Upscaling/FidelityFX.cpp
             tests/extract_fsr_temporal_tuning.cmake
         VERBATIM
     )
-    add_custom_target(fsr_temporal_tuning_test_headers DEPENDS ${_fsr_temporal_headers})
+    add_custom_target(
+        fsr_temporal_tuning_test_headers
+        DEPENDS ${_fsr_temporal_headers}
+    )
     add_controller_test(fsr_temporal_tuning_serialization_test FSRTemporalTuningSerialization tests/fsr_temporal_tuning_serialization_test.cpp)
     add_controller_test(fsr_temporal_tuning_provider_test FSRTemporalTuningProvider tests/fsr_temporal_tuning_provider_test.cpp)
-    foreach(_temporal_test fsr_temporal_tuning_serialization_test fsr_temporal_tuning_provider_test)
+    foreach(
+        _temporal_test
+        fsr_temporal_tuning_serialization_test
+        fsr_temporal_tuning_provider_test
+    )
         add_dependencies(${_temporal_test} fsr_temporal_tuning_test_headers)
-        target_include_directories(${_temporal_test} PRIVATE "${_fsr_temporal_test_dir}")
+        target_include_directories(
+            ${_temporal_test}
+            PRIVATE "${_fsr_temporal_test_dir}"
+        )
     endforeach()
-    target_link_libraries(fsr_temporal_tuning_serialization_test PRIVATE nlohmann_json::nlohmann_json)
+    target_link_libraries(
+        fsr_temporal_tuning_serialization_test
+        PRIVATE nlohmann_json::nlohmann_json
+    )
 
     add_controller_test(
         fsr_shared_guides_policy_test
@@ -1993,6 +2018,11 @@ if(BUILD_CONTROLLER_TESTS)
         cache_invalidation_test
         CacheInvalidation
         tests/cache_invalidation_test.cpp
+    )
+    add_controller_test(
+        wetterness_puddle_mask_cache_policy_test
+        WetternessPuddleMaskCachePolicy
+        tests/wetterness_puddle_mask_cache_policy_test.cpp
     )
     add_controller_test(
         shader_compilation_scheduling_policy_test
@@ -2581,6 +2611,7 @@ if(BUILD_CONTROLLER_TESTS)
             shader_cache_provenance_test
             shader_source_provenance_test
             cache_invalidation_test
+            wetterness_puddle_mask_cache_policy_test
             shader_compilation_scheduling_policy_test
             volumetric_lighting_tuning_policy_test
             vr_depth_culling_cache_refresh_policy_test

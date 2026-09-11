@@ -2,6 +2,7 @@
 
 #include "Buffer.h"
 #include <cstddef>
+#include <cstdint>
 
 struct Wetterness : Feature
 {
@@ -327,4 +328,5 @@ private:
 	mutable Settings sanitizedSettingsCache{};
 	mutable bool sanitizedSettingsCacheValid = false;
 	winrt::com_ptr<ID3D11ShaderResourceView> puddleMaskSrv;
+	std::uint64_t puddleMaskResourceGeneration = 0;
 };

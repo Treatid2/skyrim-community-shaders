@@ -14,7 +14,8 @@ not the weather simulation, drying model, wet BRDF, or cubemap schedule.
 Radius and Layout do not affect Simple mode. Textured modes retain these
 controls but produce a different pattern from Legacy. The HQ lookup adds
 variation; it is not an exact reconstruction of the procedural pattern.
-All modes retain the existing wetness, material, slope, and shelter gates.
+All modes retain the existing puddle-strength, wetness, material, slope, and
+shelter gates, including automatic fallback to Simple.
 
 ## Resource and shader contract
 
@@ -54,7 +55,8 @@ An explicit mode takes precedence.
 If allocation or D3D resource creation fails, a warning is logged and the
 effective shader mode falls back to Simple. The selected setting remains
 unchanged and the menu reports the fallback. The remaining wetness effect
-continues to run.
+continues to run. Same-frame resource failure and recovery republish only the
+effective mode; they do not replay weather progression or raindrop time.
 
 ## Performance evidence
 
