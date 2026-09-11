@@ -1,4 +1,5 @@
 #include "../Wetterness.h"
+#include "PuddleMaskCachePolicy.h"
 #include "Utils/D3D.h"
 
 #include <algorithm>
@@ -85,6 +86,7 @@ namespace
 
 void Wetterness::SetupResources()
 {
+	puddleMaskResourceGeneration = PuddleMaskCachePolicy::NextResourceGeneration(puddleMaskResourceGeneration);
 	puddleMaskSrv = nullptr;
 	auto device = globals::d3d::device;
 	if (!device) {

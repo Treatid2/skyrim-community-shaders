@@ -4,6 +4,7 @@ endif()
 
 file(READ "${PROJECT_ROOT}/package/Shaders/Lighting.hlsl" LIGHTING_SOURCE)
 file(READ "${PROJECT_ROOT}/src/Features/Wetterness.cpp" WETTERNESS_SOURCE)
+file(READ "${PROJECT_ROOT}/src/Features/Wetterness/PuddleMask.cpp" PUDDLE_MASK_SOURCE)
 
 set(REQUIRED_LIGHTING_CONTRACTS
     "float puddleStrengthScale ="
@@ -18,6 +19,27 @@ foreach(CONTRACT IN LISTS REQUIRED_LIGHTING_CONTRACTS)
         message(FATAL_ERROR "Missing puddle strength contract: ${CONTRACT}")
     endif()
 endforeach()
+
+set(REQUIRED_CACHE_CONTRACTS
+    "PuddleMaskCachePolicy::CanReuse("
+    "g_cachedCommonBufferPuddleMaskGeneration = puddleMaskResourceGeneration;"
+)
+
+foreach(CONTRACT IN LISTS REQUIRED_CACHE_CONTRACTS)
+    string(FIND "${WETTERNESS_SOURCE}" "${CONTRACT}" CONTRACT_POSITION)
+    if(CONTRACT_POSITION EQUAL -1)
+        message(FATAL_ERROR "Missing puddle cache contract: ${CONTRACT}")
+    endif()
+endforeach()
+
+string(FIND
+    "${PUDDLE_MASK_SOURCE}"
+    "puddleMaskResourceGeneration = PuddleMaskCachePolicy::NextResourceGeneration(puddleMaskResourceGeneration);"
+    GENERATION_ADVANCE_POSITION
+)
+if(GENERATION_ADVANCE_POSITION EQUAL -1)
+    message(FATAL_ERROR "Puddle-mask setup must advance the resource generation")
+endif()
 
 set(REQUIRED_FALLBACK_CONTRACTS
     "effectivePuddleMaskMode == PuddleMaskMode::Textured"
