@@ -124,7 +124,10 @@ private:
 		std::string failurePolicy = "continue";
 		bool stopRequested = false;
 		bool cancelRequested = false;
+		bool abortRequested = false;
+		std::string abortCode;
 		bool finalizing = false;
+		std::string finalTerminalOutcome;
 		bool frameManifest = true;
 		std::string activeChildRequestId;
 		std::size_t nextCheckpointChildCount = 10;
@@ -199,6 +202,8 @@ private:
 	std::size_t sequenceCursor = 0;
 	std::deque<DispatchEntry> manualDispatchQueue;
 	std::deque<DispatchEntry> sequenceDispatchQueue;
+	std::condition_variable_any dispatchDeadlineCondition;
+	uint64_t dispatchQueueRevision = 0;
 	CSX::ScreenshotPolicy::DispatchArbitration dispatchArbitration;
 	json persistedSettings = nullptr;
 	uint64_t completedArtifacts = 0;
@@ -206,6 +211,8 @@ private:
 	bool acceptingRequests = true;
 	std::shared_ptr<ManifestWorkerState> manifestWorkerState;
 	std::thread manifestWorker;
+	// Declared last so destruction stops it before coordinator state is released.
+	std::jthread dispatchDeadlineWatchdog;
 
 	static constexpr uint32_t kContractMajor = 1;
 	static constexpr uint32_t kContractMinor = 0;
@@ -250,6 +257,9 @@ private:
 	void TrimLocked();
 	std::size_t CountPendingOperationsLocked() const;
 	void FinishSequenceChildLocked(RequestRecord& a_child);
+	void FinishSourceTerminalLocked(RequestRecord& a_record, std::string_view a_state, std::string_view a_error);
+	void RequestSequenceAbortLocked(SequenceRecord& a_sequence, std::string_view a_code, std::string_view a_reason);
+	std::string SequenceTerminalOutcomeLocked(const SequenceRecord& a_sequence) const;
 	void TryFinalizeSequenceLocked(SequenceRecord& a_sequence);
 	void FinalizeSequenceLocked(SequenceRecord& a_sequence, const ManifestResult* a_manifestResult);
 	void QueueSequenceManifestLocked(SequenceRecord& a_sequence, bool a_final);
@@ -259,6 +269,8 @@ private:
 	std::optional<DispatchEntry> PopDispatchLocked();
 	void RequeueDispatchLocked(DispatchEntry a_entry, bool a_manual);
 	bool RemoveQueuedDispatchLocked(std::string_view a_requestId);
+	void SignalDispatchQueueChangedLocked();
+	void DispatchDeadlineLoop(std::stop_token a_stopToken);
 	void MarkSequenceCancellationLocked(SequenceRecord& a_sequence);
 	void CancelQueuedDispatchesLocked(std::string_view a_code, std::string_view a_reason);
 

@@ -232,10 +232,16 @@ ScreenshotApi::ScreenshotApi() :
 		});
 		return metadata;
 	});
+	dispatchDeadlineWatchdog = std::jthread(
+		[this](std::stop_token token) { DispatchDeadlineLoop(token); });
 }
 
 ScreenshotApi::~ScreenshotApi()
 {
+	dispatchDeadlineWatchdog.request_stop();
+	dispatchDeadlineCondition.notify_all();
+	if (dispatchDeadlineWatchdog.joinable())
+		dispatchDeadlineWatchdog.join();
 	const auto state = manifestWorkerState;
 	if (!state)
 		return;
@@ -431,6 +437,7 @@ ScreenshotApi::json ScreenshotApi::HandleValidatedRequest(ScreenshotFeature& a_f
 				.capture = descriptor,
 				.expiresAt = std::chrono::steady_clock::now() + std::chrono::seconds(10),
 			});
+			SignalDispatchQueueChangedLocked();
 		}
 		auto response = MakeEnvelope(a_request, true);
 		{
@@ -519,7 +526,8 @@ ScreenshotApi::json ScreenshotApi::HandleValidatedRequest(ScreenshotFeature& a_f
 			sequence.requestId = requestId;
 			sequence.nextEngineFrame = (globals::state ? globals::state->frameCount : 0u) + sequence.startDelayFrames;
 			sequence.nextWallClock = std::chrono::steady_clock::now() + std::chrono::milliseconds(startDelayMs);
-			sequence.directory = ResolveDestinationDirectory(a_feature, descriptor, true) /
+			sequence.directory = std::filesystem::u8path(
+									 descriptor["destination"]["resolvedDirectory"].get<std::string>()) /
 			                     ("CS_sequence_" + ShortId(requestId));
 			sequence.partialManifestPath = sequence.directory / "sequence.json.partial";
 			sequence.finalManifestPath = sequence.directory / "sequence.json";
@@ -540,6 +548,8 @@ ScreenshotApi::json ScreenshotApi::HandleValidatedRequest(ScreenshotFeature& a_f
 		const auto requestId = a_request.value("requestId", std::string{});
 		std::string childToCancel;
 		bool queuedCancellation = false;
+		bool commandAccepted = true;
+		bool finalizationCommitted = false;
 		{
 			std::lock_guard lock(mutex);
 			auto found = requests.find(requestId);
@@ -552,7 +562,10 @@ ScreenshotApi::json ScreenshotApi::HandleValidatedRequest(ScreenshotFeature& a_f
 				return response;
 			}
 			if (auto sequence = sequences.find(requestId); sequence != sequences.end()) {
-				if (action == "sequence_stop") {
+				if (!CSX::ScreenshotPolicy::CanAcceptSequenceCommand(sequence->second.finalizing)) {
+					commandAccepted = false;
+					finalizationCommitted = true;
+				} else if (action == "sequence_stop") {
 					sequence->second.stopRequested = true;
 					TransitionLocked(found->second, "stop_requested", "sequence.stop_requested");
 				} else {
@@ -561,7 +574,8 @@ ScreenshotApi::json ScreenshotApi::HandleValidatedRequest(ScreenshotFeature& a_f
 					queuedCancellation = RemoveQueuedDispatchLocked(childToCancel);
 					TransitionLocked(found->second, "cancel_requested", "request.cancel_requested");
 				}
-				TryFinalizeSequenceLocked(sequence->second);
+				if (commandAccepted)
+					TryFinalizeSequenceLocked(sequence->second);
 			} else {
 				found->second.cancelRequested = true;
 				childToCancel = requestId;
@@ -575,6 +589,9 @@ ScreenshotApi::json ScreenshotApi::HandleValidatedRequest(ScreenshotFeature& a_f
 		{
 			std::lock_guard lock(mutex);
 			response["result"] = LookupReceiptLocked(requestId);
+			response["result"]["commandAccepted"] = commandAccepted;
+			if (finalizationCommitted)
+				response["result"]["finalizationCommitted"] = true;
 		}
 		return response;
 	}
@@ -964,6 +981,7 @@ ScreenshotApi::json ScreenshotApi::BuildCapabilities(const ScreenshotFeature&) c
 					  } },
 		{ "limits", {
 						{ "activeSourceCaptures", 1 },
+						{ "outstandingArtifacts", 2 },
 						{ "outstandingCaptureJobs", 2 },
 						{ "maximumOutputsPerCaptureJob", CSX::ScreenshotPolicy::MaximumOutputsPerFrame },
 						{ "pendingOperations", CSX::ScreenshotPolicy::MaximumPendingOperations },
@@ -1017,7 +1035,7 @@ ScreenshotApi::json ScreenshotApi::BuildStatus(const ScreenshotFeature& a_featur
 							{ "queuedSequenceFrames", sequenceDispatchQueue.size() },
 							{ "activeSequences", activeSequences },
 						} },
-		{ "worker", { { "outstandingCaptureJobs", outstandingCaptureJobs }, { "captureJobCapacity", 2 }, { "completedArtifacts", completedArtifacts }, { "failedArtifacts", failedArtifacts } } },
+		{ "worker", { { "outstandingArtifacts", outstandingCaptureJobs }, { "capacity", 2 }, { "outstandingCaptureJobs", outstandingCaptureJobs }, { "captureJobCapacity", 2 }, { "completedArtifacts", completedArtifacts }, { "failedArtifacts", failedArtifacts } } },
 		{ "journal", std::move(journal) },
 		{ "lastTerminalRequest", std::move(last) },
 	};
@@ -1028,7 +1046,7 @@ bool ScreenshotApi::IsSequenceRecording() const
 	std::lock_guard lock(mutex);
 	return std::any_of(sequences.begin(), sequences.end(), [](const auto& entry) {
 		const auto& sequence = entry.second;
-		return !sequence.finalizing && !sequence.stopRequested && !sequence.cancelRequested &&
+		return !sequence.finalizing && !sequence.stopRequested && !sequence.cancelRequested && !sequence.abortRequested &&
 		       sequence.nextOrdinal <= sequence.frameCount;
 	});
 }
@@ -1135,6 +1153,14 @@ ScreenshotApi::json ScreenshotApi::MakeSequenceReceipt(const RequestRecord& a_re
 						   json(nullptr) },
 	};
 	receipt["packaging"] = a_sequence->packaging;
+	receipt["termination"] = {
+		{ "stopRequested", a_sequence->stopRequested },
+		{ "cancelRequested", a_sequence->cancelRequested },
+		{ "policyAbortRequested", a_sequence->abortRequested },
+		{ "policyAbortCode", a_sequence->abortCode.empty() ? json(nullptr) : json(a_sequence->abortCode) },
+		{ "finalizationCommitted", a_sequence->finalizing },
+		{ "committedOutcome", a_sequence->finalTerminalOutcome.empty() ? json(nullptr) : json(a_sequence->finalTerminalOutcome) },
+	};
 	return receipt;
 }
 
@@ -1339,16 +1365,21 @@ void ScreenshotApi::OnSourceTerminal(std::string_view a_requestId, std::string_v
 	const auto found = requests.find(std::string(a_requestId));
 	if (found == requests.end() || IsTerminal(found->second.state))
 		return;
-	found->second.error = a_error.empty() ? json(nullptr) : json({ { "code", a_error }, { "message", a_error }, { "phase", "source" } });
-	if (!found->second.error.is_null())
-		found->second.errors.push_back(found->second.error);
+	FinishSourceTerminalLocked(found->second, a_state, a_error);
+}
+
+void ScreenshotApi::FinishSourceTerminalLocked(RequestRecord& a_record, std::string_view a_state, std::string_view a_error)
+{
+	a_record.error = a_error.empty() ? json(nullptr) : json({ { "code", a_error }, { "message", a_error }, { "phase", "source" } });
+	if (!a_record.error.is_null())
+		a_record.errors.push_back(a_record.error);
 	if (a_error == "source_timeout")
-		AppendEventLocked(found->second, "source.timeout", { { "reason", a_error } });
-	if (found->second.kind == "sequence_frame" &&
+		AppendEventLocked(a_record, "source.timeout", { { "reason", a_error } });
+	if (a_record.kind == "sequence_frame" &&
 		(a_state == "dropped" || a_error == "source_busy" || a_error == "encoder_backpressure"))
-		AppendEventLocked(found->second, "sequence.frame_dropped", { { "reason", a_error } });
-	TransitionLocked(found->second, std::string(a_state), "request.terminal", { { "reason", a_error } });
-	FinishSequenceChildLocked(found->second);
+		AppendEventLocked(a_record, "sequence.frame_dropped", { { "reason", a_error } });
+	TransitionLocked(a_record, std::string(a_state), "request.terminal", { { "reason", a_error } });
+	FinishSequenceChildLocked(a_record);
 }
 
 void ScreenshotApi::FinishSequenceChildLocked(RequestRecord& a_child)
@@ -1406,10 +1437,13 @@ void ScreenshotApi::FinishSequenceChildLocked(RequestRecord& a_child)
 	});
 	++sequence.childCount;
 	const bool childSucceeded = a_child.state == "completed" || a_child.state == "completed_with_warnings";
-	if ((sequence.failurePolicy == "abort" && !childSucceeded) ||
-		(sequence.backpressurePolicy == "abort" && sequence.dropped != 0) ||
-		(sequence.maximumConsecutiveSkips != 0 && sequence.consecutiveSkips >= sequence.maximumConsecutiveSkips)) {
-		sequence.stopRequested = true;
+	if (!sequence.cancelRequested && !sequence.stopRequested) {
+		if (sequence.backpressurePolicy == "abort" && sequence.dropped != 0)
+			RequestSequenceAbortLocked(sequence, "backpressure_abort", "a frame was dropped under abort backpressure policy");
+		else if (sequence.maximumConsecutiveSkips != 0 && sequence.consecutiveSkips >= sequence.maximumConsecutiveSkips)
+			RequestSequenceAbortLocked(sequence, "consecutive_skip_limit", "the maximum consecutive frame-skip limit was reached");
+		else if (sequence.failurePolicy == "abort" && !childSucceeded)
+			RequestSequenceAbortLocked(sequence, "failure_policy_abort", "a frame did not complete successfully");
 	}
 	if (sequence.childCount >= sequence.nextCheckpointChildCount) {
 		QueueSequenceManifestLocked(sequence, false);
@@ -1420,17 +1454,52 @@ void ScreenshotApi::FinishSequenceChildLocked(RequestRecord& a_child)
 	TryFinalizeSequenceLocked(sequence);
 }
 
+void ScreenshotApi::RequestSequenceAbortLocked(SequenceRecord& a_sequence, std::string_view a_code, std::string_view a_reason)
+{
+	if (a_sequence.abortRequested)
+		return;
+	a_sequence.abortRequested = true;
+	a_sequence.abortCode = std::string(a_code);
+	if (auto parent = requests.find(a_sequence.requestId); parent != requests.end()) {
+		const json error = {
+			{ "code", a_code },
+			{ "message", a_reason },
+			{ "phase", "sequence_policy" },
+		};
+		parent->second.error = error;
+		parent->second.errors.push_back(error);
+		AppendEventLocked(parent->second, "sequence.abort_requested", error);
+	}
+}
+
+std::string ScreenshotApi::SequenceTerminalOutcomeLocked(const SequenceRecord& a_sequence) const
+{
+	const auto parent = requests.find(a_sequence.requestId);
+	const auto intent = a_sequence.cancelRequested ? CSX::ScreenshotPolicy::SequenceTerminationIntent::Cancel :
+	                    a_sequence.abortRequested  ? CSX::ScreenshotPolicy::SequenceTerminationIntent::PolicyAbort :
+	                    a_sequence.stopRequested   ? CSX::ScreenshotPolicy::SequenceTerminationIntent::Stop :
+	                                                 CSX::ScreenshotPolicy::SequenceTerminationIntent::Natural;
+	return std::string(CSX::ScreenshotPolicy::ResolveSequenceTerminalOutcome(
+		intent,
+		a_sequence.written,
+		a_sequence.failed != 0,
+		a_sequence.dropped != 0,
+		parent != requests.end() && !parent->second.warnings.empty(),
+		a_sequence.packaging["previewVideo"].value("state", std::string{}) == "unsupported"));
+}
+
 void ScreenshotApi::TryFinalizeSequenceLocked(SequenceRecord& a_sequence)
 {
 	const bool schedulingComplete = a_sequence.nextOrdinal > a_sequence.frameCount;
-	if (!(schedulingComplete || a_sequence.stopRequested || a_sequence.cancelRequested) || a_sequence.inFlight != 0)
+	if (!(schedulingComplete || a_sequence.stopRequested || a_sequence.cancelRequested || a_sequence.abortRequested) || a_sequence.inFlight != 0)
 		return;
 	if (a_sequence.finalizing)
 		return;
-	a_sequence.finalizing = true;
 	const auto parent = requests.find(a_sequence.requestId);
 	if (parent == requests.end())
 		return;
+	a_sequence.finalizing = true;
+	a_sequence.finalTerminalOutcome = SequenceTerminalOutcomeLocked(a_sequence);
 	TransitionLocked(parent->second, "finalizing", "sequence.finalizing");
 	if (a_sequence.frameManifest)
 		QueueSequenceManifestLocked(a_sequence, true);
@@ -1465,20 +1534,8 @@ void ScreenshotApi::FinalizeSequenceLocked(
 			parent->second.errors.push_back(parent->second.error);
 		}
 	}
-	std::string terminal;
-	if (!manifestWritten)
-		terminal = a_sequence.written == 0 ? "failed" : "failed_partial";
-	else if (a_sequence.cancelRequested)
-		terminal = a_sequence.written == 0 ? "cancelled" : "cancelled_partial";
-	else if (a_sequence.stopRequested)
-		terminal = "stopped";
-	else if (a_sequence.failed != 0)
-		terminal = a_sequence.written == 0 ? "failed" : "failed_partial";
-	else if (a_sequence.dropped != 0 || !parent->second.warnings.empty() ||
-			 a_sequence.packaging["previewVideo"].value("state", std::string{}) == "unsupported")
-		terminal = "completed_with_warnings";
-	else
-		terminal = "completed";
+	const auto terminal = manifestWritten ? a_sequence.finalTerminalOutcome :
+	                                        (a_sequence.written == 0 ? "failed" : "failed_partial");
 	TransitionLocked(parent->second, terminal, "request.terminal", { { "manifestPath", a_sequence.frameManifest && manifestWritten ? json(PathUtf8(a_sequence.finalManifestPath)) : json(nullptr) } });
 }
 
@@ -1495,19 +1552,7 @@ void ScreenshotApi::QueueSequenceManifestLocked(SequenceRecord& a_sequence, bool
 		};
 		const auto parent = requests.find(a_sequence.requestId);
 		const auto updatedUtc = CSX::Api::ServiceFoundation::TimestampUtc();
-		std::string terminalOutcome;
-		if (a_sequence.cancelRequested)
-			terminalOutcome = a_sequence.written == 0 ? "cancelled" : "cancelled_partial";
-		else if (a_sequence.stopRequested)
-			terminalOutcome = "stopped";
-		else if (a_sequence.failed != 0)
-			terminalOutcome = a_sequence.written == 0 ? "failed" : "failed_partial";
-		else if (a_sequence.dropped != 0 ||
-				 (parent != requests.end() && !parent->second.warnings.empty()) ||
-				 a_sequence.packaging["previewVideo"].value("state", std::string{}) == "unsupported")
-			terminalOutcome = "completed_with_warnings";
-		else
-			terminalOutcome = "completed";
+		const auto terminalOutcome = a_final ? a_sequence.finalTerminalOutcome : std::string{};
 		const bool fallbacksPresent = a_sequence.manifestChildren &&
 		                              a_sequence.manifestChildren->fallbacksPresent;
 		ManifestJob job{
@@ -1652,7 +1697,7 @@ std::optional<ScreenshotApi::DueFrame> ScreenshotApi::PrepareDueFrameLocked(uint
 		if (found == sequences.end())
 			continue;
 		auto& sequence = found->second;
-		if (sequence.finalizing || sequence.stopRequested || sequence.cancelRequested || sequence.inFlight != 0 || sequence.nextOrdinal > sequence.frameCount)
+		if (sequence.finalizing || sequence.stopRequested || sequence.cancelRequested || sequence.abortRequested || sequence.inFlight != 0 || sequence.nextOrdinal > sequence.frameCount)
 			continue;
 		const bool due = sequence.scheduleBasis == "game_frames" ? a_engineFrame >= sequence.nextEngineFrame : now >= sequence.nextWallClock;
 		if (!due)
@@ -1667,6 +1712,7 @@ std::optional<ScreenshotApi::DueFrame> ScreenshotApi::PrepareDueFrameLocked(uint
 		dueFrame.capture["destination"] = {
 			{ "policy", "absolute" },
 			{ "directory", PathUtf8(sequence.directory) },
+			{ "resolvedDirectory", PathUtf8(sequence.directory) },
 			{ "baseName", std::format("frame_{:06}", dueFrame.ordinal) },
 			{ "overwrite", "never" },
 		};
@@ -1714,16 +1760,23 @@ std::optional<ScreenshotApi::DispatchEntry> ScreenshotApi::PopDispatchLocked()
 	const auto selected = dispatchArbitration.Select(
 		!manualDispatchQueue.empty(),
 		!sequenceDispatchQueue.empty());
-	if (selected == CSX::ScreenshotPolicy::DispatchClass::Manual)
-		return popFront(manualDispatchQueue);
-	if (selected == CSX::ScreenshotPolicy::DispatchClass::Sequence)
-		return popFront(sequenceDispatchQueue);
+	if (selected == CSX::ScreenshotPolicy::DispatchClass::Manual) {
+		auto entry = popFront(manualDispatchQueue);
+		SignalDispatchQueueChangedLocked();
+		return entry;
+	}
+	if (selected == CSX::ScreenshotPolicy::DispatchClass::Sequence) {
+		auto entry = popFront(sequenceDispatchQueue);
+		SignalDispatchQueueChangedLocked();
+		return entry;
+	}
 	return std::nullopt;
 }
 
 void ScreenshotApi::RequeueDispatchLocked(DispatchEntry a_entry, bool a_manual)
 {
 	(a_manual ? manualDispatchQueue : sequenceDispatchQueue).push_front(std::move(a_entry));
+	SignalDispatchQueueChangedLocked();
 }
 
 bool ScreenshotApi::RemoveQueuedDispatchLocked(std::string_view a_requestId)
@@ -1735,7 +1788,58 @@ bool ScreenshotApi::RemoveQueuedDispatchLocked(std::string_view a_requestId)
 		});
 		return queue.size() != original;
 	};
-	return remove(manualDispatchQueue) || remove(sequenceDispatchQueue);
+	const bool removed = remove(manualDispatchQueue) || remove(sequenceDispatchQueue);
+	if (removed)
+		SignalDispatchQueueChangedLocked();
+	return removed;
+}
+
+void ScreenshotApi::SignalDispatchQueueChangedLocked()
+{
+	++dispatchQueueRevision;
+	dispatchDeadlineCondition.notify_all();
+}
+
+void ScreenshotApi::DispatchDeadlineLoop(std::stop_token a_stopToken)
+{
+	std::unique_lock lock(mutex);
+	while (!a_stopToken.stop_requested()) {
+		auto nextExpiry = std::chrono::steady_clock::time_point::max();
+		for (const auto& entry : manualDispatchQueue)
+			nextExpiry = std::min(nextExpiry, entry.expiresAt);
+		for (const auto& entry : sequenceDispatchQueue)
+			nextExpiry = std::min(nextExpiry, entry.expiresAt);
+
+		const auto revision = dispatchQueueRevision;
+		if (nextExpiry == std::chrono::steady_clock::time_point::max()) {
+			dispatchDeadlineCondition.wait(lock, a_stopToken, [this, revision] {
+				return dispatchQueueRevision != revision;
+			});
+		} else {
+			dispatchDeadlineCondition.wait_until(lock, a_stopToken, nextExpiry, [this, revision] {
+				return dispatchQueueRevision != revision;
+			});
+		}
+		if (a_stopToken.stop_requested())
+			break;
+
+		const auto now = std::chrono::steady_clock::now();
+		auto expire = [this, now](std::deque<DispatchEntry>& queue) {
+			for (auto entry = queue.begin(); entry != queue.end();) {
+				if (!CSX::ScreenshotPolicy::HasDispatchDeadlineElapsed(now, entry->expiresAt)) {
+					++entry;
+					continue;
+				}
+				const auto request = requests.find(entry->requestId);
+				entry = queue.erase(entry);
+				if (request != requests.end() && !IsTerminal(request->second.state))
+					FinishSourceTerminalLocked(request->second, "failed", "source_timeout");
+			}
+		};
+		expire(manualDispatchQueue);
+		expire(sequenceDispatchQueue);
+		SignalDispatchQueueChangedLocked();
+	}
 }
 
 void ScreenshotApi::MarkSequenceCancellationLocked(SequenceRecord& a_sequence)
@@ -1754,6 +1858,7 @@ void ScreenshotApi::CancelQueuedDispatchesLocked(std::string_view a_code, std::s
 		std::make_move_iterator(sequenceDispatchQueue.begin()),
 		std::make_move_iterator(sequenceDispatchQueue.end()));
 	sequenceDispatchQueue.clear();
+	SignalDispatchQueueChangedLocked();
 	for (const auto& entry : queued) {
 		const auto found = requests.find(entry.requestId);
 		if (found == requests.end() || IsTerminal(found->second.state))
@@ -1794,6 +1899,7 @@ void ScreenshotApi::Tick(ScreenshotFeature& a_feature, uint64_t a_engineFrame)
 					.capture = std::move(due->capture),
 					.expiresAt = std::chrono::steady_clock::now() + std::chrono::seconds(10),
 				});
+				SignalDispatchQueueChangedLocked();
 			}
 			dispatch = PopDispatchLocked();
 		}
@@ -1812,7 +1918,8 @@ void ScreenshotApi::Tick(ScreenshotFeature& a_feature, uint64_t a_engineFrame)
 			return;
 		}
 		cancelled = found->second.cancelRequested || !acceptingRequests || !a_feature.IsRuntimeEnabled();
-		expired = std::chrono::steady_clock::now() >= dispatch->expiresAt;
+		expired = CSX::ScreenshotPolicy::HasDispatchDeadlineElapsed(
+			std::chrono::steady_clock::now(), dispatch->expiresAt);
 		if (cancelled || expired)
 			dispatchArbitration.FinishAttempt(dispatchClass, false);
 	}
@@ -1872,7 +1979,8 @@ void ScreenshotApi::Tick(ScreenshotFeature& a_feature, uint64_t a_engineFrame)
 		if (retryable && CSX::ScreenshotPolicy::ResolveBusyDispatch(
 							 dispatch->sequenceFrame,
 							 cancelled,
-							 std::chrono::steady_clock::now() >= dispatch->expiresAt) == CSX::ScreenshotPolicy::BusyDispatchDisposition::Retry) {
+							 CSX::ScreenshotPolicy::HasDispatchDeadlineElapsed(
+								 std::chrono::steady_clock::now(), dispatch->expiresAt)) == CSX::ScreenshotPolicy::BusyDispatchDisposition::Retry) {
 			const bool manual = !dispatch->sequenceFrame;
 			RequeueDispatchLocked(std::move(*dispatch), manual);
 			dispatchArbitration.FinishAttempt(dispatchClass, true);
