@@ -39828,17 +39828,17 @@ bool Upscaling::DispatchFoveatedSpatialComposite(ID3D11ShaderResourceView* perip
 	return true;
 }
 
-bool Upscaling::DispatchVendorEyeRegion(UpscaleMethod a_upscaleMethod, const Upscaling::VendorEyeDispatchParams& params)
+FidelityFX::UpscaleResult Upscaling::DispatchVendorEyeRegion(UpscaleMethod a_upscaleMethod, const Upscaling::VendorEyeDispatchParams& params)
 {
 	if (a_upscaleMethod == UpscaleMethod::kDLSS)
 		streamline.ClearLastDLSSFailureState();
 
 	if (!IsVendorUpscalingMethod(a_upscaleMethod) || params.eyeIndex >= 2)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	if (!params.inputWidth || !params.inputHeight || !params.outputWidth || !params.outputHeight)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	if (!params.colorIn || !params.depth || !params.motionVectors || !params.reactiveMask || !params.transparencyMask || !params.colorOut)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	const auto validateTexture = [&](ID3D11Resource* resource, const char* resourceName, uint32_t requiredWidth, uint32_t requiredHeight) {
 		D3D11_TEXTURE2D_DESC desc{};
@@ -39877,7 +39877,7 @@ bool Upscaling::DispatchVendorEyeRegion(UpscaleMethod a_upscaleMethod, const Ups
 			!validateTexture(params.reactiveMask, "reactive mask input", params.inputWidth, params.inputHeight) ||
 			!validateTexture(params.transparencyMask, "transparency mask input", params.inputWidth, params.inputHeight) ||
 			!validateTexture(params.colorOut, "color output", params.outputWidth, params.outputHeight)) {
-			return false;
+			return FidelityFX::UpscaleResult::Failed;
 		}
 	}
 
@@ -39909,7 +39909,7 @@ bool Upscaling::DispatchVendorEyeRegion(UpscaleMethod a_upscaleMethod, const Ups
 			params.authoritativeDLSSPreset);
 		if (params.dlssViewportRole == Streamline::DLSSViewportRole::FullEye)
 			RecordVRRenderScaleFullEyeEvaluation(a_upscaleMethod, params.eyeIndex, evaluated);
-		return evaluated;
+		return evaluated ? FidelityFX::UpscaleResult::Ready : FidelityFX::UpscaleResult::Failed;
 	}
 
 	if (a_upscaleMethod == UpscaleMethod::kFSR) {
@@ -39919,7 +39919,7 @@ bool Upscaling::DispatchVendorEyeRegion(UpscaleMethod a_upscaleMethod, const Ups
 		const float motionVectorScaleY = std::isfinite(params.motionVectorScaleY) && params.motionVectorScaleY > 0.0f ?
 		                                     params.motionVectorScaleY :
 		                                     static_cast<float>(params.inputHeight);
-		const bool evaluated = fidelityFX.UpscaleRegion(
+		const auto dispatchResult = fidelityFX.UpscaleRegion(
 			params.eyeIndex,
 			params.colorIn,
 			params.depth,
@@ -39934,32 +39934,35 @@ bool Upscaling::DispatchVendorEyeRegion(UpscaleMethod a_upscaleMethod, const Ups
 			motionVectorScaleX,
 			motionVectorScaleY,
 			settings.sharpnessFSR);
-		if (!evaluated) {
+		if (dispatchResult == FidelityFX::UpscaleResult::Failed) {
 			HandleFSRLifecycleDeviceLoss(
 				fidelityFX.ProbeFSRDeviceStatus(),
 				"FSR region dispatch");
 		}
-		if (params.dlssViewportRole == Streamline::DLSSViewportRole::FullEye)
-			RecordVRRenderScaleFullEyeEvaluation(a_upscaleMethod, params.eyeIndex, evaluated);
-		return evaluated;
+		if (params.dlssViewportRole == Streamline::DLSSViewportRole::FullEye &&
+			dispatchResult != FidelityFX::UpscaleResult::Deferred) {
+			RecordVRRenderScaleFullEyeEvaluation(
+				a_upscaleMethod, params.eyeIndex, dispatchResult == FidelityFX::UpscaleResult::Ready);
+		}
+		return dispatchResult;
 	}
 
-	return false;
+	return FidelityFX::UpscaleResult::Failed;
 }
 
-bool Upscaling::DispatchSingleFoveatedVendorEye(UpscaleMethod a_upscaleMethod, uint32_t eyeIndex, ID3D11Resource* colorIn, ID3D11Resource* depthIn, ID3D11Resource* motionVectorsIn, ID3D11Resource* reactiveMaskIn, ID3D11Resource* transparencyMaskIn, uint32_t outputWidthPerEye, uint32_t outputHeight, uint32_t inputWidthPerEye, uint32_t inputHeight, float centerScale, float centerHorizontalScale, const float2& centerOffset, float centerFeather, uint32_t colorInputBaseOffsetX, uint32_t depthInputBaseOffsetX, uint32_t auxInputBaseOffsetX, ID3D11UnorderedAccessView* outputUAV, Streamline::DLSSViewportRole dlssViewportRole, UINT submitSourceSubresource, const D3D11_BOX* submitSourceBox, bool compositeCenter)
+FidelityFX::UpscaleResult Upscaling::DispatchSingleFoveatedVendorEye(UpscaleMethod a_upscaleMethod, uint32_t eyeIndex, ID3D11Resource* colorIn, ID3D11Resource* depthIn, ID3D11Resource* motionVectorsIn, ID3D11Resource* reactiveMaskIn, ID3D11Resource* transparencyMaskIn, uint32_t outputWidthPerEye, uint32_t outputHeight, uint32_t inputWidthPerEye, uint32_t inputHeight, float centerScale, float centerHorizontalScale, const float2& centerOffset, float centerFeather, uint32_t colorInputBaseOffsetX, uint32_t depthInputBaseOffsetX, uint32_t auxInputBaseOffsetX, ID3D11UnorderedAccessView* outputUAV, Streamline::DLSSViewportRole dlssViewportRole, UINT submitSourceSubresource, const D3D11_BOX* submitSourceBox, bool compositeCenter)
 {
 	if (!SupportsFoveatedVendorDispatch(a_upscaleMethod))
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	const bool useFSR = a_upscaleMethod == UpscaleMethod::kFSR;
 
 	if (eyeIndex > 1)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	const auto& rect = foveatedRectCache.rects[eyeIndex];
 	if (!rect.outputWidth || !rect.outputHeight || !rect.inputWidth || !rect.inputHeight)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	const std::string suffix = eyeIndex == 0 ? "Left" : "Right";
 	const bool createFsrViews = useFSR;
@@ -39967,28 +39970,28 @@ bool Upscaling::DispatchSingleFoveatedVendorEye(UpscaleMethod a_upscaleMethod, u
 	const uint32_t centerInputAllocationHeight = useFSR ? std::max(rect.inputHeight, outputHeight) : rect.inputHeight;
 
 	if (!EnsureFoveatedTexture(foveatedCenterColorIn[eyeIndex], colorIn, centerInputAllocationWidth, centerInputAllocationHeight, false, createFsrViews, false, false, ("Upscale_FoveatedCenter_ColorIn_" + suffix).c_str()))
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	if (!EnsureFoveatedTexture(foveatedCenterColorOut[eyeIndex], colorIn, rect.outputWidth, rect.outputHeight, false, true, createFsrViews, false, ("Upscale_FoveatedCenter_ColorOut_" + suffix).c_str()))
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	if (!EnsureFoveatedTexture(foveatedCenterDepth[eyeIndex], depthIn, centerInputAllocationWidth, centerInputAllocationHeight, true, createFsrViews, false, false, ("Upscale_FoveatedCenter_Depth_" + suffix).c_str()))
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	if (!EnsureFoveatedTexture(foveatedCenterMotionVectors[eyeIndex], motionVectorsIn, centerInputAllocationWidth, centerInputAllocationHeight, false, createFsrViews, false, false, ("Upscale_FoveatedCenter_MVec_" + suffix).c_str()))
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	if (!EnsureFoveatedTexture(foveatedCenterReactiveMask[eyeIndex], reactiveMaskIn, centerInputAllocationWidth, centerInputAllocationHeight, false, createFsrViews, false, false, ("Upscale_FoveatedCenter_Reactive_" + suffix).c_str()))
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	if (!EnsureFoveatedTexture(foveatedCenterTransparencyMask[eyeIndex], transparencyMaskIn, centerInputAllocationWidth, centerInputAllocationHeight, false, createFsrViews, false, false, ("Upscale_FoveatedCenter_Transparency_" + suffix).c_str()))
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	auto context = globals::d3d::context;
 	if (!context)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	const auto& plan = foveatedRectCache.plan;
 	if (!plan.IsValid())
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	const auto& eyePlan = plan.eyes[eyeIndex];
 	if (!eyePlan.IsValid())
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	const float2 pinholeOffset = eyePlan.pinholeOffset;
 
 	VendorEyeDispatchParams vendorParams{};
@@ -40128,19 +40131,20 @@ bool Upscaling::DispatchSingleFoveatedVendorEye(UpscaleMethod a_upscaleMethod, u
 		context->CopySubresourceRegion(foveatedCenterReactiveMask[eyeIndex]->resource.get(), 0, 0, 0, 0, reactiveMaskIn, 0, &auxSrcBox);
 		context->CopySubresourceRegion(foveatedCenterTransparencyMask[eyeIndex]->resource.get(), 0, 0, 0, 0, transparencyMaskIn, 0, &auxSrcBox);
 
-		if (!DispatchVendorEyeRegion(a_upscaleMethod, vendorParams))
-			return false;
+		const auto dispatchResult = DispatchVendorEyeRegion(a_upscaleMethod, vendorParams);
+		if (dispatchResult != FidelityFX::UpscaleResult::Ready)
+			return dispatchResult;
 
 		if (trackSubmitStageDLSSCenter)
 			centerState = centerKey;
 	}
 
 	if (!foveatedCenterColorOut[eyeIndex] || !foveatedCenterColorOut[eyeIndex]->resource || !foveatedCenterColorOut[eyeIndex]->srv)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	if (!compositeCenter)
-		return true;
+		return FidelityFX::UpscaleResult::Ready;
 	if (!vrIntermediateColorOut[eyeIndex] || !vrIntermediateColorOut[eyeIndex]->uav || !vrIntermediateColorOut[eyeIndex]->resource)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	const uint32_t rectMinX = rect.outputOffsetX;
 	const uint32_t rectMinY = rect.outputOffsetY;
@@ -40168,7 +40172,7 @@ bool Upscaling::DispatchSingleFoveatedVendorEye(UpscaleMethod a_upscaleMethod, u
 		centerHorizontalScale,
 		centerOffset,
 		centerBlendFeather);
-	return true;
+	return FidelityFX::UpscaleResult::Ready;
 }
 
 void Upscaling::ConfigureFoveatedPeripherySourceRegion(FoveatedEyeDispatchParams& params, const eastl::unique_ptr<Texture2D>& sourceTexture, uint32_t validWidth, uint32_t validHeight) const
@@ -40187,30 +40191,30 @@ void Upscaling::ConfigureFoveatedPeripherySourceRegion(FoveatedEyeDispatchParams
 	params.peripherySourceOffsetY = sourceRegion.offset.y;
 }
 
-bool Upscaling::DispatchFoveatedVendorEyeComposite(UpscaleMethod a_upscaleMethod, uint32_t eyeIndex, const FoveatedEyeDispatchParams& params)
+FidelityFX::UpscaleResult Upscaling::DispatchFoveatedVendorEyeComposite(UpscaleMethod a_upscaleMethod, uint32_t eyeIndex, const FoveatedEyeDispatchParams& params)
 {
 	if (!globals::game::isVR || eyeIndex >= 2)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	if (!SupportsFoveatedVendorDispatch(a_upscaleMethod))
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	if (!params.inputWidthPerEye || !params.inputHeight || !params.outputWidthPerEye || !params.outputHeight)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	if (!params.peripherySourceSRV || !params.peripherySourceWidth || !params.peripherySourceHeight)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	auto state = globals::state;
 	auto context = globals::d3d::context;
 	auto deferred = globals::deferred;
 	if (!state || !context || !deferred || !deferred->linearSampler)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	if (!vrIntermediateColorOut[eyeIndex] || !vrIntermediateColorOut[eyeIndex]->uav || !vrIntermediateColorOut[eyeIndex]->resource)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	if (!params.visualizeMask &&
 		(!params.centerColorInput || !params.centerDepthInput || !params.centerMotionVectorsInput ||
 			!params.centerReactiveMaskInput || !params.centerTransparencyMaskInput)) {
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	}
 
 	if (params.usePeripheryTAA) {
@@ -40225,16 +40229,16 @@ bool Upscaling::DispatchFoveatedVendorEyeComposite(UpscaleMethod a_upscaleMethod
 			!peripheryTAAVelocityHistory[eyeIndex][params.peripheryTAAHistoryWriteIndex] || !peripheryTAAVelocityHistory[eyeIndex][params.peripheryTAAHistoryWriteIndex]->uav ||
 			!peripheryTAALockHistory[eyeIndex][params.peripheryTAAHistoryReadIndex] || !peripheryTAALockHistory[eyeIndex][params.peripheryTAAHistoryReadIndex]->srv ||
 			!peripheryTAALockHistory[eyeIndex][params.peripheryTAAHistoryWriteIndex] || !peripheryTAALockHistory[eyeIndex][params.peripheryTAAHistoryWriteIndex]->uav) {
-			return false;
+			return FidelityFX::UpscaleResult::Failed;
 		}
 	}
 
 	const auto& regionPlan = foveatedRectCache.plan;
 	if (!regionPlan.IsValid() || eyeIndex >= regionPlan.eyes.size())
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	const auto& eyePlan = regionPlan.eyes[eyeIndex];
 	if (!eyePlan.IsValid())
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	const float2 centerOffset = eyePlan.centerOffset;
 	const float taaOuterScale = params.usePeripheryTAA ? regionPlan.peripheryTAAOuterScale : 0.0f;
@@ -40259,53 +40263,54 @@ bool Upscaling::DispatchFoveatedVendorEyeComposite(UpscaleMethod a_upscaleMethod
 
 	ID3D11UnorderedAccessView* outputColorUAV = params.outputUAV ? params.outputUAV : vrIntermediateColorOut[eyeIndex]->uav.get();
 	if (!params.usePeripheryTAA && !params.visualizeMask) {
-		if (!DispatchSingleFoveatedVendorEye(
-				a_upscaleMethod,
-				eyeIndex,
-				params.centerColorInput,
-				params.centerDepthInput,
-				params.centerMotionVectorsInput,
-				params.centerReactiveMaskInput,
-				params.centerTransparencyMaskInput,
-				params.outputWidthPerEye,
-				params.outputHeight,
-				params.inputWidthPerEye,
-				params.inputHeight,
-				params.centerScale,
-				params.centerHorizontalScale,
-				centerOffset,
-				params.centerBlendFeather,
-				params.centerColorInputBaseOffsetX,
-				params.centerDepthInputBaseOffsetX,
-				params.centerAuxInputBaseOffsetX,
-				outputColorUAV,
-				params.dlssViewportRole,
-				params.submitSourceSubresource,
-				params.submitSourceBoxValid ? &params.submitSourceBox : nullptr,
-				false)) {
-			return false;
-		}
+		const auto centerResult = DispatchSingleFoveatedVendorEye(
+			a_upscaleMethod,
+			eyeIndex,
+			params.centerColorInput,
+			params.centerDepthInput,
+			params.centerMotionVectorsInput,
+			params.centerReactiveMaskInput,
+			params.centerTransparencyMaskInput,
+			params.outputWidthPerEye,
+			params.outputHeight,
+			params.inputWidthPerEye,
+			params.inputHeight,
+			params.centerScale,
+			params.centerHorizontalScale,
+			centerOffset,
+			params.centerBlendFeather,
+			params.centerColorInputBaseOffsetX,
+			params.centerDepthInputBaseOffsetX,
+			params.centerAuxInputBaseOffsetX,
+			outputColorUAV,
+			params.dlssViewportRole,
+			params.submitSourceSubresource,
+			params.submitSourceBoxValid ? &params.submitSourceBox : nullptr,
+			false);
+		if (centerResult != FidelityFX::UpscaleResult::Ready)
+			return centerResult;
 
 		const auto& centerRect = foveatedRectCache.rects[eyeIndex];
 		auto& centerOutput = foveatedCenterColorOut[eyeIndex];
-		return centerOutput && centerOutput->srv &&
-		       DispatchFoveatedSpatialComposite(
-				   params.peripherySourceSRV,
-				   centerOutput->srv.get(),
-				   outputColorUAV,
-				   params.peripherySourceWidth,
-				   params.peripherySourceHeight,
-				   params.outputWidthPerEye,
-				   params.outputHeight,
-				   centerRect,
-				   params.peripherySourceScaleX,
-				   params.peripherySourceScaleY,
-				   params.peripherySourceOffsetX,
-				   params.peripherySourceOffsetY,
-				   params.centerScale,
-				   params.centerHorizontalScale,
-				   centerOffset,
-				   params.centerBlendFeather);
+		const bool composited = centerOutput && centerOutput->srv &&
+		                        DispatchFoveatedSpatialComposite(
+									params.peripherySourceSRV,
+									centerOutput->srv.get(),
+									outputColorUAV,
+									params.peripherySourceWidth,
+									params.peripherySourceHeight,
+									params.outputWidthPerEye,
+									params.outputHeight,
+									centerRect,
+									params.peripherySourceScaleX,
+									params.peripherySourceScaleY,
+									params.peripherySourceOffsetX,
+									params.peripherySourceOffsetY,
+									params.centerScale,
+									params.centerHorizontalScale,
+									centerOffset,
+									params.centerBlendFeather);
+		return composited ? FidelityFX::UpscaleResult::Ready : FidelityFX::UpscaleResult::Failed;
 	}
 
 	bool peripheryBindingsBound = false;
@@ -40444,7 +40449,7 @@ bool Upscaling::DispatchFoveatedVendorEyeComposite(UpscaleMethod a_upscaleMethod
 
 	auto failAfterUnbind = [&]() {
 		unbindPeripheryBindings();
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	};
 
 	if (params.usePeripheryTAA) {
@@ -40454,7 +40459,7 @@ bool Upscaling::DispatchFoveatedVendorEyeComposite(UpscaleMethod a_upscaleMethod
 			const bool hasTileListSRV = peripheryTAATileBuffer[eyeIndex] && peripheryTAATileBuffer[eyeIndex]->srv;
 			if (tileListBuilt && tileCount > 0 && hasTileListSRV) {
 				if (!dispatchPeripheryTAA(peripheryTAATileBuffer[eyeIndex]->srv.get(), tileCount, 0, 0, params.outputWidthPerEye, params.outputHeight))
-					return false;
+					return FidelityFX::UpscaleResult::Failed;
 			} else if (!tileListBuilt || tileCount == 0 || (tileCount > 0 && !hasTileListSRV)) {
 				if (state->frameAnnotations)
 					state->BeginPerfEvent("Periphery TAA Fallback Rect");
@@ -40499,7 +40504,7 @@ bool Upscaling::DispatchFoveatedVendorEyeComposite(UpscaleMethod a_upscaleMethod
 	unbindPeripheryBindings();
 
 	if (params.visualizeMask)
-		return true;
+		return FidelityFX::UpscaleResult::Ready;
 
 	return DispatchSingleFoveatedVendorEye(
 		a_upscaleMethod,
@@ -40526,26 +40531,26 @@ bool Upscaling::DispatchFoveatedVendorEyeComposite(UpscaleMethod a_upscaleMethod
 		params.submitSourceBoxValid ? &params.submitSourceBox : nullptr);
 }
 
-bool Upscaling::DispatchFoveatedVendorUpscaling(UpscaleMethod a_upscaleMethod, ID3D11Resource* colorTexture, ID3D11Resource* depthTexture, ID3D11Resource* motionVectors, ID3D11Resource* reactiveMask, ID3D11Resource* transparencyMask, ID3D11Resource* colorOutput)
+FidelityFX::UpscaleResult Upscaling::DispatchFoveatedVendorUpscaling(UpscaleMethod a_upscaleMethod, ID3D11Resource* colorTexture, ID3D11Resource* depthTexture, ID3D11Resource* motionVectors, ID3D11Resource* reactiveMask, ID3D11Resource* transparencyMask, ID3D11Resource* colorOutput)
 {
 	if (!globals::game::isVR)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	if (!SupportsFoveatedVendorDispatch(a_upscaleMethod))
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	if (!colorTexture || !depthTexture || !motionVectors || !reactiveMask || !transparencyMask)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	auto state = globals::state;
 	if (!state)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	uint32_t inputWidthPerEye = 0;
 	uint32_t inputHeight = 0;
 	uint32_t outputWidthPerEye = 0;
 	uint32_t outputHeight = 0;
 	if (!GetRuntimeFoveatedRegionDimensions(inputWidthPerEye, inputHeight, outputWidthPerEye, outputHeight))
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	const bool visualizeMask = settings.foveatedPeripheryMaskVisualization;
 	const bool usePeripheryTAA = IsPeripheryTAAPathActive(a_upscaleMethod);
@@ -40555,17 +40560,17 @@ bool Upscaling::DispatchFoveatedVendorUpscaling(UpscaleMethod a_upscaleMethod, I
 	const float centerHorizontalScale = foveatedProfile.centerHorizontalScale;
 	const float effectiveCenterBlendFeather = usePeripheryTAA ? ClampPeripheryTAACenterBlendFeather(settings.periphery_taa_center_blend_feather) : FoveatedCommon::kCenterFeather;
 	if (!BuildFoveatedDispatchRects(inputWidthPerEye, inputHeight, outputWidthPerEye, outputHeight, true, centerScale, effectiveCenterBlendFeather, centerHorizontalScale, usePeripheryTAAProfile))
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	if (!EnsureFoveatedDispatchShaders(usePeripheryTAA, visualizeMask, "", "skipping foveated vendor dispatch")) {
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	}
 
 	auto context = globals::d3d::context;
 	auto deferred = globals::deferred;
 	auto renderer = globals::game::renderer;
 	if (!context || !deferred || !deferred->linearSampler || !renderer)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	// Keep all foveated VR paths on per-eye inputs. The old DLAA/direct-source
 	// shortcut, and the Peripheral TAA center pass, sampled kMAIN directly and
@@ -40575,9 +40580,9 @@ bool Upscaling::DispatchFoveatedVendorUpscaling(UpscaleMethod a_upscaleMethod, I
 	// Periphery TAA, and this pass must not overwrite them.
 	const bool copyDepthInput = !visualizeMask && (a_upscaleMethod == UpscaleMethod::kDLSS || usePeripheryTAA);
 	if (!PreparePerEyeInputs(colorTexture, depthTexture, motionVectors, reactiveMask, transparencyMask, false, copyDepthInput))
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	if (usePeripheryTAA && !EnsurePeripheryTAAResources(outputWidthPerEye, outputHeight, colorTexture))
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	const bool resetPeripheryTAA = usePeripheryTAA && (ShouldResetHistoryThisFrame() || !peripheryTAAHistoryValid);
 	const uint32_t peripheryTAAReadIndex = peripheryTAAHistoryReadIndex;
@@ -40587,7 +40592,7 @@ bool Upscaling::DispatchFoveatedVendorUpscaling(UpscaleMethod a_upscaleMethod, I
 	for (uint32_t eye = 0; eye < 2; ++eye) {
 		if (!vrIntermediateColorIn[eye] || !vrIntermediateColorIn[eye]->srv || !vrIntermediateColorIn[eye]->resource ||
 			!vrIntermediateColorOut[eye] || !vrIntermediateColorOut[eye]->uav || !vrIntermediateColorOut[eye]->resource) {
-			return false;
+			return FidelityFX::UpscaleResult::Failed;
 		}
 
 		ID3D11Resource* centerDepthInput = nullptr;
@@ -40596,7 +40601,7 @@ bool Upscaling::DispatchFoveatedVendorUpscaling(UpscaleMethod a_upscaleMethod, I
 			                       (vrIntermediateLinearDepth[eye] ? vrIntermediateLinearDepth[eye]->resource.get() : nullptr) :
 			                       (vrIntermediateDepth[eye] ? vrIntermediateDepth[eye]->resource.get() : nullptr);
 			if (!centerDepthInput)
-				return false;
+				return FidelityFX::UpscaleResult::Failed;
 		}
 
 		FoveatedEyeDispatchParams params{};
@@ -40622,11 +40627,12 @@ bool Upscaling::DispatchFoveatedVendorUpscaling(UpscaleMethod a_upscaleMethod, I
 
 		static bool loggedFoveatedDispatchFailure = false;
 		try {
-			if (!DispatchFoveatedVendorEyeComposite(a_upscaleMethod, eye, params)) {
+			const auto dispatchResult = DispatchFoveatedVendorEyeComposite(a_upscaleMethod, eye, params);
+			if (dispatchResult != FidelityFX::UpscaleResult::Ready) {
 				UnbindUpscalingResources();
 				if (anyEyeDispatched)
 					RequestHistoryReset();
-				return false;
+				return dispatchResult;
 			}
 			anyEyeDispatched = true;
 		} catch (const std::exception& e) {
@@ -40637,7 +40643,7 @@ bool Upscaling::DispatchFoveatedVendorUpscaling(UpscaleMethod a_upscaleMethod, I
 				loggedFoveatedDispatchFailure,
 				"[Upscaling] Foveated dispatch threw; skipping foveated vendor dispatch",
 				e);
-			return false;
+			return FidelityFX::UpscaleResult::Failed;
 		} catch (...) {
 			UnbindUpscalingResources();
 			if (anyEyeDispatched)
@@ -40645,7 +40651,7 @@ bool Upscaling::DispatchFoveatedVendorUpscaling(UpscaleMethod a_upscaleMethod, I
 			LogWarnOnce(
 				loggedFoveatedDispatchFailure,
 				"[Upscaling] Foveated dispatch threw; skipping foveated vendor dispatch");
-			return false;
+			return FidelityFX::UpscaleResult::Failed;
 		}
 	}
 
@@ -40655,37 +40661,37 @@ bool Upscaling::DispatchFoveatedVendorUpscaling(UpscaleMethod a_upscaleMethod, I
 	}
 
 	FinalizePerEyeOutputs(colorOutput ? colorOutput : colorTexture);
-	return true;
+	return FidelityFX::UpscaleResult::Ready;
 }
 
-bool Upscaling::DispatchSubmitStageFoveatedVendorEye(UpscaleMethod a_upscaleMethod, uint32_t eyeIndex, uint32_t inputWidthPerEye, uint32_t inputHeight, uint32_t outputWidthPerEye, uint32_t outputHeight, bool protectPostProcessInput, ID3D11Resource* outputResource, ID3D11UnorderedAccessView* outputUAV, UINT submitSourceSubresource, const D3D11_BOX* submitSourceBox)
+FidelityFX::UpscaleResult Upscaling::DispatchSubmitStageFoveatedVendorEye(UpscaleMethod a_upscaleMethod, uint32_t eyeIndex, uint32_t inputWidthPerEye, uint32_t inputHeight, uint32_t outputWidthPerEye, uint32_t outputHeight, bool protectPostProcessInput, ID3D11Resource* outputResource, ID3D11UnorderedAccessView* outputUAV, UINT submitSourceSubresource, const D3D11_BOX* submitSourceBox)
 {
 	if (!globals::game::isVR || eyeIndex >= 2)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	if (!SupportsFoveatedVendorDispatch(a_upscaleMethod))
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	if (!inputWidthPerEye || !inputHeight || !outputWidthPerEye || !outputHeight)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	const auto inputStereoLayout = ResolveVRSideBySideStereoLayout(inputWidthPerEye, inputHeight);
 	if (!inputStereoLayout.IsValid())
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	auto state = globals::state;
 	auto deferred = globals::deferred;
 	auto renderer = globals::game::renderer;
 	if (!state || !deferred || !deferred->linearSampler || !renderer)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	if (!vrIntermediateColorIn[eyeIndex] || !vrIntermediateColorIn[eyeIndex]->resource || !vrIntermediateColorIn[eyeIndex]->srv ||
 		!vrIntermediateColorOut[eyeIndex] || !vrIntermediateColorOut[eyeIndex]->resource || !vrIntermediateColorOut[eyeIndex]->uav) {
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	}
 	if (!outputResource)
 		outputResource = vrIntermediateColorOut[eyeIndex]->resource.get();
 	if (!outputUAV)
 		outputUAV = vrIntermediateColorOut[eyeIndex]->uav.get();
 	if (!outputResource || !outputUAV)
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	const bool visualizeMask = settings.foveatedPeripheryMaskVisualization;
 	const bool usePeripheryTAA = IsPeripheryTAAPathActive(a_upscaleMethod);
@@ -40695,10 +40701,10 @@ bool Upscaling::DispatchSubmitStageFoveatedVendorEye(UpscaleMethod a_upscaleMeth
 	const float centerHorizontalScale = foveatedProfile.centerHorizontalScale;
 	const float effectiveCenterBlendFeather = usePeripheryTAA ? ClampPeripheryTAACenterBlendFeather(settings.periphery_taa_center_blend_feather) : FoveatedCommon::kCenterFeather;
 	if (!BuildFoveatedDispatchRects(inputWidthPerEye, inputHeight, outputWidthPerEye, outputHeight, true, centerScale, effectiveCenterBlendFeather, centerHorizontalScale, usePeripheryTAAProfile))
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 
 	if (!EnsureFoveatedDispatchShaders(usePeripheryTAA, visualizeMask, "Submit-stage ", "falling back to full-eye dispatch")) {
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	}
 
 	if (!visualizeMask) {
@@ -40707,11 +40713,11 @@ bool Upscaling::DispatchSubmitStageFoveatedVendorEye(UpscaleMethod a_upscaleMeth
 			!vrIntermediateMotionVectors[eyeIndex] || !vrIntermediateMotionVectors[eyeIndex]->resource ||
 			!vrIntermediateReactiveMask[eyeIndex] || !vrIntermediateReactiveMask[eyeIndex]->resource ||
 			!vrIntermediateTransparencyMask[eyeIndex] || !vrIntermediateTransparencyMask[eyeIndex]->resource) {
-			return false;
+			return FidelityFX::UpscaleResult::Failed;
 		}
 		if (centerUsesFSRDepth &&
 			(!vrIntermediateLinearDepth[eyeIndex] || !vrIntermediateLinearDepth[eyeIndex]->resource)) {
-			return false;
+			return FidelityFX::UpscaleResult::Failed;
 		}
 	}
 
@@ -40720,10 +40726,10 @@ bool Upscaling::DispatchSubmitStageFoveatedVendorEye(UpscaleMethod a_upscaleMeth
 			!vrIntermediateMotionVectors[eyeIndex] || !vrIntermediateMotionVectors[eyeIndex]->srv ||
 			!vrIntermediateReactiveMask[eyeIndex] || !vrIntermediateReactiveMask[eyeIndex]->srv ||
 			!vrIntermediateTransparencyMask[eyeIndex] || !vrIntermediateTransparencyMask[eyeIndex]->srv) {
-			return false;
+			return FidelityFX::UpscaleResult::Failed;
 		}
 		if (!EnsurePeripheryTAAResources(outputWidthPerEye, outputHeight, outputResource))
-			return false;
+			return FidelityFX::UpscaleResult::Failed;
 	}
 
 	const bool resetPeripheryTAA = usePeripheryTAA && (ShouldResetHistoryThisFrame() || !peripheryTAAHistoryValid);
@@ -40750,7 +40756,7 @@ bool Upscaling::DispatchSubmitStageFoveatedVendorEye(UpscaleMethod a_upscaleMeth
 		                       (vrIntermediateLinearDepth[eyeIndex] ? vrIntermediateLinearDepth[eyeIndex]->resource.get() : nullptr) :
 		                       (vrIntermediateDepth[eyeIndex] ? vrIntermediateDepth[eyeIndex]->resource.get() : nullptr);
 		if (!centerDepthInput)
-			return false;
+			return FidelityFX::UpscaleResult::Failed;
 	}
 
 	FoveatedEyeDispatchParams params{};
@@ -40783,9 +40789,10 @@ bool Upscaling::DispatchSubmitStageFoveatedVendorEye(UpscaleMethod a_upscaleMeth
 
 	static bool loggedFoveatedDispatchFailure = false;
 	try {
-		if (!DispatchFoveatedVendorEyeComposite(a_upscaleMethod, eyeIndex, params)) {
+		const auto dispatchResult = DispatchFoveatedVendorEyeComposite(a_upscaleMethod, eyeIndex, params);
+		if (dispatchResult != FidelityFX::UpscaleResult::Ready) {
 			UnbindUpscalingResources();
-			return false;
+			return dispatchResult;
 		}
 	} catch (const std::exception& e) {
 		UnbindUpscalingResources();
@@ -40794,14 +40801,14 @@ bool Upscaling::DispatchSubmitStageFoveatedVendorEye(UpscaleMethod a_upscaleMeth
 			"[Upscaling] Submit-stage foveated dispatch threw; falling back to full-eye dispatch",
 			e);
 		MarkSubmitStageDeviceLostIfNeeded(e, "submit-stage foveated dispatch");
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	} catch (...) {
 		UnbindUpscalingResources();
 		LogWarnOnce(
 			loggedFoveatedDispatchFailure,
 			"[Upscaling] Submit-stage foveated dispatch threw; falling back to full-eye dispatch");
 		MarkSubmitStageDeviceLostIfDeviceRemoved("submit-stage foveated dispatch");
-		return false;
+		return FidelityFX::UpscaleResult::Failed;
 	}
 
 	auto& depthTexture = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
@@ -40842,7 +40849,7 @@ bool Upscaling::DispatchSubmitStageFoveatedVendorEye(UpscaleMethod a_upscaleMeth
 	}
 
 	peripheryEyeReadyGuard.Release();
-	return true;
+	return FidelityFX::UpscaleResult::Ready;
 }
 
 bool Upscaling::CreateVRIntermediateTextures(uint32_t inWidth, uint32_t inHeight, uint32_t outWidth, uint32_t outHeight,
@@ -50068,6 +50075,37 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 		return true;
 	};
 
+	auto presentDeferredVendorOutput = [&]() {
+		UnbindUpscalingResources();
+		// Source-cache invalidation can hide an earlier eye's history advance.
+		RequestHistoryReset();
+		if (a_compositorCycleToken != 0) {
+			// Intermediate replacement can clear admission during the current submit.
+			if (submitStageVendorAdmissionCycle == 0) {
+				submitStageVendorAdmissionCycle = a_compositorCycleToken;
+				submitStageVendorAdmissionGeneration = activeContractGeneration;
+				submitStageVendorAdmissionMethod = static_cast<uint32_t>(upscaleMethod);
+				submitStageVendorAdmissionFrame = currentFrame;
+				submitStageVendorAdmissionEyeMask = 0;
+			}
+			if (submitStageVendorAdmissionCycle != a_compositorCycleToken ||
+				!VRVendorRelatchPolicy::IsSameStereoDispatchContract(
+					submitStageVendorAdmissionGeneration,
+					activeContractGeneration,
+					submitStageVendorAdmissionMethod,
+					static_cast<uint32_t>(upscaleMethod))) {
+				return false;
+			}
+			submitStageVendorAdmissionPresentationOnly = true;
+			submitStageVendorAdmissionExactProviderReady = false;
+			submitStageVendorAdmissionAuthoritativeDLSSProfile = false;
+			submitStageVendorAdmissionDLSSQualityMode = 0;
+			submitStageVendorAdmissionDLSSPreset = kDLSSPresetK;
+		}
+		return presentStretchOutput(
+			eyeWidthIn, eyeHeightIn, VRRenderScalePresentationPath::PresentationStretch);
+	};
+
 	auto finalizeSubmitStageEyeOutput = [&](uint32_t targetEyeIndex, Texture2D& targetVendorColorOutput, bool targetSubmitDLSSSharpening,
 											uint32_t clearDepthWidth, uint32_t clearDepthHeight, uint32_t clearDepthOffsetX, uint32_t clearDepthOffsetY) -> bool {
 		if (targetSubmitDLSSSharpening) {
@@ -50121,14 +50159,14 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 
 	auto replayStoredFullEyeVendorOutput = [&](uint32_t targetEyeIndex,
 											   bool preferDLSSSharpening,
-											   SubmitStageVendorEyeState targetEyeState) -> bool {
+											   SubmitStageVendorEyeState targetEyeState) -> FidelityFX::UpscaleResult {
 		if (!targetEyeState.ready ||
 			!peerInputFreshnessProven ||
 			!VRSubmitInputFreshnessPolicy::MatchesProducerProof(
 				targetEyeState.inputProof, submitInputProof) ||
 			targetEyeState.generation != activeContractGeneration ||
 			!targetEyeState.usedFoveatedVendorPath) {
-			return true;
+			return FidelityFX::UpscaleResult::Ready;
 		}
 		if (!vrIntermediateColorIn[targetEyeIndex] || !vrIntermediateColorIn[targetEyeIndex]->resource ||
 			!vrIntermediateColorOut[targetEyeIndex] || !vrIntermediateColorOut[targetEyeIndex]->resource ||
@@ -50139,7 +50177,7 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 			!vrIntermediateTransparencyMask[targetEyeIndex] || !vrIntermediateTransparencyMask[targetEyeIndex]->resource ||
 			(upscaleMethod == UpscaleMethod::kFSR &&
 				(!vrIntermediateLinearDepth[targetEyeIndex] || !vrIntermediateLinearDepth[targetEyeIndex]->resource))) {
-			return false;
+			return FidelityFX::UpscaleResult::Failed;
 		}
 
 		Texture2D* replayVendorColorOutput = vrIntermediateColorOut[targetEyeIndex].get();
@@ -50157,7 +50195,7 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 			}
 		}
 		if (!replayVendorColorOutput || !replayVendorColorOutput->resource || !replayVendorColorOutput->uav)
-			return false;
+			return FidelityFX::UpscaleResult::Failed;
 
 		static bool loggedReplayFullEyeSubmitException[2] = {};
 		try {
@@ -50181,30 +50219,31 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 			applyAuthoritativeDLSSProfile(vendorParams);
 			{
 				CS_GPU_PASS("Upscaling::SubmitStageUpscale");
-				if (!DispatchVendorEyeRegion(upscaleMethod, vendorParams))
-					return false;
+				const auto dispatchResult = DispatchVendorEyeRegion(upscaleMethod, vendorParams);
+				if (dispatchResult != FidelityFX::UpscaleResult::Ready)
+					return dispatchResult;
 			}
 		} catch (const std::exception& e) {
 			UnbindUpscalingResources();
 			if (MarkSubmitStageDeviceLostIfNeeded(e, "submit-stage full-eye replay"))
-				return false;
+				return FidelityFX::UpscaleResult::Failed;
 			LogWarnOnceFmt(
 				loggedReplayFullEyeSubmitException[targetEyeIndex],
 				"[Upscaling] Submit-stage full-eye {} replay threw for eye {}; keeping the earlier eye output for this frame: {}",
 				upscaleMethodName,
 				targetEyeIndex,
 				e.what());
-			return false;
+			return FidelityFX::UpscaleResult::Failed;
 		} catch (...) {
 			UnbindUpscalingResources();
 			if (MarkSubmitStageDeviceLostIfDeviceRemoved("submit-stage full-eye replay"))
-				return false;
+				return FidelityFX::UpscaleResult::Failed;
 			LogWarnOnceFmt(
 				loggedReplayFullEyeSubmitException[targetEyeIndex],
 				"[Upscaling] Submit-stage full-eye {} replay threw for eye {}; keeping the earlier eye output for this frame",
 				upscaleMethodName,
 				targetEyeIndex);
-			return false;
+			return FidelityFX::UpscaleResult::Failed;
 		}
 
 		if (!finalizeSubmitStageEyeOutput(
@@ -50215,7 +50254,7 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 				targetEyeState.depthHeight,
 				targetEyeState.depthOffsetX,
 				targetEyeState.depthOffsetY)) {
-			return false;
+			return FidelityFX::UpscaleResult::Failed;
 		}
 
 		auto& replayedEyeState = submitStageVendorEyeState[targetEyeIndex];
@@ -50228,7 +50267,7 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 		captureSubmitStageVendorDispatchEvidence(
 			submitStageVendorEyeState[targetEyeIndex]);
 #endif
-		return true;
+		return FidelityFX::UpscaleResult::Ready;
 	};
 
 	if (presentationOnly) {
@@ -50247,7 +50286,7 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 		try {
 			{
 				CS_GPU_PASS("Upscaling::SubmitStageUpscale");
-				vendorSucceeded = DispatchSubmitStageFoveatedVendorEye(
+				const auto foveatedResult = DispatchSubmitStageFoveatedVendorEye(
 					upscaleMethod,
 					eyeIndex,
 					eyeWidthIn,
@@ -50259,6 +50298,9 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 					vendorColorOutput->uav.get(),
 					sourceSubresource,
 					&colorBox);
+				if (foveatedResult == FidelityFX::UpscaleResult::Deferred)
+					return presentDeferredVendorOutput();
+				vendorSucceeded = foveatedResult == FidelityFX::UpscaleResult::Ready;
 			}
 		} catch (const std::exception& e) {
 			UnbindUpscalingResources();
@@ -50505,14 +50547,7 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 					}
 				} else if (stereoResult ==
 						   FidelityFX::StereoUpscaleResult::Deferred) {
-					if (a_compositorCycleToken != 0 &&
-						submitStageVendorAdmissionCycle == a_compositorCycleToken) {
-						submitStageVendorAdmissionPresentationOnly = true;
-					}
-					return presentStretchOutput(
-						eyeWidthIn,
-						eyeHeightIn,
-						VRRenderScalePresentationPath::PresentationStretch);
+					return presentDeferredVendorOutput();
 				} else if (stereoResult ==
 						   FidelityFX::StereoUpscaleResult::Failed) {
 #ifdef DEVBENCH_BRIDGE_ENABLED
@@ -50538,13 +50573,14 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 		}
 
 		if (!vendorSucceeded && !runtimeStereoDispatchFailed) {
-			if (replayOtherEyeFromFoveated &&
-				!replayStoredFullEyeVendorOutput(
-					otherEyeIndex,
-					submitDLSSSharpening,
-					otherEyeStateBeforeFullEncode) &&
-				IsSubmitStageDeviceLost())
-				return false;
+			if (replayOtherEyeFromFoveated) {
+				const auto replayResult = replayStoredFullEyeVendorOutput(
+					otherEyeIndex, submitDLSSSharpening, otherEyeStateBeforeFullEncode);
+				if (replayResult == FidelityFX::UpscaleResult::Deferred)
+					return presentDeferredVendorOutput();
+				if (replayResult == FidelityFX::UpscaleResult::Failed && IsSubmitStageDeviceLost())
+					return false;
+			}
 
 			static bool loggedFullEyeSubmitException[2] = {};
 			try {
@@ -50568,7 +50604,10 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 				applyAuthoritativeDLSSProfile(vendorParams);
 				{
 					CS_GPU_PASS("Upscaling::SubmitStageUpscale");
-					vendorSucceeded = DispatchVendorEyeRegion(upscaleMethod, vendorParams);
+					const auto dispatchResult = DispatchVendorEyeRegion(upscaleMethod, vendorParams);
+					if (dispatchResult == FidelityFX::UpscaleResult::Deferred)
+						return presentDeferredVendorOutput();
+					vendorSucceeded = dispatchResult == FidelityFX::UpscaleResult::Ready;
 				}
 			} catch (const std::exception& e) {
 				UnbindUpscalingResources();
@@ -57087,7 +57126,7 @@ bool Upscaling::IsOpenCompositeUpscalingBlocked(bool a_forceRefresh) const
 	});
 }
 
-void Upscaling::Upscale()
+Upscaling::MainPassUpscaleResult Upscaling::Upscale()
 {
 	ZoneScoped;
 	dlssUpscaleOutputInSharpenerTexture = false;
@@ -57107,7 +57146,7 @@ void Upscaling::Upscale()
 #ifdef DEVBENCH_BRIDGE_ENABLED
 		recordMainPassStage(VRMainPassDispatchStage::MissingGlobals);
 #endif
-		return;
+		return MainPassUpscaleResult::Failed;
 	}
 	EnsureRuntimeResolutionStateCurrent();
 	// Settings can change from the CS menu after ConfigureUpscaling has latched
@@ -57150,7 +57189,7 @@ void Upscaling::Upscale()
 #ifdef DEVBENCH_BRIDGE_ENABLED
 		recordMainPassStage(VRMainPassDispatchStage::LifecycleDeferred);
 #endif
-		return;
+		return MainPassUpscaleResult::Deferred;
 	}
 	// A gate owns backend mutation, not a compatible authoritative provider.
 	// Continue evaluating RC173's existing physical contract while a replacement
@@ -57160,7 +57199,7 @@ void Upscaling::Upscale()
 #ifdef DEVBENCH_BRIDGE_ENABLED
 		recordMainPassStage(VRMainPassDispatchStage::LifecycleDeferred);
 #endif
-		return;
+		return MainPassUpscaleResult::Deferred;
 	}
 
 	const bool vrRenderScaleSubmitStageOwnsOutput =
@@ -57180,7 +57219,7 @@ void Upscaling::Upscale()
 #ifdef DEVBENCH_BRIDGE_ENABLED
 		recordMainPassStage(VRMainPassDispatchStage::SubmitStageOwned);
 #endif
-		return;
+		return MainPassUpscaleResult::Deferred;
 	}
 
 	if (globals::game::isVR && upscaleMethod == UpscaleMethod::kDLSS && pendingDLSSHistoryReset.exchange(false, std::memory_order_relaxed)) {
@@ -57202,7 +57241,7 @@ void Upscaling::Upscale()
 #ifdef DEVBENCH_BRIDGE_ENABLED
 		recordMainPassStage(VRMainPassDispatchStage::MissingMotionVectors);
 #endif
-		return;
+		return MainPassUpscaleResult::Failed;
 	}
 
 	auto dispatchCount = Util::GetScreenDispatchCount(true);
@@ -57434,12 +57473,13 @@ void Upscaling::Upscale()
 	};
 
 	if (!encodeUpscalingTextures(false))
-		return;
+		return MainPassUpscaleResult::Failed;
 
 	{
 		ID3D11Resource* motionVectorResource = globals::game::isVR ? motionVector.texture : motionVectorCopyTexture->resource.get();
 		bool dispatched = false;
 		bool vendorDispatchCompleted = false;
+		bool fsrDispatchDeferred = false;
 		static bool loggedFoveatedFallback = false;
 		// VR-only resets can leave vendor upscalers with stale viewport state.
 		if (!vendorLifecycleMutationDeferred &&
@@ -57447,7 +57487,7 @@ void Upscaling::Upscale()
 #ifdef DEVBENCH_BRIDGE_ENABLED
 			recordMainPassStage(VRMainPassDispatchStage::VendorResetBlocked);
 #endif
-			return;
+			return MainPassUpscaleResult::Deferred;
 		}
 
 		if (foveatedDispatchRequested) {
@@ -57462,7 +57502,7 @@ void Upscaling::Upscale()
 			ID3D11Resource* foveatedOutput = foveatedOutputToSharpener ? sharpenerTexture->resource.get() : main.texture;
 			{
 				CS_GPU_PASS("Upscaling::Upscale");
-				dispatched = DispatchFoveatedVendorUpscaling(
+				const auto foveatedResult = DispatchFoveatedVendorUpscaling(
 					upscaleMethod,
 					main.texture,
 					depth.texture,
@@ -57470,6 +57510,14 @@ void Upscaling::Upscale()
 					reactiveMaskTexture->resource.get(),
 					transparencyCompositionMaskTexture->resource.get(),
 					foveatedOutput);
+				if (foveatedResult == FidelityFX::UpscaleResult::Deferred) {
+					RequestHistoryReset();
+#ifdef DEVBENCH_BRIDGE_ENABLED
+					recordMainPassStage(VRMainPassDispatchStage::LifecycleDeferred);
+#endif
+					return MainPassUpscaleResult::Deferred;
+				}
+				dispatched = foveatedResult == FidelityFX::UpscaleResult::Ready;
 			}
 			if (dispatched && upscaleMethod == UpscaleMethod::kDLSS)
 				dlssUpscaleOutputInSharpenerTexture = foveatedOutputToSharpener;
@@ -57529,7 +57577,10 @@ void Upscaling::Upscale()
 						VRMainPassDispatchStage::FidelityDispatchSucceeded :
 						VRMainPassDispatchStage::FidelityDispatchFailed);
 #endif
-				if (fsrResult == FidelityFX::UpscaleResult::Failed) {
+				if (fsrResult == FidelityFX::UpscaleResult::Deferred) {
+					fsrDispatchDeferred = true;
+					RequestHistoryReset();
+				} else if (fsrResult == FidelityFX::UpscaleResult::Failed) {
 					HandleFSRLifecycleDeviceLoss(
 						fidelityFX.ProbeFSRDeviceStatus(),
 						"FSR main-pass dispatch");
@@ -57547,13 +57598,23 @@ void Upscaling::Upscale()
 			recordMainPassStage(VRMainPassDispatchStage::Completed);
 		}
 #endif
+		return vendorDispatchCompleted ?
+		           MainPassUpscaleResult::Ready :
+		       fsrDispatchDeferred ? MainPassUpscaleResult::Deferred :
+		                             MainPassUpscaleResult::Failed;
 	}
 }
 
-void Upscaling::PerformUpscaling()
+Upscaling::MainPassUpscaleResult Upscaling::PerformUpscaling()
 {
 	CS_GPU_PASS("Upscaling::PerformUpscaling");
-	Upscale();
+	const auto result = Upscale();
+	if (runtimeResolutionPlan.upscaleMethod == UpscaleMethod::kFSR &&
+		result == MainPassUpscaleResult::Deferred) {
+		// Leave dynamic resolution active so the engine can present this frame
+		// through its complete current-input temporal fallback.
+		return result;
+	}
 	UpscaleDepth();
 
 	auto& runtimeData = globals::game::graphicsState->GetRuntimeData();
@@ -57563,6 +57624,7 @@ void Upscaling::PerformUpscaling()
 
 	// Updates the PerFrame constant buffer so that dynamic resolution settings are disabled
 	UpdateCameraData();
+	return result;
 }
 
 void Upscaling::UpdateDepthUpscaleKernelState(JitterCB& a_jitterData, bool a_enableWideKernelLogic)
@@ -58079,7 +58141,7 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 		if (upscaling.ShouldUseFrameGenerationThisFrame())
 			upscaling.CopySharedD3D12Resources();
 
-		upscaling.PerformUpscaling();
+		(void)upscaling.PerformUpscaling();
 
 		const uint32_t currentFrame = globals::state ? globals::state->frameCount : 0u;
 		const bool vendorDispatchCompleted =
@@ -58173,7 +58235,18 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 	// the vendor dispatch and produced periodic lighting/shadow corruption with
 	// OCU ASW.
 	if (upscaleMethod != UpscaleMethod::kNONE && upscaleMethod != UpscaleMethod::kTAA) {
-		upscaling.PerformUpscaling();
+		const auto mainPassResult = upscaling.PerformUpscaling();
+		if (upscaleMethod == UpscaleMethod::kFSR &&
+			mainPassResult == MainPassUpscaleResult::Deferred) {
+			// The FSR provider has not produced full-size color. Keep dynamic
+			// resolution unlocked and let Skyrim's temporal path own this frame.
+			auto imageSpaceManager = RE::ImageSpaceManager::GetSingleton();
+			GET_INSTANCE_MEMBER(BSImagespaceShaderISTemporalAA, imageSpaceManager);
+			BSImagespaceShaderISTemporalAA->taaEnabled = true;
+			func(a_this, a3, a_target, a_4, a_5);
+			BSImagespaceShaderISTemporalAA->taaEnabled = false;
+			return;
+		}
 	} else if (globals::game::isVR) {
 		upscaling.UpscaleDepth();
 	}
