@@ -2747,8 +2747,14 @@ public:
 		Render,
 		Dispatch
 	};
+	enum class MainPassUpscaleResult : uint8_t
+	{
+		Ready,
+		Deferred,
+		Failed
+	};
 	bool TryReplaceVanillaDynamicResolutionUpsample(const char* a_passName, DynamicResolutionUpsampleStage a_stage);
-	void Upscale();
+	MainPassUpscaleResult Upscale();
 	using VRVendorWorkGateSource = VRVendorRelatchPolicy::WorkGateSource;
 	struct VRVendorWorkGateSnapshot
 	{
@@ -3317,7 +3323,7 @@ public:
 	std::atomic_bool vrRenderScaleResourceTrackingSyncPending{ false };
 	void CopySharedD3D12Resources();
 	void PostDisplay();
-	void PerformUpscaling();
+	MainPassUpscaleResult PerformUpscaling();
 	void UpscaleDepth();
 	void RefreshSubmitStageUnderwaterMask();
 	void RequestHistoryReset();

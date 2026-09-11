@@ -1722,8 +1722,15 @@ if(BUILD_CONTROLLER_TESTS)
             "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}" -P
             "${PROJECT_SOURCE_DIR}/tests/vr_submit_input_freshness_contract_test.cmake"
     )
+    add_test(
+        NAME FSRMainPassDeferredFallbackContract
+        COMMAND
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}" -P
+            "${PROJECT_SOURCE_DIR}/tests/fsr_main_pass_deferred_fallback_contract_test.cmake"
+    )
     set_tests_properties(
         VRSubmitInputFreshnessContract
+        FSRMainPassDeferredFallbackContract
         PROPERTIES LABELS "ControllerTests"
     )
     add_controller_test(
