@@ -42358,7 +42358,7 @@ bool Upscaling::EncodeSubmitStageVRInputs(ID3D11Resource* colorSource, ID3D11Res
 			upscalingData.vrSeamHardening = 1.0f;
 			upscalingData.sourceOffset = { static_cast<float>(sourceEyeRegion.minX + inputMinX), static_cast<float>(inputMinY) };
 			upscalingData.outputOffset = { static_cast<float>(inputMinX), static_cast<float>(inputMinY) };
-			upscalingData.sourceSamplingXBounds = { static_cast<float>(sourceEyeRegion.minX), static_cast<float>(sourceEyeRegion.MaxX()) };
+			upscalingData.sourceSamplingXBounds = { sourceEyeRegion.minX, sourceEyeRegion.MaxX() };
 			upscalingDataCB->Update(upscalingData);
 
 			ID3D11UnorderedAccessView* uavs[4] = {
@@ -57297,6 +57297,17 @@ Upscaling::MainPassUpscaleResult Upscaling::Upscale()
 #endif
 			return false;
 		}
+		const auto isValidSamplingDimension = [](float a_value) {
+			return std::isfinite(a_value) &&
+			       a_value == std::floor(a_value) &&
+			       a_value <= static_cast<float>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
+		};
+		if (!isValidSamplingDimension(renderSize.x) || !isValidSamplingDimension(renderSize.y)) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
+			recordMainPassStage(VRMainPassDispatchStage::EncodeResolutionInvalid);
+#endif
+			return false;
+		}
 
 		ID3D11ShaderResourceView* views[4] = { temporalAAMask.SRV, normals.SRV, motionVector.SRV, depth.depthSRV };
 		context->CSSetShaderResources(0, ARRAYSIZE(views), views);
@@ -57407,7 +57418,7 @@ Upscaling::MainPassUpscaleResult Upscaling::Upscale()
 				upscalingData.vrSeamHardening = 1.0f;
 				upscalingData.sourceOffset = { static_cast<float>(sourceEyeRegion.minX + inputMinX), static_cast<float>(inputMinY) };
 				upscalingData.outputOffset = { static_cast<float>(inputMinX), static_cast<float>(inputMinY) };
-				upscalingData.sourceSamplingXBounds = { static_cast<float>(sourceEyeRegion.minX), static_cast<float>(sourceEyeRegion.MaxX()) };
+				upscalingData.sourceSamplingXBounds = { sourceEyeRegion.minX, sourceEyeRegion.MaxX() };
 				upscalingDataCB->Update(upscalingData);
 
 				ID3D11UnorderedAccessView* uavs[4] = {
@@ -57456,7 +57467,7 @@ Upscaling::MainPassUpscaleResult Upscaling::Upscale()
 			upscalingData.vrSeamHardening = 0.0f;
 			upscalingData.sourceOffset = { 0.0f, 0.0f };
 			upscalingData.outputOffset = { 0.0f, 0.0f };
-			upscalingData.sourceSamplingXBounds = { 0.0f, renderSize.x };
+			upscalingData.sourceSamplingXBounds = { 0u, static_cast<uint32_t>(renderSize.x) };
 			upscalingDataCB->Update(upscalingData);
 
 			ID3D11UnorderedAccessView* uavs[4] = {

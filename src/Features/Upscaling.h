@@ -1968,7 +1968,7 @@ public:
 		float2 sourceOffset;  // Source offset in combined stereo inputs
 		float2 outputOffset;  // Output offset in per-eye intermediates
 		// Full-eye [minX, maxX) bounds, never the foveated dispatch crop; full texture in flat.
-		float2 sourceSamplingXBounds;
+		DirectX::XMUINT2 sourceSamplingXBounds;
 	};
 
 	struct DynamicResolutionStretchCB
