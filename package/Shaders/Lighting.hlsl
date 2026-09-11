@@ -1444,12 +1444,14 @@ WetnessSurfaceState CreateWetnessSurfaceState(
 			float puddleSlopeStart = max(0.0, puddleMaxAngleSafe * 0.45);
 			float puddleSlopeEnd = min(1.0, max(puddleSlopeStart + 1e-3, puddleMaxAngleSafe));
 			float puddleSlopeMask = smoothstep(puddleSlopeStart, puddleSlopeEnd, saturate(worldNormal.z));
+			float puddleStrengthScale =
+				(minWetnessAngle / puddleMaxAngleSafe) * CS_WETNESS_SETTINGS.MaxPuddleWetness * 0.25;
 			// Slope gate is exact: if this is zero, downstream puddle/noise terms are guaranteed to be zero.
 			if (puddleSlopeMask > 0.0) {
 				[branch] if (CS_WETNESS_SETTINGS.PuddleMaskMode == Wetterness::PUDDLE_MASK_SIMPLE)
 				{
 					puddleFootprintMask = puddleSlopeMask;
-					puddle = puddleWetness * puddleSlopeMask;
+					puddle = puddleWetness * (puddleStrengthScale + 0.5) * puddleSlopeMask;
 				}
 				else
 				{
@@ -1471,7 +1473,7 @@ WetnessSurfaceState CreateWetnessSurfaceState(
 						puddleFootprintThreshold - puddleFootprintSoftness,
 						puddleFootprintThreshold + puddleFootprintSoftness,
 						puddleNoiseSignal);
-					puddleSignal = puddleSignal * ((minWetnessAngle / puddleMaxAngleSafe) * CS_WETNESS_SETTINGS.MaxPuddleWetness * 0.25) + 0.5;
+					puddleSignal = puddleSignal * puddleStrengthScale + 0.5;
 					float puddleBlend = puddleWetness;
 					puddleFootprintMask = puddleRadiusGate * puddleSlopeMask;
 					puddle = puddleSignal * puddleBlend * puddleSlopeMask * puddleRadiusGate;
