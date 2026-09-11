@@ -81,21 +81,21 @@ if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     )
 endif()
 
-# Register the destructive reset before dependency subdirectories can emit install actions.
+# Register the full-install reset before dependencies can emit install actions.
 set(AIO_DIR "${CMAKE_CURRENT_BINARY_DIR}/aio")
+set(AIO_INSTALL_RESET_SCRIPT
+    "${CMAKE_CURRENT_BINARY_DIR}/cmake/ResetAioInstallPrefix.cmake"
+)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ResetAioInstallPrefix.cmake"
+    "${AIO_INSTALL_RESET_SCRIPT}"
+    COPYONLY
+)
 install(
     CODE
         "
-    if(NOT \"\${CMAKE_INSTALL_PREFIX}\" STREQUAL \"${AIO_DIR}\")
-        message(FATAL_ERROR
-            \"Refusing to install: --prefix must be \\\"${AIO_DIR}\\\" \"
-            \"(got \\\"\${CMAKE_INSTALL_PREFIX}\\\"). This target recursively \"
-            \"deletes its entire --prefix directory before staging the AIO \"
-            \"package, so it must never be pointed at a live game install. \"
-            \"Use BuildRelease.bat <PRESET>-WITH-AUTO-DEPLOYMENT or the \"
-            \"DEPLOY_ALL/COPY_SHADERS targets to deploy to a game folder.\")
-    endif()
-    file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}\")
+    set(CSX_AIO_EXPECTED_PREFIX [==[${AIO_DIR}]==])
+    include([==[${AIO_INSTALL_RESET_SCRIPT}]==])
 "
 )
 
@@ -1596,6 +1596,20 @@ if(BUILD_CONTROLLER_TESTS)
             "${PROJECT_SOURCE_DIR}/tests/feature_preset_compatibility_contract_test.cmake"
     )
     add_test(
+        NAME WetternessPuddleStrengthContract
+        COMMAND
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}" -P
+            "${PROJECT_SOURCE_DIR}/tests/wetterness_puddle_strength_contract_test.cmake"
+    )
+    add_test(
+        NAME AioInstallResetPolicy
+        COMMAND
+            "${CMAKE_COMMAND}" "-DRESET_SCRIPT=${AIO_INSTALL_RESET_SCRIPT}"
+            "-DINSTALL_SCRIPT=${CMAKE_BINARY_DIR}/cmake_install.cmake"
+            "-DTEST_ROOT=${CMAKE_BINARY_DIR}/aio-install-reset-policy-test" -P
+            "${PROJECT_SOURCE_DIR}/tests/aio_install_reset_policy_test.cmake"
+    )
+    add_test(
         NAME PerformanceTuningDevBenchContract
         COMMAND
             "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}" -P
@@ -1612,6 +1626,8 @@ if(BUILD_CONTROLLER_TESTS)
         PerformanceTuningDevBenchContract
         VRMenuUiContract
         FeaturePresetCompatibilityContract
+        WetternessPuddleStrengthContract
+        AioInstallResetPolicy
         PROPERTIES LABELS "ControllerTests"
     )
     add_test(
@@ -1790,6 +1806,11 @@ if(BUILD_CONTROLLER_TESTS)
         cache_invalidation_test
         CacheInvalidation
         tests/cache_invalidation_test.cpp
+    )
+    add_controller_test(
+        wetterness_puddle_mask_cache_policy_test
+        WetternessPuddleMaskCachePolicy
+        tests/wetterness_puddle_mask_cache_policy_test.cpp
     )
     add_controller_test(
         shader_compilation_scheduling_policy_test
@@ -2336,6 +2357,7 @@ if(BUILD_CONTROLLER_TESTS)
             shader_cache_enable_policy_test
             shader_cache_provenance_test
             cache_invalidation_test
+            wetterness_puddle_mask_cache_policy_test
             shader_compilation_scheduling_policy_test
             volumetric_lighting_tuning_policy_test
             vr_depth_culling_cache_refresh_policy_test

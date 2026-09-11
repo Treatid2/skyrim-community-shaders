@@ -69,6 +69,16 @@ namespace CSX::Api
 			return phase;
 		}
 
+		template <class Clock, class Duration>
+		Phase WaitForTerminalUntil(const std::chrono::time_point<Clock, Duration>& a_deadline)
+		{
+			std::unique_lock lock(mutex);
+			condition.wait_until(lock, a_deadline, [this] {
+				return phase == Phase::completed || phase == Phase::cancelled;
+			});
+			return phase;
+		}
+
 		Result WaitForCompletion()
 		{
 			std::unique_lock lock(mutex);

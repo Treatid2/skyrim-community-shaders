@@ -296,6 +296,7 @@ The response includes at least:
   },
   "limits": {
     "activeSourceCaptures": 1,
+    "outstandingArtifacts": 2,
     "outstandingCaptureJobs": 2,
     "maximumOutputsPerCaptureJob": 4,
     "pendingOperations": 64,
@@ -312,6 +313,8 @@ The response includes at least:
 These numbers are examples, not frozen limits. The implementation reports its
 actual values. The present worker's two-outstanding-capture-job limit may remain
 initially; a sequence scheduler must adapt rather than enlarge it blindly.
+`outstandingArtifacts` remains as the contract-v1 compatibility alias for this
+same capture-job limit. One capture job may emit several output artifacts.
 
 ### Operational status
 
@@ -341,6 +344,8 @@ worker backlog, and journal retention without initiating work:
   },
   "worker": {
     "running": true,
+    "outstandingArtifacts": 0,
+    "capacity": 2,
     "outstandingCaptureJobs": 0,
     "captureJobCapacity": 2,
     "completedArtifacts": 18,
@@ -358,6 +363,10 @@ worker backlog, and journal retention without initiating work:
   }
 }
 ```
+
+The legacy `outstandingArtifacts` and `capacity` members remain contract-v1
+aliases for the capture-job counters. New clients should use the explicitly
+named capture-job members.
 
 Counters are monotonic for the server session unless the capability response
 documents a reset action. Readiness timestamps/frame IDs are accompanied by
@@ -615,6 +624,14 @@ the requested `skip` or `abort` policy applies at the missed slot.
 - `request_cancel` is immediate best-effort: cancel unscheduled and waiting
   children, allow irreversible writes to finish, and finalize
   `cancelled`/`cancelled_partial`.
+- A configured backpressure or failure-policy abort reports `failed` or
+  `failed_partial`; it is not a graceful client stop.
+- Final manifest admission is the sequence's terminal-outcome commit point.
+  Stop or cancel commands received after that point return the current receipt
+  with `commandAccepted: false` and do not rewrite the committed outcome.
+- DevBench dispatch reports `dispatcher_admitted` without inviting a retry if
+  main-thread work starts but exceeds the response deadline; that work may
+  still complete, so clients should reconcile through `request_get` or events.
 - Disabling the screenshot feature behaves as immediate cancellation for
   source acquisition. It does not abandon committed worker writes.
 - Device loss, runtime source loss, or worker shutdown must finalize a partial
