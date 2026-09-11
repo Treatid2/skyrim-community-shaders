@@ -255,7 +255,7 @@ public:
 	float GetEffectiveGrassGlossiness(float dryGlossiness, const PerFrame& frameData) const;
 	float GetEffectiveGrassSpecularStrength(float drySpecularStrength, const PerFrame& frameData) const;
 
-	/** Creates the cached puddle mask, falling back to Simple on failure. */
+	/** Creates the cached puddle mask; unavailable textured modes use Simple. */
 	virtual void SetupResources() override;
 	virtual void Prepass() override;
 
