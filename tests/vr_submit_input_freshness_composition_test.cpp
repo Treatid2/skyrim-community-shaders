@@ -176,12 +176,22 @@ int main()
 
 	const auto rejectedBoundary = ResolveSubmitBoundaryIdentity(changedResourceObservation);
 	auto fallbackAdmission = Admit(changedResourceObservation);
-	--fallbackAdmission.lastCompletedWorldRenderFrame;
+	fallbackAdmission.producedEyeMask = 1;
 	const auto fallbackProof = ResolveProducerProof(fallbackAdmission);
-	const auto left = ResolveCurrentEyeIdentity(fallbackAdmission, rejectedBoundary, 0, fallbackAdmission.eyes[0]);
-	const auto right = ResolveCurrentEyeIdentity(fallbackAdmission, rejectedBoundary, 1, fallbackAdmission.eyes[1]);
+	const auto left = ResolveCurrentEyeIdentity(fallbackAdmission, rejectedBoundary, 0, fallbackAdmission.eyes[0], true);
+	const auto right = ResolveCurrentEyeIdentity(fallbackAdmission, rejectedBoundary, 1, fallbackAdmission.eyes[1], true);
 	Require(!fallbackProof.IsValid() && left.IsValid() && right.IsValid(),
 		"Rejected stereo proof prevented a correlated current-eye retry");
+	auto staleGuideAdmission = fallbackAdmission;
+	--staleGuideAdmission.lastCompletedWorldRenderFrame;
+	Require(!ResolveCurrentEyeIdentity(
+				staleGuideAdmission, rejectedBoundary, 0, staleGuideAdmission.eyes[0], true)
+				.IsValid(),
+		"Stale guides authorized current-eye temporal work");
+	Require(!ResolveCurrentEyeIdentity(
+				fallbackAdmission, rejectedBoundary, 0, fallbackAdmission.eyes[0], false)
+				.IsValid(),
+		"Unproven color/guide correspondence authorized current-eye work");
 	PreparedInputs prepared;
 	prepared.Record(left, false);
 	Require(prepared.Matches(left) && !prepared.Matches(right), "Left eye preparation leaked to its peer");
@@ -190,9 +200,9 @@ int main()
 	Require(!CanConsumePeerInputs(fallbackProof, 0) && !CanConsumePeerInputs(fallbackProof, 1),
 		"Current-eye reuse upgraded an invalid stereo proof");
 	auto separateRightAdmission = admission;
-	--separateRightAdmission.lastCompletedWorldRenderFrame;
+	separateRightAdmission.producedEyeMask = 2;
 	const auto separateRight = ResolveCurrentEyeIdentity(separateRightAdmission,
-		ResolveSubmitBoundaryIdentity(observation), 1, separateRightAdmission.eyes[1]);
+		ResolveSubmitBoundaryIdentity(observation), 1, separateRightAdmission.eyes[1], true);
 	Require(left.source.colorSource != separateRight.source.colorSource &&
 				SharesCurrentEyeProducerScope(left, separateRight),
 		"Independent source textures did not retain their shared outer scope");
@@ -243,8 +253,22 @@ int main()
 		mutate(changed);
 		Require(!prepared.Matches(changed), "Changed current-eye identity reused stale prepared inputs");
 	}
-	Require(!ResolveCurrentEyeIdentity(fallbackAdmission, {}, 0, fallbackAdmission.eyes[0]).IsValid(),
+	Require(!ResolveCurrentEyeIdentity(fallbackAdmission, {}, 0, fallbackAdmission.eyes[0], true).IsValid(),
 		"Unscoped submit authorized current-eye caching");
+
+	FinalizedEyePair mirrorPair;
+	mirrorPair.Record(left);
+	Require(!mirrorPair.Consume(), "Single finalized eye completed a mirror pair");
+	mirrorPair.Record(right);
+	Require(mirrorPair.Consume(), "Compatible finalized eyes did not complete a mirror pair");
+	auto replacementRight = right;
+	++replacementRight.scopeToken;
+	mirrorPair.Record(left);
+	mirrorPair.Record(replacementRight);
+	Require(!mirrorPair.IsComplete(), "A replacement producer scope retained an old mirror peer");
+	mirrorPair.Record(right);
+	mirrorPair.Invalidate(1u << right.eye);
+	Require(!mirrorPair.IsComplete(), "Retired mirror output remained consumable");
 
 	prepared.Invalidate(1);
 	Require(!prepared.Matches(left) && prepared.Matches(right),

@@ -18,9 +18,13 @@ file(READ
     "${PROJECT_ROOT}/src/Features/Upscaling/VRSubmitInputFreshnessPolicy.h"
     _freshness_policy
 )
+file(READ
+    "${PROJECT_ROOT}/src/Features/Upscaling/VRSubmitInputReusePolicy.h"
+    _reuse_policy
+)
 
 set(_contract
-    "${_overlay_source}\n${_upscaling_source}\n${_upscaling_header}\n${_freshness_policy}"
+    "${_overlay_source}\n${_upscaling_source}\n${_upscaling_header}\n${_freshness_policy}\n${_reuse_policy}"
 )
 string(REGEX REPLACE "[\r\n\t ]+" " " _contract "${_contract}")
 
@@ -45,6 +49,14 @@ foreach(_required_contract IN ITEMS
     "a_observation.activeHandleIdentity != a_observation.nestedHandleIdentity"
     "submitStageCurrentEyePreparedInputs.Matches(currentEyeInputIdentity)"
     "submitStageCurrentEyePreparedInputs.Invalidate(eyeMask)"
+    "submitStageMirrorPair.Invalidate(eyeMask)"
+    "currentEyeSourceRegionProven"
+    "if (!presentationOnly && !currentEyeInputIdentity.IsValid())"
+    "source.lastWorldRenderFrame == source.submitFrame"
+    "source.lastCompletedWorldRenderFrame == source.submitFrame"
+    "submitStageMirrorPair.Record(currentEyeInputIdentity)"
+    "submitStageMirrorPair.Consume()"
+	"submitStageMirrorPair.Invalidate(1u << eyeIndex)"
     "cachedEyeState.currentEyeIdentity, currentEyeInputIdentity)"
     "currentEyeSourceOwners.color.get() == sourceTexture"
     "currentEyeSourceOwners.depth.get() == depth.texture"
