@@ -12,9 +12,9 @@ reviews:
         auto_pause_after_reviewed_commits: 0
         base_branches:
             - "main-VR"
-    # Positive entries override CodeRabbit's default HLSL exclusion. Keep this
-    # as an explicit source/configuration allow-list so binary assets and build
-    # outputs do not enter the review surface.
+    # Positive entries override CodeRabbit defaults, including exclusions.
+    # Keep the explicit exclusions last so generated, dependency, and build
+    # output text cannot re-enter through a broad source extension.
     path_filters:
         - "**/*.c"
         - "**/*.cpp"
@@ -24,6 +24,7 @@ reviews:
         - "**/*.hlsl"
         - "**/*.hlsli"
         - "**/*.cmake"
+        - "CMakeLists.txt"
         - "**/CMakeLists.txt"
         - "**/*.in"
         - "**/*.ini"
@@ -41,18 +42,39 @@ reviews:
         - "**/*.java"
         - "**/*.patch"
         - "**/*.csv"
+        - "COPYING"
         - "**/COPYING"
+        - "**/CORE"
+        - "Dockerfile"
         - "**/Dockerfile"
+        - "**/LICENSE"
+        - "CMakeUserPresets.json.template"
         - "**/*.json.template"
-        - ".githooks/*"
+        - ".githooks/*.bat"
+        - ".githooks/*.ps1"
+        - ".githooks/*.py"
+        - ".githooks/*.sh"
+        - ".githooks/pre-commit"
         - ".clang-format"
         - ".clang-format-ignore"
         - ".clangd"
         - ".gitattributes"
         - ".gitignore"
+        - "**/.gitignore"
         - ".gitmodules"
         - ".prettierignore"
         - "version"
+        - "!**/.cache/**"
+        - "!**/CMakeFiles/**"
+        - "!**/build/**"
+        - "!**/dist/**"
+        - "!**/generated/**"
+        - "!**/node_modules/**"
+        - "!**/obj/**"
+        - "!**/out/**"
+        - "!**/extern/**"
+        - "!**/*.generated.*"
+        - "!**/*.min.js"
     path_instructions:
         - path: "**/*"
           instructions: |
