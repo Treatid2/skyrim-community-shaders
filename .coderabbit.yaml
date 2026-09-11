@@ -6,9 +6,53 @@ reviews:
     auto_review:
         enabled: true
         drafts: false
-        auto_incremental_review: true
+        # Later pushes are requested deliberately so the one-hour service gate
+        # is observed instead of triggering an uncontrolled review per commit.
+        auto_incremental_review: false
+        auto_pause_after_reviewed_commits: 0
         base_branches:
             - "main-VR"
+    # Positive entries override CodeRabbit's default HLSL exclusion. Keep this
+    # as an explicit source/configuration allow-list so binary assets and build
+    # outputs do not enter the review surface.
+    path_filters:
+        - "**/*.c"
+        - "**/*.cpp"
+        - "**/*.h"
+        - "**/*.hpp"
+        - "**/*.inl"
+        - "**/*.hlsl"
+        - "**/*.hlsli"
+        - "**/*.cmake"
+        - "**/CMakeLists.txt"
+        - "**/*.in"
+        - "**/*.ini"
+        - "**/*.json"
+        - "**/*.yaml"
+        - "**/*.yml"
+        - "**/*.toml"
+        - "**/*.md"
+        - "**/*.txt"
+        - "**/*.ps1"
+        - "**/*.py"
+        - "**/*.sh"
+        - "**/*.bat"
+        - "**/*.js"
+        - "**/*.java"
+        - "**/*.patch"
+        - "**/*.csv"
+        - "**/COPYING"
+        - "**/Dockerfile"
+        - "**/*.json.template"
+        - ".githooks/*"
+        - ".clang-format"
+        - ".clang-format-ignore"
+        - ".clangd"
+        - ".gitattributes"
+        - ".gitignore"
+        - ".gitmodules"
+        - ".prettierignore"
+        - "version"
     path_instructions:
         - path: "**/*"
           instructions: |
