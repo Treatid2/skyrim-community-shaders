@@ -1,10 +1,9 @@
 {
-    "schemaVersion": 1,
-    "sequence": 218,
+    "schemaVersion": 2,
+    "sequence": 217,
     "baseVersion": "3.19-VR",
-    "dateUtc": "2026-09-10",
-    "sourceSha": "bbb76f6f9d76f24391ff0e4f3ea3c37349a8af4a",
-    "includedPullRequests": [
-        23
-    ]
+    "dateUtc": "2026-08-09",
+    "sourceSha": "7b87217c62566dc45b457d60e4108c162007ef5d",
+    "previousStateSha": null,
+    "includedPullRequests": []
 }

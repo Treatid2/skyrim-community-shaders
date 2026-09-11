@@ -15,6 +15,8 @@
 #include <utility>
 #include <vector>
 
+#include "FSRSharedGuidePolicy.h"
+
 #include <FidelityFX/host/backends/dx11/ffx_dx11.h>
 #include <FidelityFX/host/ffx_fsr3.h>
 #include <FidelityFX/host/ffx_interface.h>
@@ -29,6 +31,7 @@
 
 #include "../../Buffer.h"
 #include "../../State.h"
+#include "FSRTemporalTuningPolicy.h"
 
 class WrappedResource;
 
@@ -106,6 +109,21 @@ public:
 	static constexpr uint32_t Fsr3Version = FFX_UPSCALER_MAKE_VERSION(FFX_FSR3_VERSION_MAJOR, FFX_FSR3_VERSION_MINOR, FFX_FSR3_VERSION_PATCH);
 	static constexpr std::wstring_view RuntimeUpscalerDllName = L"amd_fidelityfx_upscaler_dx12.dll";
 	static constexpr std::string_view RuntimeUpscalerDllNameUtf8 = "amd_fidelityfx_upscaler_dx12.dll";
+	struct TemporalTuningSnapshot
+	{
+		FSRTemporalTuningPolicy::Settings requested{};
+		FSRTemporalTuningPolicy::Settings contextSettings{};
+		FSRTemporalTuningPolicy::Status status = FSRTemporalTuningPolicy::Status::Inactive;
+		uint64_t providerId = 0;
+		uint32_t configuredContexts = 0;
+		int32_t lastConfigureResult = 0;
+		uint64_t requestRevision = 0;
+		RuntimeUpscalerFramePath lastDispatchPath = RuntimeUpscalerFramePath::kInactive;
+	};
+	/** Queues validated settings; GPU context changes run at the existing render safe point. */
+	bool RequestTemporalTuning(const FSRTemporalTuningPolicy::Settings& a_settings);
+	/** Returns synchronized request/application evidence for UI and DevBench. */
+	TemporalTuningSnapshot GetTemporalTuningSnapshot() const;
 	~FidelityFX();
 
 	HMODULE module = nullptr;
@@ -187,6 +205,11 @@ public:
 	bool IsRuntimeFsr4Available() const;
 	bool ShouldRequestRuntimeFsr4() const;
 	bool ShouldUseRuntimeUpscalerForFSR() const;
+	/** Diagnostic A/B switch; disabling direct guides retains all fenced import ownership. */
+	void SetRuntimeSharedGuideInputsEnabled(bool a_enabled) noexcept { runtimeSharedGuideInputsEnabled.store(a_enabled, std::memory_order_release); }
+	[[nodiscard]] bool AreRuntimeSharedGuideInputsEnabled() const noexcept { return runtimeSharedGuideInputsEnabled.load(std::memory_order_acquire); }
+	/** A quarantined provider's imported inputs must be replaced before any D3D11 reuse. */
+	[[nodiscard]] bool IsRuntimeSharedGuideQuarantined(ID3D11Resource* a_source) const noexcept;
 	bool HasRuntimeUpscalerSupportCheckResult() const;
 	bool IsRuntimeUpscalerSupportConfirmed() const;
 	bool IsRuntimeUpscalerProviderMatchingRequestedVersion() const;
@@ -207,7 +230,8 @@ public:
 #endif
 
 	UpscaleResult Upscale(ID3D11Resource* a_upscalingTexture, ID3D11Resource* a_depth, ID3D11Resource* a_reactiveMask, ID3D11Resource* a_transparencyCompositionMask, ID3D11Resource* a_motionVectors, float a_sharpness);
-	bool UpscaleRegion(uint32_t a_contextIndex, ID3D11Resource* a_color, ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
+	/** Preserves lifecycle deferral without publishing output or reporting a dispatch failure. */
+	UpscaleResult UpscaleRegion(uint32_t a_contextIndex, ID3D11Resource* a_color, ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
 		ID3D11Resource* a_reactiveMask, ID3D11Resource* a_transparencyCompositionMask, ID3D11Resource* a_output,
 		uint32_t a_renderWidth, uint32_t a_renderHeight, uint32_t a_displayWidth, uint32_t a_displayHeight,
 		float a_motionVectorScaleX, float a_motionVectorScaleY, float a_sharpness, bool* a_usedRuntimeUpscaler = nullptr);
@@ -262,6 +286,15 @@ private:
 	D3D11_TEXTURE2D_DESC runtimeOutputSharedDesc{};
 	ffx::Context runtimeUpscalerContexts[2]{};
 	bool runtimeUpscalerContextIndeterminate[2]{};
+	mutable std::mutex temporalTuningMutex;
+	TemporalTuningSnapshot temporalTuningSnapshot{};
+	std::atomic_uint64_t temporalRequestRevision{ 0 };
+	uint64_t temporalContextRevision = 0;
+	uint32_t temporalContextLastDispatchFrame = ~uint32_t{ 0 };
+	std::atomic<RuntimeUpscalerFramePath> temporalLastDispatchPath{ RuntimeUpscalerFramePath::kInactive };
+	FSRTemporalTuningPolicy::RejectedRequest temporalRejectedRequest{};
+	LifecycleResult RecordRuntimeProviderResult(bool a_supported);
+	LifecycleResult ConfigureTemporalTuningContexts(const TemporalTuningSnapshot& a_request);
 
 	winrt::com_ptr<ID3D11Fence> runtimeD3D11Fence;
 	winrt::com_ptr<ID3D12Fence> runtimeD3D12Fence;
@@ -288,6 +321,13 @@ private:
 	RuntimeWrappedResources runtimeReactiveShared{};
 	RuntimeWrappedResources runtimeTransparencyShared{};
 	RuntimeWrappedResources runtimeOutputShared{};
+	struct RuntimeSharedGuideImport
+	{
+		winrt::com_ptr<ID3D11Resource> source;
+		std::unique_ptr<WrappedResource> imported;
+	};
+	std::array<std::array<RuntimeSharedGuideImport, FSRSharedGuidePolicy::kGuideCount>, 2> runtimeSharedGuideImports{};
+	std::atomic_bool runtimeSharedGuideInputsEnabled{ true };
 
 	HMODULE frameGenerationModule = nullptr;
 	HMODULE runtimeUpscalerModule = nullptr;
@@ -389,7 +429,11 @@ private:
 		const D3D11_TEXTURE2D_DESC& a_transparencyDesc,
 		const D3D11_TEXTURE2D_DESC& a_outputDesc);
 	LifecycleResult ExecuteRuntimeUpscalerBatch(const RuntimeDispatchPlan& a_plan, std::span<const UpscaleRegionParameters> a_regions);
-	[[nodiscard]] bool CanDispatchHostFallbackForRegions(std::span<const UpscaleRegionParameters> a_regions) const;
+	/** Returns a retained exact full-eye guide import, or null to use the copy fallback. */
+	WrappedResource* ResolveRuntimeSharedGuide(uint32_t a_eye, FSRSharedGuidePolicy::Guide a_guide,
+		ID3D11Resource* a_source, const D3D11_TEXTURE2D_DESC& a_desc);
+	[[nodiscard]] bool HasQuarantinedRuntimeSharedGuides(const UpscaleRegionParameters& a_region) const noexcept;
+	[[nodiscard]] bool CanDispatchHostFallbackForRegions(std::span<const UpscaleRegionParameters> a_regions, const RuntimeDispatchPlan& a_plan) const;
 	LifecycleResult DispatchRuntimeUpscalerBatch(std::span<const UpscaleRegionParameters> a_regions);
 	LifecycleResult DestroyRuntimeUpscalerContexts(bool a_waitForIdle = true);
 	LifecycleResult DestroyRuntimeUpscalerResources(bool a_waitForIdle = true);

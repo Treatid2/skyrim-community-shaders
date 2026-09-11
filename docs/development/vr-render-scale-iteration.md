@@ -1,5 +1,44 @@
 # VR render-scale iteration records
 
+## 2026-09-10: submit contract integration review
+
+Rebased the submit input candidate onto `main-VR` at `ef7c366d`, retaining
+exact input freshness proofs, source COM ownership, and deferred FSR
+handling. The extracted batch cache retains dispatch evidence on reuse.
+Deferred presentation restores the color contract when resource replacement
+clears admission and rejects conflicting color metadata. Production-path
+regressions cover that recovery, Linear rejection, captured host temporal
+scalars, and normalized frame-zero evidence with distinct raw cache keys.
+The deferred color regression failed before the correction and passed after.
+
+This review generated no runtime measurement or candidate qualification
+report. The comparison ledger remains unchanged; the earlier build receipts
+do not qualify the rebased candidate for visual quality or performance.
+
+## 2026-09-09: submit input contracts
+
+The `fix/vr-submit-input-contracts` candidate freezes stereo camera metadata
+before post-processing and makes submit color transfer/range explicit.
+The scope, fallback behavior, and validation cases are recorded in
+[VR submit input contracts](vr-submit-input-contracts.md).
+Adversarial review tightened logical-frame admission, preserved FSR batch
+dispatch evidence across desktop Present, and prevented failed DLSS fallback
+from reopening old token publication. Snapshot ownership is private and
+dispatch jitter selection is shared. Regressions cover these production
+policy and cache boundaries.
+This is an implementation and policy-test record, not a runtime measurement.
+The comparison ledger has no new candidate column because an exact fixture
+and accepted baseline are not configured for this run. Runtime qualification
+must precede any visual-quality, stability, or performance claim.
+
+The optional runtime FSR shared-guide path and its session-only DevBench
+A/B switch are documented in [Runtime FSR shared guide inputs](fsr-shared-guides.md).
+It removes eligible full-eye guide staging copies while preserving the
+existing interop fences, copied fallback and quarantined ownership. This
+implementation has no performance claim or runtime qualification result;
+new measurements must use the existing comparison ledger and reporting
+workflow.
+
 The VR render-scale controller can capture a bounded CSX-menu stress session and write a versioned JSON record for an MCP/Ghidra optimization loop. The capture observes user-driven changes; it never changes render-scale settings itself.
 
 ## Capture workflow
@@ -14,6 +53,67 @@ The VR render-scale controller can capture a bounded CSX-menu stress session and
 Use identical save, location, CSX profile, change order, dwell frames, HMD resolution, backend, and graphics settings when comparing iterations. Prioritize the production workload in this order: repeated same-backend resolution changes (for example Hoshipa/Quality), DLSS/DLAA and FSR/Native-AA activation changes, then a fixed-profile DLSS/FSR alternating series as a lower-priority backend-handoff stress oracle. Run each matrix as a separate capture so exact-profile memory grouping remains attributable.
 
 ## DevBench automation
+
+### Submit-input freshness
+
+`communityshaders.renderscale status` includes `submitInputFreshness` when
+the DevBench bridge is enabled. Its fixed process-lifetime counters report
+outer-boundary acceptance and rejection reasons. `methods.fsr`,
+`methods.dlss`, and `methods.other` each expose producer-proof outcomes and
+work counts for guide encoding, color copies, input sanitation, vendor
+attempts/retries, and fallback preparation/output reuse. Compare two snapshots
+from the same process; individual counters are sampled independently.
+
+A matching descriptor address is insufficient: nested submissions must name
+the same non-null DirectX resource captured at the outer boundary. Copied
+descriptors can qualify. When peer proof fails, reuse of one observed eye is
+bounded by the correlated outer scope, compositor cycle, frame, source and
+guide resources, region, method, generation, flags, and color space. Such reuse
+cannot admit peer reads or stereo dispatch. Missing outer scope disables
+reuse because an in-place producer rewrite cannot be excluded. Reset,
+resource destruction, device loss, and attempted input replacement retire
+the corresponding cache claims before their resources can change.
+
+The PR65 repair has no new runtime comparison entry in
+`vr-render-scale-comparison-ledger.csv`: live qualification is pending a
+released MO2 owner and a configured verified fixture. Offline policy and
+composition coverage does not establish hook correctness, observed proof
+acceptance, visual quality, or GPU performance in Skyrim.
+
+### Deferred FSR eye dispatch
+
+An FSR eye whose provider is still preparing resources returns `Deferred`.
+The submit path presents ordinary stretch for the remainder of that
+compositor cycle and retries on a later cycle. It does not record a failed
+vendor evaluation or authorize reads from an unproven peer eye. Genuine
+provider and device failures retain their existing failure handling.
+
+See [the deferred-eye repair record](vr-fsr-deferred-eye-dispatch.md) for
+the cold-entry failure mechanism and validation limits. This implementation
+has no new measured entry in `vr-render-scale-comparison-ledger.csv`:
+builds, tests, and runtime qualification are deferred by the operator while
+another workload is running. No candidate timing or qualification result
+has been inferred from the source change.
+
+### Render Scale selection link
+
+The optional [Render Scale selection link](vr-render-scale-link.md) separates
+remembered user intent from quality-gated physical activation. The
+`set_render_scale_link` action takes Boolean `enabled` and requires developer
+mode plus an active stress capture. Status exposes `renderScaleSelectionPolicy`;
+ordinary explicit `apply` profiles remain authoritative. The isolated forward
+port from `72b04290b` has no new live qualification or performance measurement.
+Consequently, no candidate measurement is added to the comparison ledger, and
+its historical results must not be treated as evidence for this change.
+
+The 2026-09-10 rebase onto `1afb9eca9` also preserves independent saved
+preferences when performance-measurement restoration rejects a physical
+transition. The rejection remains guarded and is logged with its reason.
+See the [link validation record](vr-render-scale-link.md#validation) for the
+24 restore scenarios and focused checks. This source review adds no runtime
+measurement or qualification result; the existing ledger remains unchanged.
+
+### Controller actions
 
 Step 17 exposes the capture contract through the external devbench host used by
 Open Shaders. The bridge is built by default through `DEVBENCH_BRIDGE=ON`, is
@@ -981,3 +1081,24 @@ The record lists the principal native symbols under `analysis.symbols`. In Ghidr
     and `FidelityFX::DestroyFSRResources` for FSR context lifetime validation.
 
 Use Ghidra to validate control flow and ownership against the shipped binary, while using the JSON record as runtime evidence. A candidate should be promoted only when repeated scenario records pass and improve the target metric without regressing another accepted backend or pressure scenario.
+
+## September 10: PR75 NVIDIA two-pass completion versus main-VR
+
+Run `nvidia-2026-09-10T17-12-40-813Z`, clean PR75 c615779a9 on main-VR
+7c8e3e656, completed 33+33 transitions in game PID 41824. Terminal render
+PASS; Task 2 counts 66/0/0; complete reporting and verified capture cleanup.
+Full-history applicable health is MET/MET, with zero fidelity or vendor
+fallback observations. The main-VR reference nvidia-20260910T124329625Z
+had 4 fidelity and 2 vendor-failure eye observations in each pass, on
+rows 26 and 28; both routes are clean in this candidate's two passes.
+Strict means are 816.198/804.581 ms versus 866.009/833.078 ms, changes
+-5.752%/-3.421%. Row 25 is slower in both passes. Memory is inconclusive.
+The formal improvement-or-neutral assessment remains INCONCLUSIVE due to
+different weather/game hour, unavailable fixture fingerprint and no declared
+tolerance policy. Raw excluded diagnostic gates remain retained.
+
+All summary/comparison fields, 66 transitions and both passes reconstruct
+exactly from the canonical ledger; 1,056 paired numeric cells passed audit.
+Prior attempt evidence and historical cells remain preserved. The user
+authorized a PR75 update with means and SE in the style of PR65. See
+[the complete PR75 comparison](pr75-nvidia-mainvr-comparison-20260910.md).

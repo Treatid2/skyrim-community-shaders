@@ -3,50 +3,36 @@ name: "Test Build: Allocate After Merge"
 on:
     pull_request_target:
         types: [closed]
+    workflow_dispatch:
 
 permissions:
-    contents: read
+    actions: write
+    contents: write
     pull-requests: read
 
 jobs:
-    settle:
-        name: Wait for an eligible merge batch
+    quiet-period:
+        name: Wait for merged test-build batch
         if: >
-            github.event.pull_request.merged == true &&
-            github.event.pull_request.base.ref == github.event.repository.default_branch
-        concurrency:
-            # Only an eligible merge may restart the quiet period. Unique groups
-            # keep skipped closed-PR events away from the cancellation boundary.
-            group: >-
-                ${{ github.event.pull_request.merged == true &&
-                    github.event.pull_request.base.ref == github.event.repository.default_branch &&
-                    'csx-test-build-settle' ||
-                    format('csx-test-build-ignored-{0}', github.run_id) }}
-            cancel-in-progress: true
+            github.event_name == 'workflow_dispatch' ||
+            (github.event.pull_request.merged == true &&
+            github.event.pull_request.base.ref == github.event.repository.default_branch)
         runs-on: ubuntu-latest
+        concurrency:
+            group: csx-test-build-quiet-period
+            cancel-in-progress: true
         steps:
-            - name: Wait for a merge batch to settle
+            - name: Wait for the merge batch to settle
+              if: github.event_name == 'pull_request_target'
               run: sleep 180
 
     allocate:
-        name: Allocate merged test-build batch
-        needs: settle
-        permissions:
-            contents: write
-            pull-requests: read
-        concurrency:
-            # Allocation and publication are serialized but never cancelled.
-            # A rerun recovers the existing state-only allocation commit.
-            group: csx-test-build-publication
-            cancel-in-progress: false
+        name: Publish and dispatch merged test-build batch
+        needs: quiet-period
         runs-on: ubuntu-latest
-        outputs:
-            ready: ${{ steps.identity.outputs.ready }}
-            build-id: ${{ steps.identity.outputs.build_id }}
-            artifact-name: ${{ steps.identity.outputs.artifact_name }}
-            display-version: ${{ steps.identity.outputs.display_version }}
-            source-sha: ${{ steps.identity.outputs.source_sha }}
-            allocation-sha: ${{ steps.identity.outputs.allocation_sha }}
+        concurrency:
+            group: csx-test-build-publisher
+            cancel-in-progress: false
         steps:
             # pull_request_target is intentional: only the trusted default
             # branch is checked out and executed; PR-head code is never used.
@@ -58,82 +44,141 @@ jobs:
                   persist-credentials: true
                   token: ${{ secrets.RELEASE_PAT || github.token }}
 
-            - name: Select represented product source
-              id: source
+            - name: Validate current state lineage
+              id: current
+              env:
+                  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
               run: |
                   set -euo pipefail
-                  python tools/csx_test_build.py source \
+                  git fetch --tags origin \
+                    "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+                  REMOTE_SHA=$(git rev-parse "origin/$DEFAULT_BRANCH")
+                  HEAD_SHA=$(git rev-parse HEAD)
+                  if [ "$REMOTE_SHA" != "$HEAD_SHA" ]; then
+                    echo "Default branch moved before allocation; a later merge run owns the batch."
+                    exit 1
+                  fi
+
+                  LAST_STATE_SHA=$(git log --first-parent -1 --format=%H -- version/test-build.json)
+                  python tools/csx_test_build.py read \
                     --state version/test-build.json \
                     --github-output "$GITHUB_OUTPUT"
+                  echo "last_state_sha=$LAST_STATE_SHA" >> "$GITHUB_OUTPUT"
+                  echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+                  STATE_KIND=$(python tools/csx_test_build.py read \
+                    --state version/test-build.json | sed -n 's/^state_kind=//p')
+                  if [ "$STATE_KIND" = "allocation" ]; then
+                    python tools/csx_test_build.py verify-allocation \
+                      --repository . \
+                      --allocation-sha "$LAST_STATE_SHA" \
+                      --state version/test-build.json
+                  else
+                    python tools/csx_test_build.py verify-seed \
+                      --repository . \
+                      --seed-sha "$LAST_STATE_SHA" \
+                      --state version/test-build.json
+                    SEED_SOURCE_SHA=$(python tools/csx_test_build.py read \
+                      --state version/test-build.json | sed -n 's/^source_sha=//p')
+                    if [ "$(git rev-parse 'RC217^{commit}')" != "$SEED_SOURCE_SHA" ]; then
+                      echo "RC217 does not match the immutable seed source." >&2
+                      exit 1
+                    fi
+                    git merge-base --is-ancestor "$SEED_SOURCE_SHA" "$HEAD_SHA"
+                  fi
+
+            - name: Reconcile the preceding allocation
+              if: steps.current.outputs.state_kind == 'allocation'
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  ALLOCATION_SHA: ${{ steps.current.outputs.last_state_sha }}
+                  TAG_NAME: ${{ steps.current.outputs.tag_name }}
+              run: |
+                  set -euo pipefail
+                  REMOTE_TAG_SHA=$(git ls-remote origin "refs/tags/$TAG_NAME" | cut -f1)
+                  if [ "$REMOTE_TAG_SHA" != "$ALLOCATION_SHA" ]; then
+                    echo "Allocation tag $TAG_NAME is missing or does not identify $ALLOCATION_SHA." >&2
+                    exit 1
+                  fi
+                  python tools/csx_test_build.py ensure-dispatch \
+                    --repository-slug "${{ github.repository }}" \
+                    --allocation-sha "$ALLOCATION_SHA" \
+                    --tag-name "$TAG_NAME"
 
             - name: Allocate the next test-build identity
               id: allocation
               env:
-                  MERGED_PR: ${{ github.event.pull_request.number }}
-                  SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+                  GH_TOKEN: ${{ github.token }}
+                  HEAD_SHA: ${{ steps.current.outputs.head_sha }}
+                  LAST_STATE_SHA: ${{ steps.current.outputs.last_state_sha }}
+                  STATE_KIND: ${{ steps.current.outputs.state_kind }}
+                  PREVIOUS_SOURCE_SHA: ${{ steps.current.outputs.source_sha }}
               run: |
                   set -euo pipefail
                   BASE_VERSION=$(jq -r '.configurePresets[] | select(.name == "VR") | .cacheVariables.CSX_VERSION' CMakePresets.json)
+                  SOURCE_SHA=$HEAD_SHA
+                  if [ "$STATE_KIND" = "allocation" ] && [ "$HEAD_SHA" = "$LAST_STATE_SHA" ]; then
+                    SOURCE_SHA=$PREVIOUS_SOURCE_SHA
+                  fi
+
                   python tools/csx_test_build.py allocate \
                     --state version/test-build.json \
                     --base-version "$BASE_VERSION" \
                     --source-sha "$SOURCE_SHA" \
+                    --previous-state-sha "$LAST_STATE_SHA" \
                     --date "$(date -u +%Y-%m-%d)" \
-                    --pr "$MERGED_PR" \
-                    --discover-git-range \
+                    --repository-slug "${{ github.repository }}" \
                     --github-output "$GITHUB_OUTPUT"
 
-            - name: Commit allocated state
+            - name: Publish the immutable allocation
               id: publish
               if: steps.allocation.outputs.allocated == 'true'
               env:
                   DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
                   SOURCE_SHA: ${{ steps.allocation.outputs.source_sha }}
                   DISPLAY_VERSION: ${{ steps.allocation.outputs.display_version }}
+                  TAG_NAME: ${{ steps.allocation.outputs.tag_name }}
               run: |
                   set -euo pipefail
-                  git fetch origin "$DEFAULT_BRANCH"
+                  git fetch origin \
+                    "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
                   REMOTE_SHA=$(git rev-parse "origin/$DEFAULT_BRANCH")
                   if [ "$REMOTE_SHA" != "$SOURCE_SHA" ]; then
-                    echo "Default branch moved from $SOURCE_SHA to $REMOTE_SHA; a later merge event will allocate the complete batch."
-                    exit 0
+                    echo "Default branch moved from $SOURCE_SHA to $REMOTE_SHA; a later merge run owns the complete batch."
+                    exit 1
                   fi
 
                   git config user.name "github-actions[bot]"
                   git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
                   git add version/test-build.json
                   git commit \
-                    -m "chore(build): allocate $DISPLAY_VERSION [skip ci]" \
+                    -m "build(release): allocate test build [skip ci]" \
                     -m "Rationale:
                   Record one durable identity for the settled merge batch." \
                     -m "Implementation:
-                  Advance the validated test-build state for $SOURCE_SHA."
-                  git push origin "HEAD:$DEFAULT_BRANCH"
-                  echo "state_pushed=true" >> "$GITHUB_OUTPUT"
+                  Advance the validated state and bind it to its exact source.
+                  Test build: $DISPLAY_VERSION
+                  Source: $SOURCE_SHA"
+                  ALLOCATION_SHA=$(git rev-parse HEAD)
+                  python tools/csx_test_build.py verify-allocation \
+                    --repository . \
+                    --allocation-sha "$ALLOCATION_SHA" \
+                    --state version/test-build.json
+                  git tag "$TAG_NAME" "$ALLOCATION_SHA"
+                  git push --atomic origin \
+                    "HEAD:$DEFAULT_BRANCH" \
+                    "refs/tags/$TAG_NAME"
+                  echo "allocation_sha=$ALLOCATION_SHA" >> "$GITHUB_OUTPUT"
+                  echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
 
-            - name: Bind the exact allocation and source
-              id: identity
-              if: >
-                  steps.allocation.outputs.allocated == 'false' ||
-                  steps.publish.outputs.state_pushed == 'true'
+            - name: Start the exact allocated distribution
+              if: steps.publish.outputs.allocation_sha != ''
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  ALLOCATION_SHA: ${{ steps.publish.outputs.allocation_sha }}
+                  TAG_NAME: ${{ steps.publish.outputs.tag_name }}
               run: |
-                  set -euo pipefail
-                  python tools/csx_test_build.py verify \
-                    --state version/test-build.json \
-                    --allocation-revision HEAD \
-                    --github-output "$GITHUB_OUTPUT"
-                  echo "ready=true" >> "$GITHUB_OUTPUT"
-
-    build:
-        name: Build ${{ needs.allocate.outputs.display-version }}
-        needs: allocate
-        if: needs.allocate.outputs.ready == 'true'
-        uses: ./.github/workflows/_shared-build.yaml
-        with:
-            ref: ${{ needs.allocate.outputs.source-sha }}
-            repository: ${{ github.repository }}
-            run-cpp: true
-            run-shader-validation: false
-            run-shader-tests: false
-            test-build-id: ${{ needs.allocate.outputs.build-id }}
-            artifact-name: ${{ needs.allocate.outputs.artifact-name }}
+                  python tools/csx_test_build.py ensure-dispatch \
+                    --repository-slug "${{ github.repository }}" \
+                    --allocation-sha "$ALLOCATION_SHA" \
+                    --tag-name "$TAG_NAME"
