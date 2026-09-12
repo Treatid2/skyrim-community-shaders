@@ -1,0 +1,82 @@
+{
+    "schemaVersion": 1,
+    "repository": "ParticleTroned/skyrim-community-shaders",
+    "generatedAt": "2026-09-12",
+    "curated": {
+        "branch": "codex/devbench-main",
+        "upstream": "origin/main-VR",
+        "baseCommit": "befd358515eb201aa5a278292b93204f24c44d9e",
+        "policy": "The curated branch must contain only commits already in upstream main-VR or commits represented by an open upstream pull request. Pending work stays on the integration branch until it passes review."
+    },
+    "integration": {
+        "branch": "codex/devbench-all-integrated",
+        "purpose": "Live-test aggregate; never merge this branch wholesale into the curated branch.",
+        "includedPullRequests": [
+            {
+                "number": 54,
+                "url": "https://github.com/ParticleTroned/skyrim-community-shaders/pull/54",
+                "head": "070daf48c8d573bef47086a3afffdd144a349426",
+                "order": 1
+            },
+            {
+                "number": 81,
+                "url": "https://github.com/ParticleTroned/skyrim-community-shaders/pull/81",
+                "head": "d13d0abfd03d473b520ec86aef62f6fe6a4be096",
+                "order": 2,
+                "note": "Stacked on PR 54 upstream."
+            },
+            {
+                "number": 55,
+                "url": "https://github.com/ParticleTroned/skyrim-community-shaders/pull/55",
+                "head": "3967cdc6bdc7bd692a7ff39caccf5c41309f9ccd",
+                "order": 3
+            },
+            {
+                "number": 56,
+                "url": "https://github.com/ParticleTroned/skyrim-community-shaders/pull/56",
+                "head": "dcdcf61faf6d8cf6ab3736dc70d0533bcd2d8197",
+                "order": 4,
+                "note": "Stacked on PR 55 upstream."
+            },
+            {
+                "number": 79,
+                "url": "https://github.com/ParticleTroned/skyrim-community-shaders/pull/79",
+                "head": "aba7fa25b54e1affea0f685f39a718c4055fe20d",
+                "order": 5
+            },
+            {
+                "number": 80,
+                "url": "https://github.com/ParticleTroned/skyrim-community-shaders/pull/80",
+                "head": "627be414c2af1c9cec513aeb2a0bec16c05e6140",
+                "order": 6
+            },
+            {
+                "number": 82,
+                "url": "https://github.com/ParticleTroned/skyrim-community-shaders/pull/82",
+                "head": "0a991fb2034fab25426c52c0518636d202a8f545",
+                "order": 7
+            }
+        ],
+        "excludedPullRequests": [
+            {
+                "number": 61,
+                "url": "https://github.com/ParticleTroned/skyrim-community-shaders/pull/61",
+                "head": "898cbb0d98ef68b35f9a7b2542ff7a4820fedc64",
+                "reason": "Conflicts with current upstream and the aggregate in build registration, shader hooks, tooling documentation, and its environment test. Rebase or correction is required before live integration."
+            },
+            {
+                "number": 62,
+                "url": "https://github.com/ParticleTroned/skyrim-community-shaders/pull/62",
+                "head": "28f8f8d4590c6d24e99324e491a3a5640c50ca1d",
+                "reason": "Conflicts with current upstream build registration and the newer shader-cache safety policy. Rebase or correction is required before live integration."
+            }
+        ],
+        "resolutionNotes": [
+            "PR 54 keeps both generation-claim and preset-compatibility tests and preserves current upstream vendor-capability documentation.",
+            "PR 56 keeps the existing Community Shaders API listener and adds Render Map DevBench installation.",
+            "PR 79 keeps its Engine Fixes-compatible guard policy plus the current upstream hook RVAs.",
+            "PR 80 keeps current temporal tuning and adds the interop-readiness hot path.",
+            "PR 82 keeps both render-map collection and accepted-draw attribution in geometry hooks."
+        ]
+    }
+}
