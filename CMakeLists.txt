@@ -2000,6 +2000,11 @@ if(BUILD_CONTROLLER_TESTS)
         tests/reflex_policy_test.cpp
     )
     add_controller_test(
+        light_limit_fix_vr_hook_policy_test
+        LightLimitFixVRHookPolicy
+        tests/light_limit_fix_vr_hook_policy_test.cpp
+    )
+    add_controller_test(
         fsr_host_lifecycle_policy_test
         FSRHostLifecyclePolicy
         tests/fsr_host_lifecycle_policy_test.cpp
@@ -2309,7 +2314,10 @@ if(BUILD_CONTROLLER_TESTS)
         src/RenderMap/Collector.cpp
     )
     target_compile_features(render_map_collector_test PRIVATE cxx_std_23)
-    target_include_directories(render_map_collector_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_include_directories(
+        render_map_collector_test
+        PRIVATE "${PROJECT_SOURCE_DIR}/src"
+    )
     add_test(NAME RenderMapCollector COMMAND render_map_collector_test)
     set_tests_properties(RenderMapCollector PROPERTIES LABELS "ControllerTests")
 
@@ -2321,7 +2329,10 @@ if(BUILD_CONTROLLER_TESTS)
         src/RenderMap/Runtime.cpp
     )
     target_compile_features(render_map_runtime_test PRIVATE cxx_std_23)
-    target_include_directories(render_map_runtime_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_include_directories(
+        render_map_runtime_test
+        PRIVATE "${PROJECT_SOURCE_DIR}/src"
+    )
     add_test(NAME RenderMapRuntime COMMAND render_map_runtime_test)
     set_tests_properties(RenderMapRuntime PROPERTIES LABELS "ControllerTests")
 
@@ -2336,10 +2347,19 @@ if(BUILD_CONTROLLER_TESTS)
         src/RenderMap/Serialization.cpp
     )
     target_compile_features(render_map_controller_test PRIVATE cxx_std_23)
-    target_include_directories(render_map_controller_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-    target_link_libraries(render_map_controller_test PRIVATE nlohmann_json::nlohmann_json bcrypt.lib)
+    target_include_directories(
+        render_map_controller_test
+        PRIVATE "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(
+        render_map_controller_test
+        PRIVATE nlohmann_json::nlohmann_json bcrypt.lib
+    )
     add_test(NAME RenderMapController COMMAND render_map_controller_test)
-    set_tests_properties(RenderMapController PROPERTIES LABELS "ControllerTests")
+    set_tests_properties(
+        RenderMapController
+        PROPERTIES LABELS "ControllerTests"
+    )
 
     add_executable(
         api_service_foundation_test
@@ -2764,6 +2784,7 @@ if(BUILD_CONTROLLER_TESTS)
             vr_render_scale_preparation_policy_test
             vr_presentation_stretch_telemetry_policy_test
             reflex_policy_test
+            light_limit_fix_vr_hook_policy_test
             fsr_host_lifecycle_policy_test
             fsr_runtime_lifecycle_policy_test
             fsr_shared_guides_policy_test
