@@ -2,6 +2,8 @@
 
 #include <stdexcept>
 
+using namespace std::chrono_literals;
+
 int main()
 {
 	using namespace CSX::ScreenshotPolicy;
@@ -61,6 +63,19 @@ int main()
 	if (ResolveBusyDispatch(false, false, false) != BusyDispatchDisposition::Retry ||
 		ResolveBusyDispatch(false, false, true) != BusyDispatchDisposition::Fail)
 		throw std::runtime_error("manual capture retries ignored their admission deadline");
+	const auto now = std::chrono::steady_clock::time_point(10s);
+	if (!HasDispatchDeadlineElapsed(now, now) ||
+		!HasDispatchDeadlineElapsed(now, now - 1ms) ||
+		HasDispatchDeadlineElapsed(now, now + 1ms))
+		throw std::runtime_error("queued dispatch deadline boundary is invalid");
+	if (!CanAcceptSequenceCommand(false) || CanAcceptSequenceCommand(true))
+		throw std::runtime_error("sequence command admission crossed the finalization boundary");
+	if (ResolveSequenceTerminalOutcome(SequenceTerminationIntent::Stop, 0, false, false, false, false) != "stopped" ||
+		ResolveSequenceTerminalOutcome(SequenceTerminationIntent::Cancel, 1, false, false, false, false) != "cancelled_partial" ||
+		ResolveSequenceTerminalOutcome(SequenceTerminationIntent::PolicyAbort, 0, false, true, false, false) != "failed" ||
+		ResolveSequenceTerminalOutcome(SequenceTerminationIntent::PolicyAbort, 1, false, true, false, false) != "failed_partial" ||
+		ResolveSequenceTerminalOutcome(SequenceTerminationIntent::Natural, 1, false, true, false, false) != "completed_with_warnings")
+		throw std::runtime_error("sequence terminal outcome policy is invalid");
 	for (const bool sequenceFrame : { false, true }) {
 		for (const bool deadlineReached : { false, true }) {
 			if (ResolveBusyDispatch(sequenceFrame, true, deadlineReached) != BusyDispatchDisposition::Cancel)

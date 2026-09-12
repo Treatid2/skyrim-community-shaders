@@ -23538,7 +23538,7 @@ void Upscaling::DestroyVRIntermediateTextures(bool a_clearRapidTransitionGuard)
 	if (a_clearRapidTransitionGuard)
 		ClearVRDLSSRapidTransitionGuard();
 	submitStageMirrorFrame = std::numeric_limits<uint32_t>::max();
-	submitStageMirrorEyeReady = {};
+	submitStageMirrorPair = {};
 	submitStageMirrorSourceTexture = nullptr;
 	submitStageFoveatedPeripheryTAAFrame = std::numeric_limits<uint32_t>::max();
 	submitStageFoveatedPeripheryTAAEyeReady = {};
@@ -36881,7 +36881,7 @@ Upscaling::VRVendorResourceResetResult Upscaling::ResetVRSubmitStageState(bool a
 	ClearSubmitStageFoveatedVendorRetryBackoff();
 	ClearVRDLSSRapidTransitionGuard();
 	submitStageMirrorFrame = std::numeric_limits<uint32_t>::max();
-	submitStageMirrorEyeReady = {};
+	submitStageMirrorPair = {};
 	submitStageMirrorSourceTexture = nullptr;
 	submitStageFoveatedPeripheryTAAFrame = std::numeric_limits<uint32_t>::max();
 	submitStageFoveatedPeripheryTAAEyeReady = {};
@@ -42239,6 +42239,7 @@ bool Upscaling::EncodeSubmitStageVRInputs(ID3D11Resource* colorSource, ID3D11Res
 	submitStagePreparedDepthSourceOwner = nullptr;
 	submitStagePreparedMotionVectorSourceOwner = nullptr;
 	submitStageCurrentEyePreparedInputs.Invalidate(eyeMask);
+	submitStageMirrorPair.Invalidate(eyeMask);
 	submitStageRuntimeFSRStereoState = {};
 	for (uint32_t eye = 0; eye < 2; ++eye) {
 		if ((eyeMask & (1u << eye)) == 0)
@@ -48577,7 +48578,7 @@ void Upscaling::MarkSubmitStageDeviceLost(HRESULT a_result, const char* a_contex
 	ClearSubmitStageBoundsFallbackWatchdog();
 	ClearSubmitStageFoveatedVendorRetryBackoff();
 	submitStageMirrorFrame = std::numeric_limits<uint32_t>::max();
-	submitStageMirrorEyeReady = {};
+	submitStageMirrorPair = {};
 	submitStageMirrorSourceTexture = nullptr;
 	submitStageFoveatedPeripheryTAAFrame = std::numeric_limits<uint32_t>::max();
 	submitStageFoveatedPeripheryTAAEyeReady = {};
@@ -49351,13 +49352,15 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 		       a_left.depthOffsetX == a_right.depthOffsetX &&
 		       a_left.depthOffsetY == a_right.depthOffsetY;
 	};
+	const bool currentEyeSourceRegionProven =
+		sourceRegionsMatch(sourceRegion, canonicalSourceRegions[eyeIndex]);
 	const bool submitSourceSignatureProven =
 		sourceContainsBothEyes &&
 		canonicalSourceRegions[0].valid &&
 		canonicalSourceRegions[0].matchesExpectedSize &&
 		canonicalSourceRegions[1].valid &&
 		canonicalSourceRegions[1].matchesExpectedSize &&
-		sourceRegionsMatch(sourceRegion, canonicalSourceRegions[eyeIndex]);
+		currentEyeSourceRegionProven;
 	const auto buildProofRegion = [](const VRSubmitSourceRegion& a_region) {
 		return VRSubmitInputFreshnessPolicy::EyeRegion{
 			.subresource = a_region.subresource,
@@ -49407,7 +49410,7 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 	const auto currentEyeInputIdentity =
 		VRSubmitInputReusePolicy::ResolveCurrentEyeIdentity(
 			submitInputAdmission, a_submitBoundaryIdentity, eyeIndex,
-			buildProofRegion(sourceRegion));
+			buildProofRegion(sourceRegion), currentEyeSourceRegionProven);
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	VRRenderScaleDevBenchBridge::RecordSubmitInputRejection(
 		VRSubmitInputFreshnessPolicy::ResolveProducerRejection(submitInputAdmission),
@@ -49419,7 +49422,7 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 		submitFreshnessVendorInputs[peerEye] =
 			VRSubmitInputReusePolicy::ResolveCurrentEyeIdentity(
 				submitInputAdmission, a_submitBoundaryIdentity, peerEye,
-				buildProofRegion(canonicalSourceRegions[peerEye]));
+				buildProofRegion(canonicalSourceRegions[peerEye]), true);
 	}
 	const auto* previousSubmitFreshnessVendorInputs = g_submitFreshnessVendorInputs;
 	g_submitFreshnessVendorInputs = &submitFreshnessVendorInputs;
@@ -49427,6 +49430,8 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 		g_submitFreshnessVendorInputs = previousSubmitFreshnessVendorInputs;
 	});
 #endif
+	if (!presentationOnly && !currentEyeInputIdentity.IsValid())
+		return false;
 	if (submitStageVendorOutputFrame != currentFrame ||
 		submitStageVendorOutputCompositorCycle != a_compositorCycleToken ||
 		submitStageVendorOutputPairProducerToken !=
@@ -49455,8 +49460,10 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 				reinterpret_cast<uintptr_t>(owners.color.get()) == source.colorSource &&
 				reinterpret_cast<uintptr_t>(owners.depth.get()) == source.depthSource &&
 				reinterpret_cast<uintptr_t>(owners.motionVectors.get()) == source.motionVectorSource;
-			if (!retainCurrentEyeOutput)
+			if (!retainCurrentEyeOutput) {
 				cached = {};
+				submitStageMirrorPair.Invalidate(1u << cachedEye);
+			}
 		}
 		submitStageFoveatedCenterState = {};
 		submitStageRuntimeFSRStereoState = {};
@@ -50718,7 +50725,7 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 		if (!mirrorRequested) {
 			vrDesktopMirrorBlitRTV = nullptr;
 			vrDesktopMirrorBlitTarget = nullptr;
-			submitStageMirrorEyeReady = {};
+			submitStageMirrorPair = {};
 		} else {
 			const bool canMirrorToSource =
 				sourceDesc.ArraySize == 1 &&
@@ -50736,15 +50743,15 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 				if (submitStageMirrorFrame != currentFrame || submitStageMirrorSourceTexture != sourceTexture) {
 					submitStageMirrorFrame = currentFrame;
 					submitStageMirrorSourceTexture = sourceTexture;
-					submitStageMirrorEyeReady = {};
+					submitStageMirrorPair = {};
+				}
+				if (!currentEyeInputIdentity.IsValid()) {
+					submitStageMirrorPair.Invalidate(1u << eyeIndex);
+					return false;
 				}
 
-				submitStageMirrorEyeReady[eyeIndex] = true;
-				if (!submitStageMirrorEyeReady[0] || !submitStageMirrorEyeReady[1])
-					return false;
-
-				submitStageMirrorEyeReady = {};
-				return true;
+				submitStageMirrorPair.Record(currentEyeInputIdentity);
+				return submitStageMirrorPair.Consume();
 			};
 			if (canMirrorToSource) {
 				vrDesktopMirrorBlitRTV = nullptr;

@@ -1,18 +1,18 @@
 #include "Api/ScreenshotService.h"
 
-#include "Api/RuntimeThreadAffinity.h"
 #include "Api/MainThreadDispatchState.h"
+#include "Api/RuntimeThreadAffinity.h"
 #include "Api/ServiceRegistry.h"
 #include "Features/ScreenshotFeature.h"
 #include "Globals.h"
-#include "VRAPI/CSserviceapi.h"
 #include "VRAPI/CSscreenshotapi.h"
+#include "VRAPI/CSserviceapi.h"
 
 #include <SKSE/SKSE.h>
 #include <nlohmann/json.hpp>
 
-#include <limits>
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -56,7 +56,17 @@ namespace
 		const auto phase = state->WaitUntil(deadline);
 		if (phase == DispatchState::Phase::queued && state->CancelIfQueued())
 			return std::nullopt;
-		// Once admission wins, a failure response cannot safely precede mutation.
+		if (state->WaitForTerminalUntil(deadline) == DispatchState::Phase::running) {
+			return nlohmann::json{
+				{ "ok", false },
+				{ "error", {
+							   { "code", "dispatcher_admitted" },
+							   { "message", "main-thread execution began but did not complete within 5000ms" },
+							   { "retryable", false },
+							   { "details", { { "executionMayComplete", true } } },
+						   } },
+			};
+		}
 		try {
 			return state->WaitForCompletion();
 		} catch (...) {
@@ -183,9 +193,9 @@ namespace CSX::Api
 			return {
 				{ "ok", false },
 				{ "error", {
-					{ "code", "transport_error" },
-					{ "transportStatus", static_cast<std::uint32_t>(status) },
-				} },
+							   { "code", "transport_error" },
+							   { "transportStatus", static_cast<std::uint32_t>(status) },
+						   } },
 			};
 		return nlohmann::json::parse(response.jsonUtf8, response.jsonUtf8 + response.jsonBytes);
 	}

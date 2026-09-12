@@ -32,5 +32,15 @@ int main()
 			throw std::runtime_error("admitted work did not publish its response");
 		worker.join();
 	}
+	{
+		auto state = std::make_shared<State>();
+		if (!state->TryBegin() ||
+			state->WaitForTerminalUntil(std::chrono::steady_clock::now() + 1ms) != State::Phase::running)
+			throw std::runtime_error("admitted work did not retain its running phase at the response deadline");
+		state->Complete(7);
+		if (state->WaitForTerminalUntil(std::chrono::steady_clock::now() + 1s) != State::Phase::completed ||
+			state->WaitForCompletion() != 7)
+			throw std::runtime_error("completed admitted work did not publish its response");
+	}
 	return 0;
 }

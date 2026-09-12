@@ -3308,7 +3308,7 @@ public:
 	std::atomic<uint32_t> vrDLSSRapidTransitionCleanEyeMask{ 0 };
 	std::atomic_bool vrDLSSRapidTransitionGuardLogged{ false };
 	uint32_t submitStageMirrorFrame = std::numeric_limits<uint32_t>::max();
-	std::array<bool, 2> submitStageMirrorEyeReady = {};
+	VRSubmitInputReusePolicy::FinalizedEyePair submitStageMirrorPair{};
 	ID3D11Texture2D* submitStageMirrorSourceTexture = nullptr;
 	uint32_t submitStageFoveatedPeripheryTAAFrame = std::numeric_limits<uint32_t>::max();
 	std::array<bool, 2> submitStageFoveatedPeripheryTAAEyeReady = {};

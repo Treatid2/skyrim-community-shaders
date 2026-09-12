@@ -88,10 +88,23 @@ foreach(_required_contract_text IN ITEMS
     maximumOutputsPerFrame retentionSeconds manifest_failed
 	DescribeCommittedArtifact BuildProvenance::GetProducer artifact_hash_failed
 	terminalOutcome completedUtc fallbacksPresent cancelled manifestChildren
+	outstandingArtifacts outstandingCaptureJobs captureJobCapacity
+	commandAccepted finalizationCommitted sequence.abort_requested
+	ManifestResultLoop manifestResultDrainer
 )
     string(FIND "${_implementation}" "${_required_contract_text}" _contract_position)
     if(_contract_position EQUAL -1)
         message(FATAL_ERROR "Screenshot API implementation is missing contract behavior: ${_required_contract_text}")
+    endif()
+endforeach()
+
+file(READ "${PROJECT_ROOT}/src/Api/ScreenshotService.cpp" _native_adapter)
+foreach(_native_dispatch_contract IN ITEMS
+    WaitForTerminalUntil dispatcher_admitted executionMayComplete
+)
+    string(FIND "${_native_adapter}" "${_native_dispatch_contract}" _native_dispatch_position)
+    if(_native_dispatch_position EQUAL -1)
+        message(FATAL_ERROR "Native screenshot dispatch is missing bounded admission behavior: ${_native_dispatch_contract}")
     endif()
 endforeach()
 
@@ -132,6 +145,7 @@ endif()
 foreach(_acquisition_contract_text IN ITEMS
     BuildAcquisitionRecord publicationGeneration deviceIdentity
     submittedBounds requiredEyeMask IsSamePublication
+    releaseQueueSlotOnExit queueCommitted
 )
     string(FIND "${_feature_controls}" "${_acquisition_contract_text}" _acquisition_position)
     if(_acquisition_position EQUAL -1)

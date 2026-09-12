@@ -31,5 +31,3 @@ reviews:
                  - "Related to #123" for partial implementations
 
               Otherwise, use your standard review approach focusing on code quality.
-    path_filters:
-        - "**/*.hlsl"

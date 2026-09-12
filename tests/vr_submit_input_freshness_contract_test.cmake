@@ -18,9 +18,13 @@ file(READ
     "${PROJECT_ROOT}/src/Features/Upscaling/VRSubmitInputFreshnessPolicy.h"
     _freshness_policy
 )
+file(READ
+    "${PROJECT_ROOT}/src/Features/Upscaling/VRSubmitInputReusePolicy.h"
+    _reuse_policy
+)
 
 set(_contract
-    "${_overlay_source}\n${_upscaling_source}\n${_upscaling_header}\n${_freshness_policy}"
+    "${_overlay_source}\n${_upscaling_source}\n${_upscaling_header}\n${_freshness_policy}\n${_reuse_policy}"
 )
 string(REGEX REPLACE "[\r\n\t ]+" " " _contract "${_contract}")
 
@@ -45,6 +49,14 @@ foreach(_required_contract IN ITEMS
     "a_observation.activeHandleIdentity != a_observation.nestedHandleIdentity"
     "submitStageCurrentEyePreparedInputs.Matches(currentEyeInputIdentity)"
     "submitStageCurrentEyePreparedInputs.Invalidate(eyeMask)"
+    "submitStageMirrorPair.Invalidate(eyeMask)"
+    "currentEyeSourceRegionProven"
+    "if (!presentationOnly && !currentEyeInputIdentity.IsValid())"
+    "source.lastWorldRenderFrame == source.submitFrame"
+    "source.lastCompletedWorldRenderFrame == source.submitFrame"
+    "submitStageMirrorPair.Record(currentEyeInputIdentity)"
+    "submitStageMirrorPair.Consume()"
+	"submitStageMirrorPair.Invalidate(1u << eyeIndex)"
     "cachedEyeState.currentEyeIdentity, currentEyeInputIdentity)"
     "currentEyeSourceOwners.color.get() == sourceTexture"
     "currentEyeSourceOwners.depth.get() == depth.texture"
@@ -73,6 +85,38 @@ foreach(_forbidden_contract IN ITEMS
         )
     endif()
 endforeach()
+
+string(FIND
+    "${_overlay_source}"
+    "bool VR::InstallSubmitHook(bool a_enableProcessing)"
+    _submit_installer_position
+)
+if(_submit_installer_position EQUAL -1)
+    message(FATAL_ERROR "The VR submit-hook installer is missing")
+endif()
+string(SUBSTRING
+    "${_overlay_source}"
+    ${_submit_installer_position}
+    -1
+    _submit_installer_source
+)
+string(FIND
+    "${_submit_installer_source}"
+    "if (!globals::game::isVR)"
+    _non_vr_submit_guard_position
+)
+string(FIND
+    "${_submit_installer_source}"
+    "RE::BSOpenVR* openvr = RE::BSOpenVR::GetSingleton()"
+    _openvr_singleton_position
+)
+if(_non_vr_submit_guard_position EQUAL -1 OR
+   _openvr_singleton_position EQUAL -1 OR
+   _non_vr_submit_guard_position GREATER_EQUAL _openvr_singleton_position)
+    message(FATAL_ERROR
+        "The submit-hook installer must reject SE/AE before accessing BSOpenVR"
+    )
+endif()
 
 string(FIND
     "${_upscaling_source}"
