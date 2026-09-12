@@ -12,49 +12,24 @@ reviews:
         auto_pause_after_reviewed_commits: 0
         base_branches:
             - "main-VR"
-    # Unmatched files remain reviewable by default. Positive entries are
-    # limited to shader and hidden policy paths that require explicit review;
-    # every excluded class is named independently of CodeRabbit's defaults.
+    # Unmatched files, including hidden policy files, remain reviewable by
+    # default. Positive entries only restore review for authoritative shader
+    # source roots and checked-in CSV evidence that CodeRabbit skips by
+    # default. Generated outputs must not be stored in those source roots.
     # https://docs.coderabbit.ai/configuration/path-instructions
     path_filters:
-        - "**/*.hlsl"
-        - "**/*.hlsli"
-        - ".coderabbit.yaml"
-        - ".pre-commit-config.yaml"
-        - ".prettierrc.json"
-        - ".releaserc.js"
-        - ".agents/**"
-        - ".claude/**"
-        - ".codex/**"
-        - ".github/**"
-        - ".githooks/**"
-        - "!**/.cache/**"
-        - "!**/CMakeFiles/**"
-        - "!**/build/**"
-        - "!**/dist/**"
-        - "!**/node_modules/**"
-        - "!**/obj/**"
-        - "!**/out/**"
-        - "!**/extern/**"
-        - "!**/generated/**"
-        - "!**/@generated/**"
-        - "!**/__generated__/**"
-        - "!**/__generated/**"
-        - "!**/_generated/**"
-        - "!**/gen/**"
-        - "!**/@gen/**"
-        - "!**/__gen__/**"
-        - "!**/__gen/**"
-        - "!**/_gen/**"
-        - "!**/*.generated.*"
-        - "!**/*.min.js"
-        - "!**/*.dds"
-        - "!**/*.dll"
+        - "package/Shaders/**/*.hlsl"
+        - "package/Shaders/**/*.hlsli"
+        - "features/*/Shaders/**/*.hlsl"
+        - "features/*/Shaders/**/*.hlsli"
+        - "docs/new-feature-template/**/Shaders/**/*.hlsl"
+        - "docs/new-feature-template/**/Shaders/**/*.hlsli"
+        - "docs/development/vr-render-scale-comparison-ledger.csv"
+        - "docs/development/vr-renderscale-CSmenu-comparison-ledger.csv"
+        # Repository-specific game assets not covered by the service defaults.
         - "!**/*.esp"
         - "!**/*.nif"
-        - "!**/*.png"
         - "!**/*.PNG"
-        - "!**/*.ttf"
         - "!**/*.wpc"
     path_instructions:
         - path: "**/*"
