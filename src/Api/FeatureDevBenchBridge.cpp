@@ -63,7 +63,7 @@ namespace
 		}
 	}
 
-	json OnMain(std::function<json()> run)
+	CSX::Api::DevBenchMainThreadResult OnMain(std::function<json()> run)
 	{
 		return CSX::Api::RunDevBenchMainThreadTask(SKSE::GetTaskInterface(), std::move(run));
 	}
@@ -136,7 +136,7 @@ namespace
 			} catch (const std::exception& e) {
 				return Foundation().MakeError(args, "invalid_mutation", e.what(), "validation", false, "mutation");
 			}
-		auto result = OnMain([action, args] {
+		auto dispatch = OnMain([action, args] {
 			const auto* api = CSX::Api::GetFeatureService001();
 			if (!api)
 				return json{ { "error", "feature API unavailable" } };
@@ -206,8 +206,11 @@ namespace
 			return json{ { "status", StatusName(s) }, { "applied", v.applied != 0 }, { "changed", v.changed != 0 }, { "persisted", v.persisted != 0 },
 				{ "previousStateRevision", v.previousStateRevision }, { "stateRevision", v.stateRevision }, { "message", v.message ? v.message : "" }, { "current", SnapshotJson(current) } };
 		});
+		if (dispatch.failure)
+			return Foundation().MakeError(args, "main_thread_dispatch_failed", dispatch.failure->message, dispatch.failure->phase, dispatch.failure->retryable);
+		auto result = std::move(dispatch.response);
 		if (result.contains("error"))
-			return Foundation().MakeError(args, "main_thread_dispatch_failed", result.value("detail", result.value("error", std::string("feature API dispatch failed"))), "dispatch", true);
+			return Foundation().MakeError(args, "main_thread_dispatch_failed", result.value("error", std::string("feature API unavailable")), "execution", false);
 		auto response = Foundation().MakeEnvelope(args, true);
 		response["result"] = std::move(result);
 		return response;

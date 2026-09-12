@@ -287,7 +287,7 @@ namespace
 
 	json RunOnMainThread(std::function<json()> a_run)
 	{
-		return CSX::Api::RunDevBenchMainThreadTask(SKSE::GetTaskInterface(), std::move(a_run));
+		return CSX::Api::RunDevBenchMainThreadTask(SKSE::GetTaskInterface(), std::move(a_run)).response;
 	}
 
 	json BuildStatus()

@@ -19,8 +19,10 @@ namespace
 	json Request(std::string a_action, std::string a_commandId)
 	{
 		return {
-			{ "contractMajor", 1 }, { "action", std::move(a_action) },
-			{ "clientId", "foundation-test" }, { "commandId", std::move(a_commandId) },
+			{ "contractMajor", 1 },
+			{ "action", std::move(a_action) },
+			{ "clientId", "foundation-test" },
+			{ "commandId", std::move(a_commandId) },
 		};
 	}
 }
@@ -72,6 +74,29 @@ int RunTest()
 	const auto conflict = service.Dispatch(conflictRequest, [](const json&) { return json::object(); });
 	Check(!conflict["ok"].get<bool>(), "idempotency conflict was accepted");
 	Check(conflict["error"]["code"] == "idempotency_conflict", "wrong idempotency error code");
+
+	uint32_t failedCalls = 0;
+	const auto failedRequest = Request("fail", "failure-one");
+	const auto failed = service.Dispatch(failedRequest, [&](const json& command) {
+		++failedCalls;
+		service.AppendEvent("failed-request", 1, "request.failed");
+		return service.MakeError(
+			command,
+			"main_thread_dispatch_failed",
+			"callback failed",
+			"execution",
+			false);
+	});
+	Check(!failed["ok"].get<bool>() && !failed["error"]["retryable"].get<bool>(),
+		"admitted callback failure was marked retryable");
+	const auto failedReplay = service.Dispatch(failedRequest, [&](const json&) {
+		++failedCalls;
+		return json::object();
+	});
+	Check(failedCalls == 1, "failed idempotent command executed twice");
+	Check(failedReplay["error"]["phase"] == "execution" &&
+			  !failedReplay["error"]["retryable"].get<bool>(),
+		"failed replay lost its execution provenance");
 
 	service.AppendEvent("request-1", 1, "request.accepted");
 	service.AppendEvent("request-1", 2, "request.running");

@@ -53,6 +53,38 @@ int main()
 			throw std::runtime_error("admitted work did not publish its response");
 		worker.join();
 	}
+	for (int iteration = 0; iteration < 128; ++iteration) {
+		auto state = std::make_shared<State>();
+		std::latch ready{ 2 };
+		std::latch start{ 1 };
+		std::atomic_bool admitted = false;
+		std::atomic_bool cancelled = false;
+		std::thread runner([&] {
+			ready.count_down();
+			start.wait();
+			admitted.store(state->TryBegin(), std::memory_order_release);
+		});
+		std::thread canceller([&] {
+			ready.count_down();
+			start.wait();
+			cancelled.store(state->CancelIfQueued(), std::memory_order_release);
+		});
+		ready.wait();
+		start.count_down();
+		runner.join();
+		canceller.join();
+		const bool admissionWon = admitted.load(std::memory_order_acquire);
+		const bool cancellationWon = cancelled.load(std::memory_order_acquire);
+		if (admissionWon == cancellationWon)
+			throw std::runtime_error("admission and cancellation did not have exactly one winner");
+		if (admissionWon) {
+			state->Complete(iteration);
+			if (state->WaitForCompletion() != iteration || state->CancelIfQueued())
+				throw std::runtime_error("admitted race winner did not remain authoritative");
+		} else if (state->TryBegin()) {
+			throw std::runtime_error("cancelled race loser was admitted later");
+		}
+	}
 	{
 		State state;
 		if (state.WaitUntil(std::chrono::steady_clock::now()) != State::Phase::queued ||

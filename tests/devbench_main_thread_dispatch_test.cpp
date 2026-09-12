@@ -74,12 +74,12 @@ namespace
 			R"({"_dispatchError":"unknown main-thread failure"})",
 			R"({"_dispatchError":"binding failed"})" },
 		{ Format::screenshot,
-			R"({"ok":false,"error":{"code":"dispatcher_unavailable","message":"SKSE task interface unavailable"}})",
-			R"({"ok":false,"error":{"code":"dispatcher_timeout","message":"main thread did not run within 0ms","retryable":true}})",
-			R"({"ok":false,"error":{"code":"dispatcher_failed","message":"SKSE task queue rejected the main-thread task"}})",
-			R"({"ok":false,"error":{"code":"dispatcher_failed","message":"task failed"}})",
-			R"({"ok":false,"error":{"code":"dispatcher_failed","message":"unknown main-thread failure"}})",
-			R"({"ok":false,"error":{"code":"dispatcher_failed","message":"binding failed"}})" },
+			R"({"ok":false,"error":{"admitted":false,"code":"dispatcher_unavailable","message":"SKSE task interface unavailable","phase":"admission","retryable":true}})",
+			R"({"ok":false,"error":{"admitted":false,"code":"dispatcher_timeout","message":"main thread did not run within 0ms","phase":"admission","retryable":true}})",
+			R"({"ok":false,"error":{"admitted":false,"code":"dispatcher_failed","message":"SKSE task queue rejected the main-thread task","phase":"admission","retryable":true}})",
+			R"({"ok":false,"error":{"admitted":true,"code":"dispatcher_failed","message":"task failed","phase":"execution","retryable":false}})",
+			R"({"ok":false,"error":{"admitted":true,"code":"dispatcher_failed","message":"unknown main-thread failure","phase":"execution","retryable":false}})",
+			R"({"ok":false,"error":{"admitted":true,"code":"dispatcher_failed","message":"binding failed","phase":"execution","retryable":false}})" },
 	};
 }
 
@@ -102,15 +102,18 @@ int main()
 			++mutations;
 			return { { "mutation", mutations } };
 		};
-		Require(RunDevBenchMainThreadTask<Queue>(nullptr, run, format) ==
-					json::parse(expected.unavailable),
+		const auto unavailable = RunDevBenchMainThreadTask<Queue>(nullptr, run, format);
+		Require(unavailable.response == json::parse(expected.unavailable) &&
+					unavailable.failure && !unavailable.failure->admitted && unavailable.failure->retryable,
 			"unavailable dispatcher changed its wire response");
 		for (auto mode : { Queue::Mode::deferred, Queue::Mode::rejected, Queue::Mode::retainedThenThrow }) {
 			queue.mode = mode;
 			const auto entriesBefore = entries.load();
 			const auto result = RunDevBenchMainThreadTask(&queue, run, format, 0ms);
 			const bool timeout = mode == Queue::Mode::deferred;
-			Require(result == json::parse(timeout ? expected.timeout : expected.rejected),
+			Require(result.response == json::parse(timeout ? expected.timeout : expected.rejected) &&
+						result.failure && !result.failure->admitted && result.failure->retryable &&
+						result.failure->phase == "admission",
 				"unadmitted task changed its wire response");
 			if (queue.retained) {
 				queue.retained();
@@ -119,15 +122,23 @@ int main()
 			Require(mutations == 0 && entries == entriesBefore, "terminal dispatch failure allowed a late mutation or binding");
 		}
 		queue.mode = Queue::Mode::inlineThenThrow;
-		Require(RunDevBenchMainThreadTask(&queue, run, format) == json{ { "mutation", 1 } },
+		const auto completed = RunDevBenchMainThreadTask(&queue, run, format);
+		Require(completed.response == json{ { "mutation", 1 } } && !completed.failure,
 			"submission failure hid a completed task result");
 		queue.mode = Queue::Mode::inlineTask;
-		Require(RunDevBenchMainThreadTask(&queue, []() -> json { throw std::runtime_error("task failed"); }, format) == json::parse(expected.failed), "task exception changed its wire response");
-		Require(RunDevBenchMainThreadTask(&queue, []() -> json { throw 1; }, format) == json::parse(expected.unknown), "unknown task exception changed its wire response");
+		const auto failed = RunDevBenchMainThreadTask(&queue, []() -> json { throw std::runtime_error("task failed"); }, format);
+		Require(failed.response == json::parse(expected.failed) && failed.failure && failed.failure->admitted &&
+					!failed.failure->retryable && failed.failure->phase == "execution",
+			"task exception changed its execution outcome");
+		const auto unknown = RunDevBenchMainThreadTask(&queue, []() -> json { throw 1; }, format);
+		Require(unknown.response == json::parse(expected.unknown) && unknown.failure && unknown.failure->admitted &&
+					!unknown.failure->retryable && unknown.failure->phase == "execution",
+			"unknown task exception changed its execution outcome");
 		failEntry = true;
 		const auto entryFailure = RunDevBenchMainThreadTask(&queue, run, format);
 		failEntry = false;
-		Require(entryFailure == json::parse(expected.binding) && mutations == 1,
+		Require(entryFailure.response == json::parse(expected.binding) && entryFailure.failure &&
+					entryFailure.failure->admitted && !entryFailure.failure->retryable && mutations == 1,
 			"runtime binding failure escaped the task exception guard");
 	}
 	{
@@ -151,6 +162,8 @@ int main()
 				0ms);
 		});
 		admitted.wait();
+		Require(caller.wait_for(20ms) == std::future_status::timeout,
+			"caller returned before admitted work published its result");
 		release.count_down();
 		Require(caller.get() == 42, "admitted task lost its exact result after submission failure");
 	}
