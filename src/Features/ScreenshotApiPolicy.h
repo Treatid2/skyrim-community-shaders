@@ -21,6 +21,25 @@ namespace CSX::ScreenshotPolicy
 	inline constexpr std::uint32_t MaximumSequenceDurationMs = 3'600'000;
 	inline constexpr std::uint32_t MaximumSequenceSpanFrames = 216'000;
 
+	inline constexpr std::chrono::milliseconds PublicationRetryDelay(
+		std::uint32_t a_failureCount) noexcept
+	{
+		if (a_failureCount == 0)
+			return std::chrono::milliseconds::zero();
+		return std::min(
+			std::chrono::milliseconds(5000),
+			std::chrono::milliseconds(
+				100u << std::min(a_failureCount - 1u, 5u)));
+	}
+
+	inline constexpr bool IsPublicationRetryEligible(
+		std::chrono::steady_clock::time_point a_now,
+		std::chrono::steady_clock::time_point a_nextAttempt) noexcept
+	{
+		return a_nextAttempt == std::chrono::steady_clock::time_point{} ||
+		       a_now >= a_nextAttempt;
+	}
+
 	inline bool CanAdmitPendingOperations(std::size_t a_pending)
 	{
 		return a_pending < MaximumPendingOperations;

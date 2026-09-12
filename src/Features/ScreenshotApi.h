@@ -33,8 +33,9 @@ class ScreenshotApi
 public:
 	using json = nlohmann::json;
 
-	ScreenshotApi();
+	explicit ScreenshotApi(std::shared_ptr<CSX::Api::ServiceFoundation> a_service);
 	~ScreenshotApi();
+	static std::shared_ptr<CSX::Api::ServiceFoundation> CreateServiceFoundation();
 
 	json HandleRequest(ScreenshotFeature& a_feature, const json& a_request);
 	json MakeDispatchError(
@@ -52,14 +53,14 @@ public:
 		std::string_view a_reason,
 		std::string_view a_actualSourceKind = {});
 	void OnArtifactQueued(std::string_view a_requestId, const std::filesystem::path& a_path);
-	void OnArtifactEncoding(std::string_view a_requestId);
+	void OnArtifactEncoding(std::string_view a_requestId) noexcept;
 	void OnArtifactTerminal(
 		std::string_view a_requestId,
 		bool a_success,
 		const std::filesystem::path& a_path,
 		std::string_view a_error = {},
-		json a_actual = json::object());
-	void OnSourceTerminal(std::string_view a_requestId, std::string_view a_state, std::string_view a_error = {});
+		const json* a_actual = nullptr) noexcept;
+	void OnSourceTerminal(std::string_view a_requestId, std::string_view a_state, std::string_view a_error = {}) noexcept;
 	void OnFeatureDisabled(std::string_view a_reason);
 	void BeginShutdown(std::string_view a_reason);
 	bool DrainForShutdown(std::chrono::milliseconds a_timeout);
@@ -99,6 +100,8 @@ private:
 		uint32_t successfulArtifacts = 0;
 		bool sourceAcquired = false;
 		bool sequenceFinished = false;
+		bool publicationUnresolved = false;
+		bool unresolvedArtifactCommitted = false;
 		std::chrono::steady_clock::time_point createdAt = std::chrono::steady_clock::now();
 		std::chrono::steady_clock::time_point terminalAt{};
 	};
@@ -175,6 +178,7 @@ private:
 		ManifestJob job;
 		ManifestResult result;
 		uint32_t applicationFailures = 0;
+		std::chrono::steady_clock::time_point nextApplicationAttempt{};
 		bool applicationFailureRecorded = false;
 		bool packagingEventPublished = false;
 	};
@@ -187,6 +191,7 @@ private:
 		std::deque<std::shared_ptr<const ManifestChildNode>> retiredChildren;
 		std::list<ManifestWork> results;
 		std::size_t outstanding = 0;
+		bool resultApplicationActive = false;
 		bool stopRequested = false;
 		bool exited = false;
 	};
@@ -209,7 +214,7 @@ private:
 		std::chrono::steady_clock::time_point expiresAt{};
 	};
 
-	CSX::Api::ServiceFoundation service;
+	std::shared_ptr<CSX::Api::ServiceFoundation> service;
 	mutable std::mutex mutex;
 	std::unordered_map<std::string, RequestRecord> requests;
 	std::deque<std::string> requestOrder;
@@ -276,6 +281,7 @@ private:
 	std::size_t CountPendingOperationsLocked() const;
 	void FinishSequenceChildLocked(RequestRecord& a_child);
 	void FinishSourceTerminalLocked(RequestRecord& a_record, std::string_view a_state, std::string_view a_error);
+	void MarkPublicationUnresolved(std::string_view a_requestId, bool a_artifactCommitted) noexcept;
 	void RequestSequenceAbortLocked(SequenceRecord& a_sequence, std::string_view a_code, std::string_view a_reason);
 	std::string SequenceTerminalOutcomeLocked(const SequenceRecord& a_sequence) const;
 	void TryFinalizeSequenceLocked(SequenceRecord& a_sequence);

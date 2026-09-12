@@ -1730,14 +1730,39 @@ namespace
 		throw std::runtime_error("unable to allocate a collision-free screenshot path");
 	}
 
+	void LogScreenshotFeatureErrorNoexcept(
+		std::string_view a_message,
+		const char* a_detail = nullptr) noexcept
+	{
+		try {
+			if (a_detail)
+				logger::error("{}: {}", a_message, a_detail);
+			else
+				logger::error("{}", a_message);
+		} catch (...) {
+		}
+	}
+
 }
 
 ScreenshotFeature::ScreenshotFeature() :
 	screenshotWorkerState(std::make_shared<ScreenshotWorkerState>())
 {
+	screenshotWorkerState->service = ScreenshotApi::CreateServiceFoundation();
 	// Start only after every member used by the watchdog has begun lifetime.
 	sourceDeadlineWatchdog = std::jthread(
-		[this](std::stop_token token) { SourceDeadlineLoop(token); });
+		[this](std::stop_token token) noexcept {
+			try {
+				SourceDeadlineLoop(token);
+			} catch (const std::exception& error) {
+				LogScreenshotFeatureErrorNoexcept(
+					"Screenshot source deadline service stopped after an isolated failure",
+					error.what());
+			} catch (...) {
+				LogScreenshotFeatureErrorNoexcept(
+					"Screenshot source deadline service stopped after an isolated unknown failure.");
+			}
+		});
 }
 
 ScreenshotFeature::~ScreenshotFeature()
@@ -2422,7 +2447,8 @@ void ScreenshotFeature::EnsureScreenshotApi()
 {
 	std::lock_guard lock(screenshotWorkerState->mutex);
 	if (!screenshotWorkerState->api)
-		screenshotWorkerState->api = std::make_shared<ScreenshotApi>();
+		screenshotWorkerState->api =
+			std::make_shared<ScreenshotApi>(screenshotWorkerState->service);
 	screenshotApi = screenshotWorkerState->api;
 }
 
@@ -2440,14 +2466,22 @@ nlohmann::json ScreenshotFeature::MakeApiDispatchError(
 	nlohmann::json a_details)
 {
 	std::shared_ptr<ScreenshotApi> api;
+	std::shared_ptr<CSX::Api::ServiceFoundation> service;
 	{
 		std::lock_guard lock(screenshotWorkerState->mutex);
 		api = screenshotWorkerState->api;
+		service = screenshotWorkerState->service;
 	}
-	if (!api)
-		throw std::runtime_error("screenshot API command was admitted before service initialization");
-	return api->MakeDispatchError(
-		a_request, a_code, a_message, a_retryable, std::move(a_details));
+	if (api) {
+		return api->MakeDispatchError(
+			a_request, a_code, a_message, a_retryable, std::move(a_details));
+	}
+	if (!service)
+		throw std::runtime_error("screenshot service foundation is unavailable");
+	auto response = service->MakeError(
+		a_request, a_code, a_message, "dispatch", a_retryable);
+	response["error"]["details"] = std::move(a_details);
+	return response;
 }
 
 nlohmann::json ScreenshotFeature::RequestApiCapture(std::string_view a_origin)
@@ -2660,25 +2694,34 @@ void ScreenshotFeature::SourceDeadlineLoop(std::stop_token a_stopToken)
 		}
 		if (a_stopToken.stop_requested())
 			break;
-		std::string expiredRequestId;
-		{
-			std::lock_guard lock(captureStateMutex);
-			if (activeCapture.pending &&
-				activeCapture.sourceDeadline != std::chrono::steady_clock::time_point{} &&
-				std::chrono::steady_clock::now() >= activeCapture.sourceDeadline) {
-				expiredRequestId = activeCapture.options.requestId;
-				ClearActiveCapture(activeCapture);
-				capturePending.store(false, std::memory_order_release);
-			}
-		}
-		if (!expiredRequestId.empty()) {
-			std::shared_ptr<ScreenshotApi> api;
+		try {
+			std::string expiredRequestId;
 			{
-				std::lock_guard lock(screenshotWorkerState->mutex);
-				api = screenshotWorkerState->api;
+				std::lock_guard lock(captureStateMutex);
+				if (activeCapture.pending &&
+					activeCapture.sourceDeadline != std::chrono::steady_clock::time_point{} &&
+					std::chrono::steady_clock::now() >= activeCapture.sourceDeadline) {
+					expiredRequestId = activeCapture.options.requestId;
+					ClearActiveCapture(activeCapture);
+					capturePending.store(false, std::memory_order_release);
+				}
 			}
-			if (api)
-				api->OnSourceTerminal(expiredRequestId, "failed", "source_timeout");
+			if (!expiredRequestId.empty()) {
+				std::shared_ptr<ScreenshotApi> api;
+				{
+					std::lock_guard lock(screenshotWorkerState->mutex);
+					api = screenshotWorkerState->api;
+				}
+				if (api)
+					api->OnSourceTerminal(expiredRequestId, "failed", "source_timeout");
+			}
+		} catch (const std::exception& error) {
+			LogScreenshotFeatureErrorNoexcept(
+				"Screenshot source deadline iteration failed",
+				error.what());
+		} catch (...) {
+			LogScreenshotFeatureErrorNoexcept(
+				"Screenshot source deadline iteration failed with an unknown exception.");
 		}
 	}
 }
@@ -3200,28 +3243,34 @@ void ScreenshotFeature::ScreenshotWorkerLoop(std::shared_ptr<ScreenshotWorkerSta
 							imageToSave = &framed;
 						}
 
+						const auto* savedImage = imageToSave->GetImage(0, 0, 0);
+						nlohmann::json artifactActual = {
+							{ "view", actualView },
+							{ "width", savedImage ? savedImage->width : 0 },
+							{ "height", savedImage ? savedImage->height : 0 },
+							{ "format", output.saveAsPng ? "png" : "bmp" },
+							{ "colourContract", "sdr_srgb" },
+						};
 						Util::FileHelpers::EnsureDirectoryExists(output.outputPath.parent_path());
 						output.outputPath = MakeCollisionSafePath(std::move(output.outputPath));
 						if (!SaveSdrScreenshot(*imageToSave, output.outputPath, output.saveAsPng, colourSpace, tonemapSceneHdr))
 							throw std::runtime_error("failed to save requested screenshot output");
-						CopySavedPathToClipboard(output.copyToClipboard, output.outputPath);
-						logger::info("Saved screenshot output to {}", output.outputPath.string());
-						if (screenshotApi) {
-							const auto* savedImage = imageToSave->GetImage(0, 0, 0);
+						if (screenshotApi)
 							screenshotApi->OnArtifactTerminal(
 								screenshot.requestId,
 								true,
 								output.outputPath,
 								{},
-								{
-									{ "view", actualView },
-									{ "width", savedImage ? savedImage->width : 0 },
-									{ "height", savedImage ? savedImage->height : 0 },
-									{ "format", output.saveAsPng ? "png" : "bmp" },
-									{ "colourContract", "sdr_srgb" },
-								});
-						}
+								&artifactActual);
 						++reportedArtifacts;
+						try {
+							CopySavedPathToClipboard(output.copyToClipboard, output.outputPath);
+							logger::info("Saved screenshot output to {}", output.outputPath.string());
+						} catch (const std::exception& error) {
+							logger::warn("Screenshot output was committed but post-save handling failed: {}", error.what());
+						} catch (...) {
+							logger::warn("Screenshot output was committed but post-save handling failed.");
+						}
 					} catch (const std::exception& e) {
 						reportFailure(e.what());
 						if (screenshotApi)
@@ -3382,6 +3431,14 @@ void ScreenshotFeature::ScreenshotWorkerLoop(std::shared_ptr<ScreenshotWorkerSta
 				imageToSave = &framedImage;
 			}
 
+			const auto* savedImage = imageToSave->GetImage(0, 0, 0);
+			nlohmann::json artifactActual = {
+				{ "view", "source_native" },
+				{ "width", savedImage ? savedImage->width : 0 },
+				{ "height", savedImage ? savedImage->height : 0 },
+				{ "format", screenshot.saveAsPng ? "png" : "bmp" },
+				{ "colourContract", "sdr_srgb" },
+			};
 			Util::FileHelpers::EnsureDirectoryExists(screenshot.outputPath.parent_path());
 			screenshot.outputPath = MakeCollisionSafePath(std::move(screenshot.outputPath));
 			const bool saveOk = SaveSdrScreenshot(
@@ -3398,23 +3455,22 @@ void ScreenshotFeature::ScreenshotWorkerLoop(std::shared_ptr<ScreenshotWorkerSta
 					++reportedArtifacts;
 				}
 			} else {
-				CopySavedPathToClipboard(screenshot.copyToClipboard, screenshot.outputPath);
-				logger::info("Saved screenshot to {}", screenshot.outputPath.string());
 				if (!screenshot.requestId.empty() && screenshotApi) {
-					const auto* savedImage = imageToSave->GetImage(0, 0, 0);
 					screenshotApi->OnArtifactTerminal(
 						screenshot.requestId,
 						true,
 						screenshot.outputPath,
 						{},
-						{
-							{ "view", "source_native" },
-							{ "width", savedImage ? savedImage->width : 0 },
-							{ "height", savedImage ? savedImage->height : 0 },
-							{ "format", screenshot.saveAsPng ? "png" : "bmp" },
-							{ "colourContract", "sdr_srgb" },
-						});
+						&artifactActual);
 					++reportedArtifacts;
+				}
+				try {
+					CopySavedPathToClipboard(screenshot.copyToClipboard, screenshot.outputPath);
+					logger::info("Saved screenshot to {}", screenshot.outputPath.string());
+				} catch (const std::exception& error) {
+					logger::warn("Screenshot was committed but post-save handling failed: {}", error.what());
+				} catch (...) {
+					logger::warn("Screenshot was committed but post-save handling failed.");
 				}
 				if (a_state->notifyAllowed.load(std::memory_order_acquire)) {
 					ShowInGameNotification(std::format("Screenshot saved: {}",

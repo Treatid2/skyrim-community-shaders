@@ -93,6 +93,8 @@ foreach(_required_contract_text IN ITEMS
 	ManifestResultLoop manifestResultDrainer results.splice applicationFailures
 	packagingEventPublished is_nothrow_move_assignable_v
 	manifest_result_publication_retried condition.notify_all
+	nextApplicationAttempt resultApplicationActive PublicationRetryDelay
+	IsPublicationRetryEligible CreateServiceFoundation publicationUnresolved
 )
     string(FIND "${_implementation}" "${_required_contract_text}" _contract_position)
     if(_contract_position EQUAL -1)
@@ -159,6 +161,7 @@ foreach(_acquisition_contract_text IN ITEMS
     submittedBounds requiredEyeMask IsSamePublication
 	releaseQueueSlotOnExit queueCommitted
 	"committed to the encoder but its queued event could not be published"
+	artifactActual "post-save handling failed"
 )
     string(FIND "${_feature_controls}" "${_acquisition_contract_text}" _acquisition_position)
     if(_acquisition_position EQUAL -1)

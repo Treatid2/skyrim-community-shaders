@@ -7,6 +7,17 @@ using namespace std::chrono_literals;
 int main()
 {
 	using namespace CSX::ScreenshotPolicy;
+	if (PublicationRetryDelay(0) != 0ms ||
+		PublicationRetryDelay(1) != 100ms ||
+		PublicationRetryDelay(2) != 200ms ||
+		PublicationRetryDelay(6) != 3200ms ||
+		PublicationRetryDelay(7) != 3200ms)
+		throw std::runtime_error("publication retry backoff is invalid");
+	const auto retryNow = std::chrono::steady_clock::time_point(10s);
+	if (!IsPublicationRetryEligible(retryNow, {}) ||
+		!IsPublicationRetryEligible(retryNow, retryNow) ||
+		IsPublicationRetryEligible(retryNow, retryNow + 1ms))
+		throw std::runtime_error("publication retry eligibility is invalid");
 	for (const auto* unsafe : { "", ".", "..", "CON", "con.txt", "NUL.png", "COM1", "LPT9.log",
 			 "trailing.", "trailing ", "stream:name", "star*", "slash/", "back\\slash", "caf\xC3\xA9" }) {
 		if (IsSafeWindowsFilenameSegment(unsafe))

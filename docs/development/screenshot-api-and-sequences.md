@@ -123,6 +123,11 @@ the caller's next `Dispatch` on the same thread, so clients must copy them.
 Transport failures use `CSX::ScreenshotAPI::Status`; command rejection and
 operation state remain in the normal JSON response envelope.
 
+The service foundation and its session identity exist before the lazy capture
+coordinator. Consequently, an admitted timeout returns the same correlated
+contract envelope even when the main-thread task has not initialized capture
+state yet.
+
 Every request must include `contractMajor`.
 Clients may include `contractMinor`; absence means zero. A major mismatch is a
 structured `unsupported_contract_version` error and must not perform work.
@@ -662,6 +667,11 @@ retained child snapshots run on the manifest worker. Retirement releases the
 chain iteratively, including when requests are acknowledged or expire, so
 long sequences cannot cause recursive destruction on the render path.
 
+Manifest result publication uses one retry gate shared by the background
+publisher and foreground drains (request, replay, and render tick). Failed
+applications retain exclusive custody and observe the same bounded exponential
+delay before another attempt.
+
 The final manifest includes:
 
 - contract and CSX identities;
@@ -795,6 +805,10 @@ removed by journal expiry.
     "artifactsWritten": 1,
     "artifactsFailed": 0
   },
+  "publication": {
+    "state": "settled",
+    "artifactCommitted": null
+  },
   "artifacts": [
     {
       "artifactId": "a43cdf9a:combined",
@@ -824,6 +838,11 @@ removed by journal expiry.
   "lastEventId": 481
 }
 ```
+
+If a file commit succeeds but terminal publication cannot be completed, the
+receipt reports `publication.state` as `unresolved` and preserves
+`artifactCommitted: true`. A post-commit reporting failure never relabels the
+artifact as an encoding or write failure.
 
 Input-plane format, dimensions, colour space, submitted bounds, orientation,
 tonemap decision, and device generation are recorded when known. Timings are
