@@ -2432,6 +2432,24 @@ nlohmann::json ScreenshotFeature::HandleApiRequest(const nlohmann::json& a_reque
 	return screenshotApi->HandleRequest(*this, a_request);
 }
 
+nlohmann::json ScreenshotFeature::MakeApiDispatchError(
+	const nlohmann::json& a_request,
+	std::string_view a_code,
+	std::string_view a_message,
+	bool a_retryable,
+	nlohmann::json a_details)
+{
+	std::shared_ptr<ScreenshotApi> api;
+	{
+		std::lock_guard lock(screenshotWorkerState->mutex);
+		api = screenshotWorkerState->api;
+	}
+	if (!api)
+		throw std::runtime_error("screenshot API command was admitted before service initialization");
+	return api->MakeDispatchError(
+		a_request, a_code, a_message, a_retryable, std::move(a_details));
+}
+
 nlohmann::json ScreenshotFeature::RequestApiCapture(std::string_view a_origin)
 {
 	static std::atomic_uint64_t commandSequence{ 1 };
@@ -2881,8 +2899,18 @@ bool ScreenshotFeature::QueueScreenshot(PendingScreenshot&& screenshot)
 	queueCommitted = true;
 	screenshotWorkerState->condition.notify_one();
 	if (!queuedRequestId.empty()) {
-		EnsureScreenshotApi();
-		screenshotApi->OnArtifactQueued(queuedRequestId, queuedPath);
+		try {
+			EnsureScreenshotApi();
+			screenshotApi->OnArtifactQueued(queuedRequestId, queuedPath);
+		} catch (const std::exception& error) {
+			logger::error(
+				"Screenshot {} was committed to the encoder but its queued event could not be published: {}",
+				queuedRequestId, error.what());
+		} catch (...) {
+			logger::error(
+				"Screenshot {} was committed to the encoder but its queued event could not be published.",
+				queuedRequestId);
+		}
 	}
 	return true;
 }
@@ -3699,6 +3727,11 @@ void ScreenshotFeature::ObserveAcceptedVRSubmit(
 
 	PendingScreenshot completedScreenshot;
 	bool completed = false;
+	bool ownsQueueSlot = false;
+	const SKSE::stl::scope_exit releaseQueueSlotOnExit([this, &ownsQueueSlot]() noexcept {
+		if (ownsQueueSlot)
+			ReleaseScreenshotSlot();
+	});
 	VRCaptureSource completedSource = VRCaptureSource::HMDSubmission;
 	{
 		std::lock_guard lock(captureStateMutex);
@@ -3824,7 +3857,8 @@ void ScreenshotFeature::ObserveAcceptedVRSubmit(
 			ShowInGameNotification("Screenshot failed - see CommunityShaders.log");
 			return;
 		}
-		completedScreenshot.ownsQueueSlot = std::exchange(activeCapture.ownsQueueSlot, false);
+		ownsQueueSlot = std::exchange(activeCapture.ownsQueueSlot, false);
+		completedScreenshot.ownsQueueSlot = ownsQueueSlot;
 		completedSource = activeCapture.source;
 		ClearActiveCapture(activeCapture);
 		capturePending.store(false, std::memory_order_release);
@@ -3833,11 +3867,6 @@ void ScreenshotFeature::ObserveAcceptedVRSubmit(
 
 	if (completed) {
 		const auto completedRequestId = completedScreenshot.requestId;
-		bool ownsQueueSlot = completedScreenshot.ownsQueueSlot;
-		const SKSE::stl::scope_exit releaseQueueSlotOnExit([this, &ownsQueueSlot]() noexcept {
-			if (ownsQueueSlot)
-				ReleaseScreenshotSlot();
-		});
 		try {
 			if (!completedRequestId.empty() && screenshotApi) {
 				screenshotApi->OnSourceAcquired(

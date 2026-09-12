@@ -90,7 +90,9 @@ foreach(_required_contract_text IN ITEMS
 	terminalOutcome completedUtc fallbacksPresent cancelled manifestChildren
 	outstandingArtifacts outstandingCaptureJobs captureJobCapacity
 	commandAccepted finalizationCommitted sequence.abort_requested
-	ManifestResultLoop manifestResultDrainer
+	ManifestResultLoop manifestResultDrainer results.splice applicationFailures
+	packagingEventPublished is_nothrow_move_assignable_v
+	manifest_result_publication_retried condition.notify_all
 )
     string(FIND "${_implementation}" "${_required_contract_text}" _contract_position)
     if(_contract_position EQUAL -1)
@@ -100,12 +102,23 @@ endforeach()
 
 file(READ "${PROJECT_ROOT}/src/Api/ScreenshotService.cpp" _native_adapter)
 foreach(_native_dispatch_contract IN ITEMS
-    WaitForTerminalUntil dispatcher_admitted executionMayComplete
+	WaitForTerminalUntil dispatcher_admitted executionMayComplete
+	MakeApiDispatchError dispatch
 )
     string(FIND "${_native_adapter}" "${_native_dispatch_contract}" _native_dispatch_position)
     if(_native_dispatch_position EQUAL -1)
         message(FATAL_ERROR "Native screenshot dispatch is missing bounded admission behavior: ${_native_dispatch_contract}")
     endif()
+endforeach()
+
+file(READ "${PROJECT_ROOT}/src/ScreenshotDevBenchBridge.cpp" _bridge)
+foreach(_devbench_dispatch_contract IN ITEMS
+	dispatcher_admitted executionMayComplete MakeApiDispatchError
+)
+	string(FIND "${_bridge}" "${_devbench_dispatch_contract}" _devbench_dispatch_position)
+	if(_devbench_dispatch_position EQUAL -1)
+		message(FATAL_ERROR "DevBench screenshot dispatch is missing contract behavior: ${_devbench_dispatch_contract}")
+	endif()
 endforeach()
 
 file(READ "${PROJECT_ROOT}/docs/development/schemas/screenshot-request-v1.schema.json" _request_schema)
@@ -116,7 +129,6 @@ foreach(_required_schema_text IN ITEMS runtime_session persistent_user settings_
     endif()
 endforeach()
 
-file(READ "${PROJECT_ROOT}/src/ScreenshotDevBenchBridge.cpp" _bridge)
 string(FIND "${_bridge}" "communityshaders.screenshot" _tool_position)
 if(_tool_position EQUAL -1)
     message(FATAL_ERROR "communityshaders.screenshot is not registered")
@@ -145,7 +157,8 @@ endif()
 foreach(_acquisition_contract_text IN ITEMS
     BuildAcquisitionRecord publicationGeneration deviceIdentity
     submittedBounds requiredEyeMask IsSamePublication
-    releaseQueueSlotOnExit queueCommitted
+	releaseQueueSlotOnExit queueCommitted
+	"committed to the encoder but its queued event could not be published"
 )
     string(FIND "${_feature_controls}" "${_acquisition_contract_text}" _acquisition_position)
     if(_acquisition_position EQUAL -1)

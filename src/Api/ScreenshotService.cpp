@@ -28,6 +28,7 @@ namespace
 
 	std::optional<nlohmann::json> HandleOnRuntimeMainThread(nlohmann::json a_request)
 	{
+		const auto dispatchRequest = a_request;
 		auto handle = [request = std::move(a_request)]() mutable {
 			return globals::features::screenshotFeature.HandleApiRequest(request);
 		};
@@ -57,15 +58,12 @@ namespace
 		if (phase == DispatchState::Phase::queued && state->CancelIfQueued())
 			return std::nullopt;
 		if (state->WaitForTerminalUntil(deadline) == DispatchState::Phase::running) {
-			return nlohmann::json{
-				{ "ok", false },
-				{ "error", {
-							   { "code", "dispatcher_admitted" },
-							   { "message", "main-thread execution began but did not complete within 5000ms" },
-							   { "retryable", false },
-							   { "details", { { "executionMayComplete", true } } },
-						   } },
-			};
+			return globals::features::screenshotFeature.MakeApiDispatchError(
+				dispatchRequest,
+				"dispatcher_admitted",
+				"main-thread execution began but did not complete within 5000ms",
+				false,
+				{ { "executionMayComplete", true } });
 		}
 		try {
 			return state->WaitForCompletion();
