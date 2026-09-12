@@ -55,6 +55,13 @@
                 "url": "https://github.com/ParticleTroned/skyrim-community-shaders/pull/82",
                 "head": "0a991fb2034fab25426c52c0518636d202a8f545",
                 "order": 7
+            },
+            {
+                "number": 86,
+                "url": "https://github.com/ParticleTroned/skyrim-community-shaders/pull/86",
+                "head": "64f2f238e64ff2bb66aa8b177013e3c2844867fe",
+                "order": 8,
+                "note": "Makes the controller_tests umbrella build every registered ControllerTests executable."
             }
         ],
         "excludedPullRequests": [
@@ -76,7 +83,8 @@
             "PR 56 keeps the existing Community Shaders API listener and adds Render Map DevBench installation.",
             "PR 79 is refreshed onto current upstream, keeps its Engine Fixes-compatible guard policy plus the current upstream hook RVAs, and supplies that policy to the scene-guard extraction test.",
             "PR 80 is refreshed onto current upstream, keeps current temporal tuning, adds the interop-readiness hot path, and bounds both affected source-extraction tests at the new helper boundary.",
-            "PR 82 keeps both render-map collection and accepted-draw attribution in geometry hooks."
+            "PR 82 keeps both render-map collection and accepted-draw attribution in geometry hooks.",
+            "PR 86 closes the upstream controller-suite dependency gap found during aggregate validation."
         ]
     }
 }
