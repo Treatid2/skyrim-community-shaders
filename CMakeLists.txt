@@ -2042,6 +2042,41 @@ if(BUILD_CONTROLLER_TESTS)
         PROPERTIES LABELS "ControllerTests"
     )
 
+    add_controller_test(
+        devbench_main_thread_dispatch_test
+        DevBenchMainThreadDispatch
+        tests/devbench_main_thread_dispatch_test.cpp
+    )
+    target_link_libraries(
+        devbench_main_thread_dispatch_test
+        PRIVATE nlohmann_json::nlohmann_json
+    )
+    set_tests_properties(DevBenchMainThreadDispatch PROPERTIES TIMEOUT 10)
+
+    add_executable(
+        screenshot_service_dispatch_test
+        EXCLUDE_FROM_ALL
+        tests/screenshot_service_dispatch_test.cpp
+        src/Api/ScreenshotServiceDispatch.cpp
+    )
+    target_compile_features(screenshot_service_dispatch_test PRIVATE cxx_std_23)
+    target_include_directories(
+        screenshot_service_dispatch_test
+        PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(
+        screenshot_service_dispatch_test
+        PRIVATE nlohmann_json::nlohmann_json
+    )
+    add_test(
+        NAME ScreenshotServiceDispatch
+        COMMAND screenshot_service_dispatch_test
+    )
+    set_tests_properties(
+        ScreenshotServiceDispatch
+        PROPERTIES LABELS "ControllerTests"
+    )
+
     add_executable(
         screenshot_api_policy_test
         EXCLUDE_FROM_ALL
@@ -2388,6 +2423,8 @@ if(BUILD_CONTROLLER_TESTS)
             api_service_registry_test
             api_screenshot_contract_test
             main_thread_dispatch_state_test
+            devbench_main_thread_dispatch_test
+            screenshot_service_dispatch_test
             screenshot_api_policy_test
             screenshot_manifest_snapshot_test
             screenshot_capture_present_test
