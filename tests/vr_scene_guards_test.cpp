@@ -15,6 +15,8 @@
 #include <utility>
 #include <vector>
 
+#include "Features/LightLimitFix/VRHookPolicy.h"
+
 namespace
 {
 	std::vector<std::uint8_t> image(0x1A00000);
