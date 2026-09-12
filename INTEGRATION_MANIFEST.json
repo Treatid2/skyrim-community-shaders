@@ -15,8 +15,9 @@
             {
                 "number": 54,
                 "url": "https://github.com/ParticleTroned/skyrim-community-shaders/pull/54",
-                "head": "070daf48c8d573bef47086a3afffdd144a349426",
-                "order": 1
+                "head": "cf93c2d1734d082e82f9fbf8608afe1fbece45e5",
+                "order": 1,
+                "note": "Refreshed onto current upstream with regenerated preset artifacts and runtime settings contract revision 5."
             },
             {
                 "number": 81,
@@ -79,12 +80,13 @@
             }
         ],
         "resolutionNotes": [
-            "PR 54 keeps both generation-claim and preset-compatibility tests and preserves current upstream vendor-capability documentation.",
+            "PR 54 is refreshed onto current upstream, keeps both generation-claim and preset-compatibility tests, preserves current vendor-capability documentation, and regenerates the presets against runtime settings contract revision 5.",
             "PR 56 keeps the existing Community Shaders API listener and adds Render Map DevBench installation.",
             "PR 79 is refreshed onto current upstream, keeps its Engine Fixes-compatible guard policy plus the current upstream hook RVAs, and supplies that policy to the scene-guard extraction test.",
             "PR 80 is refreshed onto current upstream, keeps current temporal tuning, adds the interop-readiness hot path, and bounds both affected source-extraction tests at the new helper boundary.",
             "PR 82 keeps both render-map collection and accepted-draw attribution in geometry hooks.",
-            "PR 86 closes the upstream controller-suite dependency gap found during aggregate validation."
+            "PR 86 closes the upstream controller-suite dependency gap found during aggregate validation.",
+            "The aggregate regenerates unified presets at runtime settings contract revision 6 because the combined PR source tree intentionally differs from every individual upstream PR head. This aggregate-only normalization must not be merged wholesale into curated main."
         ]
     }
 }
