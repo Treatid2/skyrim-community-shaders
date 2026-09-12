@@ -20,7 +20,7 @@ namespace
 	std::atomic_bool g_installAttempted{ false };
 	std::atomic_bool g_registered{ false };
 
-	json RunOnMainThread(std::function<json()> a_run)
+	json RunOnMainThread(const json& a_request, std::function<json()> a_run)
 	{
 		auto* tasks = SKSE::GetTaskInterface();
 		if (!tasks)
@@ -55,15 +55,12 @@ namespace
 		}
 		if (phase == DispatchState::Phase::running &&
 			state->WaitForTerminalUntil(deadline) == DispatchState::Phase::running) {
-			return {
-				{ "ok", false },
-				{ "error", {
-							   { "code", "dispatcher_admitted" },
-							   { "message", "main-thread execution began but did not complete within 5000ms" },
-							   { "retryable", false },
-							   { "details", { { "executionMayComplete", true } } },
-						   } },
-			};
+			return globals::features::screenshotFeature.MakeApiDispatchError(
+				a_request,
+				"dispatcher_admitted",
+				"main-thread execution began but did not complete within 5000ms",
+				false,
+				{ { "executionMayComplete", true } });
 		}
 		try {
 			return state->WaitForCompletion();
@@ -83,7 +80,8 @@ namespace
 				request = json::parse(a_argsJson);
 			if (!request.is_object())
 				throw std::runtime_error("arguments must be a JSON object");
-			output = RunOnMainThread([request = std::move(request)]() {
+			const auto dispatchRequest = request;
+			output = RunOnMainThread(dispatchRequest, [request = std::move(request)]() {
 				return globals::features::screenshotFeature.HandleApiRequest(request);
 			});
 		} catch (const std::exception& e) {
