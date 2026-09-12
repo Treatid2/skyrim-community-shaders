@@ -15,9 +15,9 @@
             {
                 "number": 54,
                 "url": "https://github.com/ParticleTroned/skyrim-community-shaders/pull/54",
-                "head": "cf93c2d1734d082e82f9fbf8608afe1fbece45e5",
+                "head": "c8aa8cf30f19a4566bf25a5196e814db4d276ad4",
                 "order": 1,
-                "note": "Refreshed onto current upstream with regenerated preset artifacts and runtime settings contract revision 5."
+                "note": "Refreshed onto current upstream with regenerated preset artifacts, runtime settings contract revision 5, and a corrected controller_tests dependency for the motion-sharpening runtime compile check."
             },
             {
                 "number": 81,
