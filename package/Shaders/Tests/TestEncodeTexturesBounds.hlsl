@@ -2,11 +2,28 @@
 #include "/Shaders/Upscaling/EncodeTexturesBounds.hlsli"
 #include "/Test/STF/ShaderTestFramework.hlsli"
 
+bool IsEncodeTextureSourceSampleInBounds(
+	int2 samplePos,
+	float2 trueSamplingDim,
+	uint2 sourceSamplingXBounds)
+{
+	bool contractValid =
+		IsEncodeTextureSourceSamplingContractValid(trueSamplingDim, sourceSamplingXBounds);
+	int2 samplingDim = int2(0, 0);
+	if (contractValid)
+		samplingDim = int2(trueSamplingDim);
+	return IsEncodeTextureSourceSampleInBounds(
+		samplePos,
+		samplingDim,
+		sourceSamplingXBounds,
+		contractValid);
+}
+
 /// @tags upscaling, vr, stereo, motion-vectors
 /// Packed-stereo samples never cross from the left eye into the right eye.
 [numthreads(1, 1, 1)] void TestEncodeTexturesLeftEyeBounds() {
 	int2 textureDim = int2(16, 8);
-	float2 leftEyeBounds = float2(0, 8);
+	uint2 leftEyeBounds = uint2(0, 8);
 
 	ASSERT(IsTrue, IsEncodeTextureSourceSampleInBounds(int2(0, 0), textureDim, leftEyeBounds));
 	ASSERT(IsTrue, IsEncodeTextureSourceSampleInBounds(int2(7, 7), textureDim, leftEyeBounds));
@@ -19,7 +36,7 @@
 	[numthreads(1, 1, 1)] void TestEncodeTexturesRightEyeBounds()
 {
 	int2 textureDim = int2(16, 8);
-	float2 rightEyeBounds = float2(8, 16);
+	uint2 rightEyeBounds = uint2(8, 16);
 
 	ASSERT(IsTrue, IsEncodeTextureSourceSampleInBounds(int2(8, 0), textureDim, rightEyeBounds));
 	ASSERT(IsTrue, IsEncodeTextureSourceSampleInBounds(int2(15, 7), textureDim, rightEyeBounds));
@@ -31,7 +48,7 @@
 /// A left-eye foveated crop keeps its full-eye 5x5 source footprint.
 [numthreads(1, 1, 1)] void TestEncodeTexturesLeftFoveatedCropUsesFullEyeBounds() {
 	int2 textureDim = int2(16, 8);
-	float2 leftEyeBounds = float2(0, 8);
+	uint2 leftEyeBounds = uint2(0, 8);
 	int4 dispatchCrop = int4(6, 2, 8, 6);
 	bool acceptedOutsideCropX = false;
 	bool acceptedOutsideCropY = false;
@@ -75,7 +92,7 @@
 	[numthreads(1, 1, 1)] void TestEncodeTexturesRightFoveatedCropUsesFullEyeBounds()
 {
 	int2 textureDim = int2(16, 8);
-	float2 rightEyeBounds = float2(8, 16);
+	uint2 rightEyeBounds = uint2(8, 16);
 	int4 dispatchCrop = int4(8, 2, 10, 6);
 	bool acceptedOutsideCropX = false;
 	bool acceptedOutsideCropY = false;
@@ -118,11 +135,29 @@
 /// Source-eye bounds compose with the physical texture bounds.
 [numthreads(1, 1, 1)] void TestEncodeTexturesRejectsTextureEdges() {
 	int2 textureDim = int2(16, 8);
-	float2 fullWidthBounds = float2(0, 16);
+	uint2 fullWidthBounds = uint2(0, 16);
 
 	ASSERT(IsFalse, IsEncodeTextureSourceSampleInBounds(int2(-1, 4), textureDim, fullWidthBounds));
 	ASSERT(IsFalse, IsEncodeTextureSourceSampleInBounds(int2(16, 4), textureDim, fullWidthBounds));
 	ASSERT(IsFalse, IsEncodeTextureSourceSampleInBounds(int2(4, -1), textureDim, fullWidthBounds));
 	ASSERT(IsFalse, IsEncodeTextureSourceSampleInBounds(int2(4, 8), textureDim, fullWidthBounds));
 	ASSERT(IsTrue, IsEncodeTextureSourceSampleInBounds(int2(15, 7), textureDim, fullWidthBounds));
+}
+
+	/// @tags upscaling, bounds, motion-vectors
+	/// Malformed dispatch-uniform contracts disable all neighbour sampling.
+	[numthreads(1, 1, 1)] void TestEncodeTexturesRejectsInvalidSamplingContracts()
+{
+	float nanValue = asfloat(0x7FC00000u);
+
+	ASSERT(IsFalse, IsEncodeTextureSourceSamplingContractValid(float2(16, 8), uint2(8, 0)));
+	ASSERT(IsFalse, IsEncodeTextureSourceSamplingContractValid(float2(16, 8), uint2(0, 32)));
+	ASSERT(IsFalse, IsEncodeTextureSourceSamplingContractValid(float2(16, 8), uint2(65535u, 16u)));
+	ASSERT(IsFalse, IsEncodeTextureSourceSamplingContractValid(float2(16.5, 8), uint2(0, 16)));
+	ASSERT(IsFalse, IsEncodeTextureSourceSamplingContractValid(float2(nanValue, 8), uint2(0, 16)));
+	ASSERT(IsFalse, IsEncodeTextureSourceSamplingContractValid(float2(16, 0), uint2(0, 16)));
+	ASSERT(IsFalse, IsEncodeTextureSourceSamplingContractValid(float2(17, 8), uint2(0, 8)));
+	ASSERT(IsTrue, IsEncodeTextureSourceSamplingContractValid(float2(17, 8), uint2(0, 17)));
+
+	ASSERT(IsFalse, IsEncodeTextureSourceSampleInBounds(int2(8, 4), int2(16, 8), uint2(0, 16), false));
 }

@@ -4162,6 +4162,8 @@ FidelityFX::UpscaleResult FidelityFX::UpscaleRegion(uint32_t a_contextIndex, ID3
 		if (runtimeUpscalerUsedForFrame)
 			return UpscaleResult::Failed;
 	}
+	if (!safeHostFallbackReady)
+		return UpscaleResult::Failed;
 
 	// OpenVR accepts each eye independently. Once this frame has published a
 	// runtime-provider eye, falling through to host FSR for a later eye would
@@ -4300,6 +4302,8 @@ FidelityFX::StereoUpscaleResult FidelityFX::UpscaleStereoRegions(
 				FSRRuntimeLifecyclePolicy::PendingDispatchResolution::Defer) {
 			return StereoUpscaleResult::Deferred;
 		}
+		if (!safeHostFallbackReady)
+			return StereoUpscaleResult::Failed;
 		if (!FSRHostLifecyclePolicy::CanAttemptHostFallback(
 				IsHostFSR3Supported(),
 				runtimeUpscalerUsedForFrame)) {
@@ -4350,6 +4354,8 @@ FidelityFX::StereoUpscaleResult FidelityFX::UpscaleStereoRegions(
 		runtimeUpscalerUsedForFrame) {
 		return StereoUpscaleResult::Failed;
 	}
+	if (!safeHostFallbackReady)
+		return StereoUpscaleResult::Failed;
 
 	return StereoUpscaleResult::NotHandled;
 }

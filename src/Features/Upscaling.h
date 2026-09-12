@@ -1983,7 +1983,7 @@ public:
 		float2 sourceOffset;  // Source offset in combined stereo inputs
 		float2 outputOffset;  // Output offset in per-eye intermediates
 		// Full-eye [minX, maxX) bounds, never the foveated dispatch crop; full texture in flat.
-		float2 sourceSamplingXBounds;
+		DirectX::XMUINT2 sourceSamplingXBounds;
 	};
 
 	struct DynamicResolutionStretchCB
@@ -2774,8 +2774,14 @@ public:
 		Render,
 		Dispatch
 	};
+	enum class MainPassUpscaleResult : uint8_t
+	{
+		Ready,
+		Deferred,
+		Failed
+	};
 	bool TryReplaceVanillaDynamicResolutionUpsample(const char* a_passName, DynamicResolutionUpsampleStage a_stage);
-	void Upscale();
+	MainPassUpscaleResult Upscale();
 	using VRVendorWorkGateSource = VRVendorRelatchPolicy::WorkGateSource;
 	struct VRVendorWorkGateSnapshot
 	{
@@ -3341,7 +3347,7 @@ public:
 	std::atomic_bool vrRenderScaleResourceTrackingSyncPending{ false };
 	void CopySharedD3D12Resources();
 	void PostDisplay();
-	void PerformUpscaling();
+	MainPassUpscaleResult PerformUpscaling();
 	void UpscaleDepth();
 	void RefreshSubmitStageUnderwaterMask();
 	void RequestHistoryReset();
