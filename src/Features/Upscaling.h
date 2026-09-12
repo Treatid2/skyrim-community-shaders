@@ -2968,6 +2968,7 @@ public:
 		vrRenderScalePreparationTelemetry{};
 	mutable std::mutex vrRenderScaleRetryTelemetryMutex;
 	VRRenderScaleRetryTelemetry::State vrRenderScaleRetryTelemetry{};
+	mutable std::atomic<uint64_t> vrRenderScaleRetryTelemetryDroppedEvents{ 0 };
 #endif
 	std::atomic<uint64_t> nextVRRenderScaleTransitionEpoch{ 1 };
 	mutable std::mutex vrRenderScaleTransitionControllerMutex;
@@ -3436,9 +3437,12 @@ public:
 	[[nodiscard]] uint64_t GetPreparedVRRenderScaleRequestID() const;
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	VRRenderScaleRetryTelemetry::Context CaptureVRRenderScaleRetryContext() const;
+	VRRenderScaleRetryTelemetry::ViewportOwner CaptureVRRenderScaleViewportOwner(
+		uint32_t a_generation);
 	void AppendVRRenderScaleRetryEventLocked(VRRenderScaleRetryTelemetry::Event a_event);
 	void RecordVRRenderScaleRetryEvent(VRRenderScaleRetryTelemetry::Event a_event);
 	void RecordVRRenderScaleViewportPreparation(
+		const VRRenderScaleRetryTelemetry::ViewportOwner& a_owner,
 		const VRRenderScaleRetryTelemetry::ViewportObservation& a_observation,
 		Streamline::DLSSViewportPreparationResult a_result, uint32_t a_generation);
 	void RecordVRRenderScaleResumeEvent(VRRenderScaleRetryTelemetry::EventType a_type,
