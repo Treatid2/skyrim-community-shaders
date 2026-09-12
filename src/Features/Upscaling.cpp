@@ -21,6 +21,7 @@
 #include "ShaderCache.h"
 #include "State.h"
 #include "Upscaling/DX12SwapChain.h"
+#include "Upscaling/EncodeTexturesHostPolicy.h"
 #include "Upscaling/FSRHostLifecyclePolicy.h"
 #include "Upscaling/FidelityFX.h"
 #include "Upscaling/NvidiaComIdentity.h"
@@ -57297,17 +57298,20 @@ Upscaling::MainPassUpscaleResult Upscaling::Upscale()
 #endif
 			return false;
 		}
-		const auto isValidSamplingDimension = [](float a_value) {
-			return std::isfinite(a_value) &&
-			       a_value == std::floor(a_value) &&
-			       a_value <= static_cast<float>(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
-		};
-		if (!isValidSamplingDimension(renderSize.x) || !isValidSamplingDimension(renderSize.y)) {
+		const auto normalizedWidth =
+			EncodeTexturesHostPolicy::NormalizeSamplingDimension(renderSize.x);
+		const auto normalizedHeight =
+			EncodeTexturesHostPolicy::NormalizeSamplingDimension(renderSize.y);
+		if (!normalizedWidth || !normalizedHeight) {
 #ifdef DEVBENCH_BRIDGE_ENABLED
 			recordMainPassStage(VRMainPassDispatchStage::EncodeResolutionInvalid);
 #endif
 			return false;
 		}
+		renderSize = {
+			static_cast<float>(*normalizedWidth),
+			static_cast<float>(*normalizedHeight)
+		};
 
 		ID3D11ShaderResourceView* views[4] = { temporalAAMask.SRV, normals.SRV, motionVector.SRV, depth.depthSRV };
 		context->CSSetShaderResources(0, ARRAYSIZE(views), views);
