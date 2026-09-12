@@ -29,8 +29,8 @@ namespace
 	using json = nlohmann::json;
 	using CSX::RenderMap::ControlStatus;
 	constexpr std::uint32_t kContractMajor = 1;
-	constexpr std::uint32_t kContractMinor = 17;
-	constexpr std::uint32_t kSchemaRevision = 18;
+	constexpr std::uint32_t kContractMinor = 18;
+	constexpr std::uint32_t kSchemaRevision = 19;
 	constexpr std::uint64_t kMaximumFrames = 600;
 	constexpr std::uint64_t kMaximumDurationMs = 10000;
 	constexpr std::uint64_t kMaximumEvents = 65536;
@@ -74,9 +74,9 @@ namespace
 		CSX::RenderMap::EventKindBit(CSX::RenderMap::EventKind::kFinishCommandList) |
 		CSX::RenderMap::EventKindBit(CSX::RenderMap::EventKind::kExecuteCommandList);
 	constexpr auto kSelectableEventKinds = CSX::RenderMap::kAllEventKindsMask &
-		~(CSX::RenderMap::EventKindBit(CSX::RenderMap::EventKind::kCaptureMarker) |
-			CSX::RenderMap::EventKindBit(CSX::RenderMap::EventKind::kGap) |
-			kPlannedEventKinds);
+	                                       ~(CSX::RenderMap::EventKindBit(CSX::RenderMap::EventKind::kCaptureMarker) |
+											   CSX::RenderMap::EventKindBit(CSX::RenderMap::EventKind::kGap) |
+											   kPlannedEventKinds);
 	std::atomic_bool g_registered{ false };
 	std::mutex g_artifactMutex;
 	std::unordered_map<std::string, CSX::RenderMap::CaptureArtifactContext> g_artifactContexts;
@@ -100,8 +100,10 @@ namespace
 	json UnavailableInput()
 	{
 		return {
-			{ "availability", "unavailable" }, { "path", nullptr },
-			{ "sha256", nullptr }, { "schemaMajor", nullptr },
+			{ "availability", "unavailable" },
+			{ "path", nullptr },
+			{ "sha256", nullptr },
+			{ "schemaMajor", nullptr },
 		};
 	}
 
@@ -117,32 +119,41 @@ namespace
 
 		const auto compile = globals::shaderCache->GetCompileContextSnapshot();
 		return {
-			{ "availability", "observed" }, { "evidenceClass", "runtime-observed" },
+			{ "availability", "observed" },
+			{ "evidenceClass", "runtime-observed" },
 			{ "capturedAt", "capture-start" },
 			{ "shaderCacheAbiId", compile.shaderCacheAbiId },
 			{ "shaderCompilerIdentity", compile.shaderCompilerIdentity },
 			{ "compileMode", compile.developerMode ? "debug" : "optimized" },
 			{ "virtualReality", compile.virtualReality },
 			{ "compilerFlags", {
-				{ "partialPrecision", compile.partialPrecision },
-				{ "avoidFlowControl", compile.avoidFlowControl },
-			} },
+								   { "partialPrecision", compile.partialPrecision },
+								   { "avoidFlowControl", compile.avoidFlowControl },
+							   } },
 			{ "globalDefines", {
-				{ "canonicalText", compile.shaderDefinesCanonical },
-				{ "cachePathSuffix", compile.shaderDefinesSuffix },
-			} },
+								   { "canonicalText", compile.shaderDefinesCanonical },
+								   { "cachePathSuffix", compile.shaderDefinesSuffix },
+							   } },
 			{ "globalCompileState", {
-				{ "algorithm", "xxh3-128" }, { "digest", compile.globalCompileStateDigest },
-				{ "identityBasis", json::array({
-					"compile-mode", "virtual-reality", "partial-precision", "avoid-flow-control",
-					"shader-cache-abi", "global-defines",
-				}) },
-			} },
+										{ "algorithm", "xxh3-128" },
+										{ "digest", compile.globalCompileStateDigest },
+										{ "identityBasis", json::array({
+															   "compile-mode",
+															   "virtual-reality",
+															   "partial-precision",
+															   "avoid-flow-control",
+															   "shader-cache-abi",
+															   "global-defines",
+														   }) },
+									} },
 			{ "compatibilityRegistry", {
-				{ "phase", "unknown" }, { "revision", 1 }, { "registrationCount", 0 },
-				{ "compatibilitySetDigest", nullptr }, { "complete", false },
-				{ "registrations", json::array() },
-			} },
+										   { "phase", "unknown" },
+										   { "revision", 1 },
+										   { "registrationCount", 0 },
+										   { "compatibilitySetDigest", nullptr },
+										   { "complete", false },
+										   { "registrations", json::array() },
+									   } },
 			{ "qualification",
 				"globalCompileState is observed; current main-VR does not expose a shader-specific "
 				"compatibility registry, so compatibilityRegistry is explicitly incomplete" },
@@ -164,16 +175,24 @@ namespace
 				{ "dirty", build.value("sourceDirty", false) },
 			},
 			.capabilities = {
-				"thread-local-render-scopes", "bounded-in-memory-capture", "typed-shader-observations",
+				"thread-local-render-scopes",
+				"bounded-in-memory-capture",
+				"typed-shader-observations",
 				"resolved-technique-stage-observations",
 				"typed-output-merger-target-observations",
-				"typed-resource-and-view-observations", "ordered-resource-bindings", "resource-flow-observations",
-				"resource-mutation-observations", "resource-cpu-access-observations",
-				"atomic-events-jsonl", "atomic-capture-manifest", "explicit-gap-events",
+				"typed-resource-and-view-observations",
+				"ordered-resource-bindings",
+				"resource-flow-observations",
+				"resource-mutation-observations",
+				"resource-cpu-access-observations",
+				"atomic-events-jsonl",
+				"atomic-capture-manifest",
+				"explicit-gap-events",
 				"capture-start-shader-compilation-provenance",
 			},
 			.inputs = {
-				{ "shaderManifest", UnavailableInput() }, { "engineMap", UnavailableInput() },
+				{ "shaderManifest", UnavailableInput() },
+				{ "engineMap", UnavailableInput() },
 				{ "csxBuildManifest", UnavailableInput() },
 			},
 			.environment = {
@@ -181,19 +200,31 @@ namespace
 				{ "csx", { { "name", "CommunityShaders.dll" }, { "version", build.value("buildIdShort", std::string("unavailable")) }, { "sha256", nullptr } } },
 				{ "runtimeRoute", "unknown" },
 				{ "modEnvironment", {
-					{ "manager", "other" }, { "instance", nullptr }, { "profile", nullptr },
-					{ "modlistSha256", nullptr }, { "pluginLoadOrderSha256", nullptr },
-				} },
+										{ "manager", "other" },
+										{ "instance", nullptr },
+										{ "profile", nullptr },
+										{ "modlistSha256", nullptr },
+										{ "pluginLoadOrderSha256", nullptr },
+									} },
 				{ "graphics", {
-					{ "gpu", nullptr }, { "driver", nullptr }, { "renderWidth", nullptr }, { "renderHeight", nullptr },
-					{ "presetSha256", nullptr }, { "settingsSha256", nullptr },
-				} },
+								  { "gpu", nullptr },
+								  { "driver", nullptr },
+								  { "renderWidth", nullptr },
+								  { "renderHeight", nullptr },
+								  { "presetSha256", nullptr },
+								  { "settingsSha256", nullptr },
+							  } },
 				{ "shaderCache", { { "identity", "unavailable" }, { "inventorySha256", nullptr }, { "coldAtStart", false } } },
 			},
 			.scenario = {
-				{ "id", "unspecified" }, { "saveFingerprint", nullptr }, { "cell", nullptr },
-				{ "worldspace", nullptr }, { "weather", nullptr }, { "gameHour", nullptr },
-				{ "cameraMarker", nullptr }, { "notes", "No scenario metadata was supplied to the v1.0 live controller." },
+				{ "id", "unspecified" },
+				{ "saveFingerprint", nullptr },
+				{ "cell", nullptr },
+				{ "worldspace", nullptr },
+				{ "weather", nullptr },
+				{ "gameHour", nullptr },
+				{ "cameraMarker", nullptr },
+				{ "notes", "No scenario metadata was supplied to the v1.0 live controller." },
 			},
 			.extensions = {
 				{ "csx.shaderCompilation", BuildShaderCompilationProvenance() },
@@ -242,11 +273,29 @@ namespace
 		return found != a_args.end() && found->is_number_unsigned();
 	}
 
+	json InvalidBound(
+		const json& a_args,
+		std::string_view a_field,
+		std::uint64_t a_value,
+		std::uint64_t a_minimum,
+		std::uint64_t a_maximum)
+	{
+		auto error = Foundation().MakeError(
+			a_args, "invalid_bounds", "capture bound is outside the advertised range",
+			"validation", false, a_field);
+		error["error"]["details"] = {
+			{ "value", a_value },
+			{ "minimum", a_minimum },
+			{ "maximum", a_maximum },
+		};
+		return error;
+	}
+
 	json BuildResult(const json& a_args)
 	{
 		const auto action = a_args.value("action", std::string{});
 		const bool known = action == "registry" || action == "status" || action == "start" ||
-			action == "stop" || action == "capture_events";
+		                   action == "stop" || action == "capture_events";
 		if (!known)
 			return Foundation().MakeError(a_args, "unknown_action", "action is not supported", "validation", false, "action");
 
@@ -268,77 +317,89 @@ namespace
 			};
 			auto defaultCatalogueConfig = defaultConfig;
 			defaultCatalogueConfig.maxEvents = 0;
+			const auto fixedCatalogueBytes = CSX::RenderMap::Collector::RequiredStorageBytes(defaultCatalogueConfig);
 			auto response = Foundation().MakeEnvelope(a_args, true);
 			response["result"] = {
 				{ "service", "communityshaders.render-map" },
-				{ "major", kContractMajor }, { "minor", kContractMinor },
+				{ "major", kContractMajor },
+				{ "minor", kContractMinor },
 				{ "schemaRevision", kSchemaRevision },
 				{ "actions", json::array({ "registry", "status", "start", "stop", "capture_events" }) },
 				{ "eventSchemas", json::array({ "render-pass-boundary-v1", "technique-boundary-v2", "geometry-boundary-v1", "geometry-boundary-v2", "scene-object-observation-v1", "geometry-observation-v1", "material-state-observation-v1", "shader-observation-v2", "stage-shader-observation-v3", "technique-resolution-v1", "device-context-observation-v1", "target-view-observation-v1", "resource-observation-v1", "resource-view-binding-v1", "resource-view-binding-v2", "resource-view-state-observed-v1", "resource-flow-v1", "resource-cpu-access-v1", "resource-version-observation-v1", "visibility-candidate-v1", "visibility-result-ready-v1", "visibility-submission-v1", "cull-decision-v1", "eye-submission-v1", "render-target-binding-v1", "render-target-binding-v2", "draw-call-v2", "draw-call-v3", "dispatch-call-v1" }) },
 				{ "eventKinds", CSX::RenderMap::SerializeEventKindMask(kSelectableEventKinds) },
 				{ "plannedEventKinds", CSX::RenderMap::SerializeEventKindMask(kPlannedEventKinds) },
 				{ "eventSelection", {
-					{ "optional", true }, { "omitted", "all" }, { "emptyAllowed", false },
-					{ "dependencyExpansion", true },
-					{ "plannedKindsSelectable", false },
-					{ "reporting", "requested and resolved sets are returned and retained" },
-				} },
+										{ "optional", true },
+										{ "omitted", "all" },
+										{ "emptyAllowed", false },
+										{ "dependencyExpansion", true },
+										{ "plannedKindsSelectable", false },
+										{ "reporting", "requested and resolved sets are returned and retained" },
+									} },
 				{ "geometrySelection", {
-					{ "shaderTypes", "optional non-empty array of numeric engine shader types 0 through 63" },
-					{ "executionWithinSelectedGeometry", "optional; when true, draws require either an active selected geometry scope or the one-shot same-thread next-draw handoff from selected SetupGeometry" },
-					{ "filteredIsLoss", false },
-				} },
+										   { "shaderTypes", "optional non-empty array of numeric engine shader types 0 through 63" },
+										   { "executionWithinSelectedGeometry", "optional; when true, draws require either an active selected geometry scope or the one-shot same-thread next-draw handoff from selected SetupGeometry" },
+										   { "filteredIsLoss", false },
+									   } },
 				{ "executionCoverage", {
-					{ "deviceContext", "immediate-only" },
-					{ "typedDeviceContextIdentity", true },
-					{ "commandStreamSequence", true },
-					{ "outputMergerTargets", "immediate-requested-post-call-effective-and-first-draw-snapshot" },
-					{ "shaderResourceViews", "all-immediate-stages-requested-and-post-call-effective" },
-					{ "unorderedAccessViews", "compute-and-output-merger-requested-and-post-call-effective" },
-					{ "resourceFlow", "copy-and-resolve" },
-					{ "cpuResourceAccess", "immediate-context-map-unmap-with-qpc-duration-and-pairing" },
-					{ "vrEyeAttribution", "accepted-openvr-submit-resource-and-bounds" },
-					{ "visibilitySubmissionJoin", "explicit-next-draw-identity" },
-					{ "preparedGeometryJoin", "same-thread-next-immediate-context-draw-after-selected-setup" },
-					{ "visibilityBindingVerification", "effective-vs-srv-slot" },
-					{ "deferredContexts", false },
-					{ "commandLists", false },
-				} },
+										   { "deviceContext", "immediate-only" },
+										   { "typedDeviceContextIdentity", true },
+										   { "commandStreamSequence", true },
+										   { "outputMergerTargets", "immediate-requested-post-call-effective-and-first-draw-snapshot" },
+										   { "shaderResourceViews", "all-immediate-stages-requested-and-post-call-effective" },
+										   { "unorderedAccessViews", "compute-and-output-merger-requested-and-post-call-effective" },
+										   { "resourceFlow", "copy-and-resolve" },
+										   { "cpuResourceAccess", "immediate-context-map-unmap-with-qpc-duration-and-pairing" },
+										   { "vrEyeAttribution", "accepted-openvr-submit-resource-and-bounds" },
+										   { "visibilitySubmissionJoin", "explicit-next-draw-identity" },
+										   { "preparedGeometryJoin", "same-thread-next-immediate-context-draw-after-selected-setup" },
+										   { "visibilityBindingVerification", "effective-vs-srv-slot" },
+										   { "deferredContexts", false },
+										   { "commandLists", false },
+									   } },
 				{ "pointerPolicies", json::array({ "retain" }) },
 				{ "singleActiveCapture", true },
 				{ "completedCaptureHistory", 4 },
 				{ "durableArtifacts", {
-					{ "automaticOnStop", true }, { "events", "events.jsonl" },
-					{ "manifest", "capture-manifest.json" }, { "overwrite", "never" },
-				} },
+										  { "automaticOnStop", true },
+										  { "events", "events.jsonl" },
+										  { "manifest", "capture-manifest.json" },
+										  { "overwrite", "never" },
+									  } },
 				{ "limits", {
-					{ "maximumFrames", kMaximumFrames }, { "maximumDurationMs", kMaximumDurationMs },
-					{ "maximumEvents", kMaximumEvents }, { "maximumBytes", kMaximumBytes },
-					{ "maximumScopeDepth", CSX::RenderMap::kMaximumScopeDepth }, { "maximumEventPage", 500 },
-					{ "maximumShaderObservations", kMaximumShaderObservations },
-					{ "maximumStageShaderObservations", kMaximumStageShaderObservations },
-					{ "maximumResourceObservations", kMaximumResourceObservations },
-					{ "maximumTargetViewObservations", kMaximumTargetViewObservations },
-					{ "maximumTargetBindingObservations", kMaximumTargetBindingObservations },
-					{ "maximumSceneObjectObservations", kMaximumSceneObjectObservations },
-					{ "maximumGeometryObservations", kMaximumGeometryObservations },
-					{ "maximumMaterialStateObservations", kMaximumMaterialStateObservations },
-				} },
+								{ "maximumFrames", kMaximumFrames },
+								{ "maximumDurationMs", kMaximumDurationMs },
+								{ "maximumEvents", kMaximumEvents },
+								{ "maximumBytes", kMaximumBytes },
+								{ "maximumScopeDepth", CSX::RenderMap::kMaximumScopeDepth },
+								{ "maximumEventPage", 500 },
+								{ "maximumShaderObservations", kMaximumShaderObservations },
+								{ "maximumStageShaderObservations", kMaximumStageShaderObservations },
+								{ "maximumResourceObservations", kMaximumResourceObservations },
+								{ "maximumTargetViewObservations", kMaximumTargetViewObservations },
+								{ "maximumTargetBindingObservations", kMaximumTargetBindingObservations },
+								{ "maximumSceneObjectObservations", kMaximumSceneObjectObservations },
+								{ "maximumGeometryObservations", kMaximumGeometryObservations },
+								{ "maximumMaterialStateObservations", kMaximumMaterialStateObservations },
+							} },
 				{ "defaults", {
-					{ "maxFrames", kDefaultFrames }, { "maxDurationMs", kDefaultDurationMs },
-					{ "maxEvents", kDefaultEvents }, { "maxBytes", kDefaultBytes },
-					{ "maxScopeDepth", kDefaultScopeDepth },
-					{ "maxShaderObservations", kDefaultShaderObservations },
-					{ "maxStageShaderObservations", kDefaultStageShaderObservations },
-					{ "maxResourceObservations", kDefaultResourceObservations },
-					{ "maxTargetViewObservations", kDefaultTargetViewObservations },
-					{ "maxTargetBindingObservations", kDefaultTargetBindingObservations },
-					{ "maxSceneObjectObservations", kDefaultSceneObjectObservations },
-					{ "maxGeometryObservations", kDefaultGeometryObservations },
-					{ "maxMaterialStateObservations", kDefaultMaterialStateObservations },
-					{ "fixedCatalogueBytes", CSX::RenderMap::Collector::RequiredStorageBytes(defaultCatalogueConfig) },
-					{ "budgetSemantics", "maxBytes must exceed fixedCatalogueBytes; the remaining admitted bytes bound event storage" },
-				} },
+								  { "maxFrames", kDefaultFrames },
+								  { "maxDurationMs", kDefaultDurationMs },
+								  { "maxEvents", kDefaultEvents },
+								  { "maxBytes", kDefaultBytes },
+								  { "maxScopeDepth", kDefaultScopeDepth },
+								  { "maxShaderObservations", kDefaultShaderObservations },
+								  { "maxStageShaderObservations", kDefaultStageShaderObservations },
+								  { "maxResourceObservations", kDefaultResourceObservations },
+								  { "maxTargetViewObservations", kDefaultTargetViewObservations },
+								  { "maxTargetBindingObservations", kDefaultTargetBindingObservations },
+								  { "maxSceneObjectObservations", kDefaultSceneObjectObservations },
+								  { "maxGeometryObservations", kDefaultGeometryObservations },
+								  { "maxMaterialStateObservations", kDefaultMaterialStateObservations },
+								  { "fixedCatalogueBytes", fixedCatalogueBytes },
+								  { "minimumMaxBytes", fixedCatalogueBytes + 1 },
+								  { "budgetSemantics", "maxBytes must exceed fixedCatalogueBytes; the remaining admitted bytes bound event storage" },
+							  } },
 				{ "mainThreadAffine", false },
 				{ "automaticStop", false },
 			};
@@ -430,19 +491,32 @@ namespace
 			};
 			const auto maxBytes = a_args.value("maxBytes", kDefaultBytes);
 			config.maxBytes = maxBytes;
-			if (maxFrames == 0 || maxFrames > kMaximumFrames || maxDurationMs == 0 || maxDurationMs > kMaximumDurationMs ||
-				maxEvents == 0 || maxEvents > kMaximumEvents || maxBytes == 0 ||
-				maxBytes > kMaximumBytes || maxScopeDepth == 0 || maxScopeDepth > CSX::RenderMap::kMaximumScopeDepth ||
-				maxShaderObservations == 0 || maxShaderObservations > kMaximumShaderObservations ||
-				maxStageShaderObservations == 0 || maxStageShaderObservations > kMaximumStageShaderObservations ||
-				maxResourceObservations == 0 || maxResourceObservations > kMaximumResourceObservations ||
-				maxTargetViewObservations == 0 || maxTargetViewObservations > kMaximumTargetViewObservations ||
-				maxTargetBindingObservations == 0 || maxTargetBindingObservations > kMaximumTargetBindingObservations ||
-				maxSceneObjectObservations == 0 || maxSceneObjectObservations > kMaximumSceneObjectObservations ||
-				maxGeometryObservations == 0 || maxGeometryObservations > kMaximumGeometryObservations ||
-				maxMaterialStateObservations == 0 || maxMaterialStateObservations > kMaximumMaterialStateObservations) {
-				return Foundation().MakeError(a_args, "invalid_bounds", "capture bounds exceed the advertised limits", "validation", false);
-			}
+			if (maxFrames == 0 || maxFrames > kMaximumFrames)
+				return InvalidBound(a_args, "maxFrames", maxFrames, 1, kMaximumFrames);
+			if (maxDurationMs == 0 || maxDurationMs > kMaximumDurationMs)
+				return InvalidBound(a_args, "maxDurationMs", maxDurationMs, 1, kMaximumDurationMs);
+			if (maxEvents == 0 || maxEvents > kMaximumEvents)
+				return InvalidBound(a_args, "maxEvents", maxEvents, 1, kMaximumEvents);
+			if (maxBytes == 0 || maxBytes > kMaximumBytes)
+				return InvalidBound(a_args, "maxBytes", maxBytes, 1, kMaximumBytes);
+			if (maxScopeDepth == 0 || maxScopeDepth > CSX::RenderMap::kMaximumScopeDepth)
+				return InvalidBound(a_args, "maxScopeDepth", maxScopeDepth, 1, CSX::RenderMap::kMaximumScopeDepth);
+			if (maxShaderObservations == 0 || maxShaderObservations > kMaximumShaderObservations)
+				return InvalidBound(a_args, "maxShaderObservations", maxShaderObservations, 1, kMaximumShaderObservations);
+			if (maxStageShaderObservations == 0 || maxStageShaderObservations > kMaximumStageShaderObservations)
+				return InvalidBound(a_args, "maxStageShaderObservations", maxStageShaderObservations, 1, kMaximumStageShaderObservations);
+			if (maxResourceObservations == 0 || maxResourceObservations > kMaximumResourceObservations)
+				return InvalidBound(a_args, "maxResourceObservations", maxResourceObservations, 1, kMaximumResourceObservations);
+			if (maxTargetViewObservations == 0 || maxTargetViewObservations > kMaximumTargetViewObservations)
+				return InvalidBound(a_args, "maxTargetViewObservations", maxTargetViewObservations, 1, kMaximumTargetViewObservations);
+			if (maxTargetBindingObservations == 0 || maxTargetBindingObservations > kMaximumTargetBindingObservations)
+				return InvalidBound(a_args, "maxTargetBindingObservations", maxTargetBindingObservations, 1, kMaximumTargetBindingObservations);
+			if (maxSceneObjectObservations == 0 || maxSceneObjectObservations > kMaximumSceneObjectObservations)
+				return InvalidBound(a_args, "maxSceneObjectObservations", maxSceneObjectObservations, 1, kMaximumSceneObjectObservations);
+			if (maxGeometryObservations == 0 || maxGeometryObservations > kMaximumGeometryObservations)
+				return InvalidBound(a_args, "maxGeometryObservations", maxGeometryObservations, 1, kMaximumGeometryObservations);
+			if (maxMaterialStateObservations == 0 || maxMaterialStateObservations > kMaximumMaterialStateObservations)
+				return InvalidBound(a_args, "maxMaterialStateObservations", maxMaterialStateObservations, 1, kMaximumMaterialStateObservations);
 			auto catalogueConfig = config;
 			catalogueConfig.maxEvents = 0;
 			const auto fixedCatalogueBytes = CSX::RenderMap::Collector::RequiredStorageBytes(catalogueConfig);
@@ -526,7 +600,8 @@ namespace
 					artifacts = found->second;
 				} else {
 					const auto context = g_artifactContexts.contains(captureId) ?
-						g_artifactContexts.at(captureId) : BuildArtifactContext();
+					                         g_artifactContexts.at(captureId) :
+					                         BuildArtifactContext();
 					artifacts = CSX::RenderMap::WriteCaptureArtifacts(*capture, context, GetCurrentProcessId());
 					g_artifactBundles.emplace(captureId, artifacts);
 					g_artifactContexts.erase(captureId);
@@ -538,7 +613,8 @@ namespace
 			response["result"]["artifacts"] = CSX::RenderMap::SerializeArtifactBundle(artifacts);
 			if (!artifacts.success)
 				response["result"]["warnings"] = json::array({ {
-					{ "code", "artifact_write_failed" }, { "message", artifacts.error },
+					{ "code", "artifact_write_failed" },
+					{ "message", artifacts.error },
 				} });
 			return response;
 		}
