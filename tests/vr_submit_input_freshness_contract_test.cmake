@@ -87,6 +87,38 @@ foreach(_forbidden_contract IN ITEMS
 endforeach()
 
 string(FIND
+    "${_overlay_source}"
+    "bool VR::InstallSubmitHook(bool a_enableProcessing)"
+    _submit_installer_position
+)
+if(_submit_installer_position EQUAL -1)
+    message(FATAL_ERROR "The VR submit-hook installer is missing")
+endif()
+string(SUBSTRING
+    "${_overlay_source}"
+    ${_submit_installer_position}
+    -1
+    _submit_installer_source
+)
+string(FIND
+    "${_submit_installer_source}"
+    "if (!globals::game::isVR)"
+    _non_vr_submit_guard_position
+)
+string(FIND
+    "${_submit_installer_source}"
+    "RE::BSOpenVR* openvr = RE::BSOpenVR::GetSingleton()"
+    _openvr_singleton_position
+)
+if(_non_vr_submit_guard_position EQUAL -1 OR
+   _openvr_singleton_position EQUAL -1 OR
+   _non_vr_submit_guard_position GREATER_EQUAL _openvr_singleton_position)
+    message(FATAL_ERROR
+        "The submit-hook installer must reject SE/AE before accessing BSOpenVR"
+    )
+endif()
+
+string(FIND
     "${_upscaling_source}"
     "if (runtimeFSRStereoResourcesReady)"
     _peer_guard_position

@@ -3345,6 +3345,10 @@ bool VR::PrepareInSceneOverlaySubmitTexture(vr::EVREye eye, const vr::Texture_t*
 
 bool VR::InstallSubmitHook(bool a_enableProcessing)
 {
+	// The submit interception is backed by BSOpenVR and has no SE/AE path.
+	if (!globals::game::isVR)
+		return false;
+
 	static bool installed = false;
 	static bool warnedUnavailable = false;
 	if (installed) {
