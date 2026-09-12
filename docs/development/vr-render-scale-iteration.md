@@ -52,9 +52,9 @@ provider and device failures retain their existing failure handling.
 See [the deferred-eye repair record](vr-fsr-deferred-eye-dispatch.md) for
 the cold-entry failure mechanism and validation limits. This implementation
 has no new measured entry in `vr-render-scale-comparison-ledger.csv`:
-builds, tests, and runtime qualification are deferred by the operator while
-another workload is running. No candidate timing or qualification result
-has been inferred from the source change.
+focused source and controller validation is recorded in that repair record,
+while runtime qualification remains outstanding. No candidate timing or
+qualification result has been inferred from the source change.
 
 ### Controller actions
 

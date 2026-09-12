@@ -39,8 +39,10 @@ the original trigger.
 -   A deferred main-pass FSR dispatch leaves dynamic resolution enabled and
     returns control to Skyrim's temporal-AA pass for the current input. Depth
     upscale, the full-resolution lock, and camera-data publication wait until
-    FSR has produced complete color. Failed dispatches retain the existing
-    failure path; DLSS does not use this FSR-only fallback.
+    FSR has produced complete color. Terminal reset and dispatch failures retain
+    `Failed` status while using the same complete current-input fallback; safe
+    presentation does not relabel a failure as `Deferred`. DLSS does not use
+    this FSR-only fallback.
 -   Present ordinary `PresentationStretch` and hold the current compositor
     cycle on presentation-only output, including when intermediate texture
     replacement cleared its admission record. Preserve a conflicting
@@ -68,11 +70,13 @@ fidelity, lifecycle, and producer-proof diagnostics expose the behavior.
 
 Focused controller tests compile the production single-eye/stereo dispatch
 functions, resource compatibility checks, resolver gate-selection block,
-and deferred-presentation helper against provider and graphics doubles. They
+deferred-presentation helper, and main-pass reset-result policy against
+provider and graphics doubles. They
 cover host subregions, same-frame gate recovery, failure/quarantine behavior,
-invalid resources in every host continuation, and reset protection after
-output-cache invalidation. A source contract also guards the FSR-only
-main-pass handoff to Skyrim temporal AA before the full-resolution lock.
+invalid resources in every host continuation, pending versus terminal reset
+classification, and reset protection after output-cache invalidation. A source
+contract also guards the FSR-only main-pass handoff to Skyrim temporal AA
+before the full-resolution lock.
 
 These tests do not execute the complete resolver, hooks, or GPU dispatch in
 Skyrim. Runtime qualification and the generated `csx-render-scale-pr-v1`
@@ -84,6 +88,6 @@ runtime-only paths, and the required
 [render-scale qualification](render-scale-pr-qualification.md).
 
 The review correction was validated in an ALL Release configuration with the
-`CommunityShaders` target, `FSREyeDispatch`, and
+`CommunityShaders` target, `FSRMainPassPolicy`, `FSREyeDispatch`, and
 `FSRMainPassDeferredFallbackContract`. The unified-preset generator check and
 its focused test suite also passed after the settings contract was refreshed.
