@@ -419,7 +419,7 @@ void ScreenshotApi::ManifestResultLoop(std::stop_token a_stopToken)
 			std::unique_lock workerLock(state->mutex);
 			const auto failureCount = state->results.empty() ? 1u : state->results.front().applicationFailures;
 			const auto retryDelay = std::min(
-				std::chrono::seconds(5),
+				std::chrono::milliseconds(5000),
 				std::chrono::milliseconds(100u << std::min(failureCount - 1u, 5u)));
 			state->condition.wait_for(
 				workerLock, a_stopToken, retryDelay, [] { return false; });
