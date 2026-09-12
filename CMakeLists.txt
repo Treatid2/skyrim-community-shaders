@@ -1739,6 +1739,11 @@ if(BUILD_CONTROLLER_TESTS)
         PROPERTIES LABELS "ControllerTests"
     )
     add_controller_test(
+        fsr_main_pass_policy_test
+        FSRMainPassPolicy
+        tests/fsr_main_pass_policy_test.cpp
+    )
+    add_controller_test(
         reflex_policy_test
         ReflexPolicy
         tests/reflex_policy_test.cpp
@@ -2377,6 +2382,7 @@ if(BUILD_CONTROLLER_TESTS)
             light_limit_fix_vr_hook_policy_test
             fsr_host_lifecycle_policy_test
             fsr_runtime_lifecycle_policy_test
+            fsr_main_pass_policy_test
             fsr_eye_dispatch_test
             vr_submit_input_freshness_policy_test
             vr_submit_input_freshness_composition_test

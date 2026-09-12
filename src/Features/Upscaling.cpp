@@ -57505,7 +57505,14 @@ Upscaling::MainPassUpscaleResult Upscaling::Upscale()
 #ifdef DEVBENCH_BRIDGE_ENABLED
 			recordMainPassStage(VRMainPassDispatchStage::VendorResetBlocked);
 #endif
-			return MainPassUpscaleResult::Deferred;
+			if (upscaleMethod != UpscaleMethod::kFSR)
+				return MainPassUpscaleResult::Deferred;
+			const auto fsrLifecycle =
+				GetVRRenderScaleTransitionSnapshot().fsrLifecycle.phase;
+			return FSRMainPassPolicy::ClassifyResetBlock(
+				false,
+				fsrLifecycle == VRVendorRuntimeLifecyclePhase::Failed,
+				IsSameTerminalFSRResourceRequest(*this));
 		}
 
 		if (foveatedDispatchRequested) {
@@ -57627,8 +57634,9 @@ Upscaling::MainPassUpscaleResult Upscaling::PerformUpscaling()
 {
 	CS_GPU_PASS("Upscaling::PerformUpscaling");
 	const auto result = Upscale();
-	if (runtimeResolutionPlan.upscaleMethod == UpscaleMethod::kFSR &&
-		result == MainPassUpscaleResult::Deferred) {
+	if (FSRMainPassPolicy::RequiresCurrentInputFallback(
+			runtimeResolutionPlan.upscaleMethod == UpscaleMethod::kFSR,
+			result)) {
 		// Leave dynamic resolution active so the engine can present this frame
 		// through its complete current-input temporal fallback.
 		return result;
@@ -58254,8 +58262,9 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 	// OCU ASW.
 	if (upscaleMethod != UpscaleMethod::kNONE && upscaleMethod != UpscaleMethod::kTAA) {
 		const auto mainPassResult = upscaling.PerformUpscaling();
-		if (upscaleMethod == UpscaleMethod::kFSR &&
-			mainPassResult == MainPassUpscaleResult::Deferred) {
+		if (FSRMainPassPolicy::RequiresCurrentInputFallback(
+				upscaleMethod == UpscaleMethod::kFSR,
+				mainPassResult)) {
 			// The FSR provider has not produced full-size color. Keep dynamic
 			// resolution unlocked and let Skyrim's temporal path own this frame.
 			auto imageSpaceManager = RE::ImageSpaceManager::GetSingleton();

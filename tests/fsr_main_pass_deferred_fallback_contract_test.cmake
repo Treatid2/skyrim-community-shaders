@@ -14,13 +14,23 @@ endfunction()
 
 require_text(
     "${_header}"
-    "enum class MainPassUpscaleResult : uint8_t"
+    "using MainPassUpscaleResult = FSRMainPassPolicy::Result"
     "typed main-pass completion result"
 )
 require_text(
     "${_source}"
-    "runtimeResolutionPlan.upscaleMethod == UpscaleMethod::kFSR &&\n\t\tresult == MainPassUpscaleResult::Deferred"
-    "FSR Deferred must leave dynamic resolution available to the fallback"
+    "fsrLifecycle == VRVendorRuntimeLifecyclePhase::Failed"
+    "terminal FSR reset classification"
+)
+require_text(
+    "${_source}"
+    "FSRMainPassPolicy::ClassifyResetBlock"
+    "FSR reset result adapter"
+)
+require_text(
+    "${_source}"
+    "FSRMainPassPolicy::RequiresCurrentInputFallback"
+    "non-ready FSR must leave dynamic resolution available to the fallback"
 )
 
 string(FIND "${_source}" "// Preserve the normal full color-upscaling path in VR" _main_start)
@@ -33,8 +43,8 @@ string(SUBSTRING "${_source}" ${_main_start} ${_main_length} _main_path)
 
 require_text(
     "${_main_path}"
-    "mainPassResult == MainPassUpscaleResult::Deferred"
-    "main-pass Deferred branch"
+    "FSRMainPassPolicy::RequiresCurrentInputFallback"
+    "main-pass non-ready FSR branch"
 )
 require_text(
     "${_main_path}"

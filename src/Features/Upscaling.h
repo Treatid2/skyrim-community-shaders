@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Features/Upscaling/FSRMainPassPolicy.h"
+
 #include "Feature.h"
 #include "Upscaling/DX12SwapChain.h"
 #include "Upscaling/FidelityFX.h"
@@ -2747,12 +2749,7 @@ public:
 		Render,
 		Dispatch
 	};
-	enum class MainPassUpscaleResult : uint8_t
-	{
-		Ready,
-		Deferred,
-		Failed
-	};
+	using MainPassUpscaleResult = FSRMainPassPolicy::Result;
 	bool TryReplaceVanillaDynamicResolutionUpsample(const char* a_passName, DynamicResolutionUpsampleStage a_stage);
 	MainPassUpscaleResult Upscale();
 	using VRVendorWorkGateSource = VRVendorRelatchPolicy::WorkGateSource;
