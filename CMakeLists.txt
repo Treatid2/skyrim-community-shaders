@@ -1763,6 +1763,11 @@ if(BUILD_CONTROLLER_TESTS)
         tests/vr_render_scale_replacement_telemetry_policy_test.cpp
     )
     add_controller_test(
+        vr_render_scale_retry_telemetry_test
+        VRRenderScaleRetryTelemetry
+        tests/vr_render_scale_retry_telemetry_test.cpp
+    )
+    add_controller_test(
         streamline_frame_token_publication_test
         StreamlineFrameTokenPublication
         tests/streamline_frame_token_publication_test.cpp
@@ -2595,6 +2600,7 @@ if(BUILD_CONTROLLER_TESTS)
             upscaling_provider_selection_policy_test
             vr_render_scale_qualification_policy_test
             vr_render_scale_replacement_telemetry_policy_test
+            vr_render_scale_retry_telemetry_test
             streamline_frame_token_publication_test
             vr_submit_temporal_snapshot_test
             vr_submit_color_contract_test

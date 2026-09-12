@@ -43,6 +43,38 @@ file(READ
     _replacement_telemetry_documentation
 )
 
+string(REGEX MATCHALL
+    "std::unique_lock lock\\(vrRenderScaleRetryTelemetryMutex, std::try_to_lock\\)"
+    _retry_nonblocking_producers
+    "${_upscaling_source}"
+)
+list(LENGTH _retry_nonblocking_producers _retry_nonblocking_producer_count)
+if(_retry_nonblocking_producer_count LESS 4)
+    message(FATAL_ERROR
+        "Render-side retry telemetry must use fail-open producer locking"
+    )
+endif()
+foreach(_retry_contract IN ITEMS
+    "CaptureVRRenderScaleViewportOwner(a_generation)"
+    "OwnsViewportObservation("
+    "vrRenderScaleRetryTelemetryDroppedEvents.fetch_add("
+    "telemetry.promotionQualification = qualification"
+    "event.qualificationKnown ? json(event.requiredStableCycles) : json(nullptr)"
+    "expectedSessionID != 0 && observedSessionID == expectedSessionID"
+    "stress_session_replaced_or_reset"
+)
+    string(FIND
+        "${_upscaling_source}\n${_bridge}"
+        "${_retry_contract}"
+        _retry_contract_position
+    )
+    if(_retry_contract_position EQUAL -1)
+        message(FATAL_ERROR
+            "Render-scale retry telemetry contract is missing: ${_retry_contract}"
+        )
+    endif()
+endforeach()
+
 set(_schema_revision_receipt_text "{ \"schemaRevision\", 15 }")
 string(LENGTH "${_bridge}" _bridge_length_with_schema_receipts)
 string(REPLACE
