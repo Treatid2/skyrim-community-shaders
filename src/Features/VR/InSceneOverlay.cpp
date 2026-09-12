@@ -943,6 +943,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 						globals::features::screenshotFeature.HasPendingCapture()) {
 						globals::features::screenshotFeature.ObserveAcceptedVRSubmit(
 							compositorCycleToken,
+							screenshotLease.generation,
+							screenshotLease.deviceIdentity,
 							submitPacket.eye,
 							screenshotTextureLifetime.get(),
 							hasScreenshotBounds ? &retainedScreenshotBounds : nullptr,
