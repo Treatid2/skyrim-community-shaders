@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -36,6 +37,12 @@ public:
 	~ScreenshotApi();
 
 	json HandleRequest(ScreenshotFeature& a_feature, const json& a_request);
+	json MakeDispatchError(
+		const json& a_request,
+		std::string_view a_code,
+		std::string_view a_message,
+		bool a_retryable,
+		json a_details = json::object()) const;
 	void Tick(ScreenshotFeature& a_feature, uint64_t a_engineFrame);
 
 	void OnSourceWaiting(std::string_view a_requestId, std::string_view a_actualSourceKind);
@@ -163,13 +170,22 @@ private:
 		std::string error;
 	};
 
+	struct ManifestWork
+	{
+		ManifestJob job;
+		ManifestResult result;
+		uint32_t applicationFailures = 0;
+		bool applicationFailureRecorded = false;
+		bool packagingEventPublished = false;
+	};
+
 	struct ManifestWorkerState
 	{
 		std::mutex mutex;
 		std::condition_variable_any condition;
-		std::deque<ManifestJob> jobs;
+		std::list<ManifestWork> jobs;
 		std::deque<std::shared_ptr<const ManifestChildNode>> retiredChildren;
-		std::deque<ManifestResult> results;
+		std::list<ManifestWork> results;
 		std::size_t outstanding = 0;
 		bool stopRequested = false;
 		bool exited = false;
@@ -265,7 +281,7 @@ private:
 	void TryFinalizeSequenceLocked(SequenceRecord& a_sequence);
 	void FinalizeSequenceLocked(SequenceRecord& a_sequence, const ManifestResult* a_manifestResult);
 	void QueueSequenceManifestLocked(SequenceRecord& a_sequence, bool a_final);
-	void DrainManifestResultsLocked();
+	bool DrainManifestResultsLocked();
 	static void ManifestWorkerLoop(std::shared_ptr<ManifestWorkerState> a_state);
 	void ManifestResultLoop(std::stop_token a_stopToken);
 	std::optional<DueFrame> PrepareDueFrameLocked(uint64_t a_engineFrame);

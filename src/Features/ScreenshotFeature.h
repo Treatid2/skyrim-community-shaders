@@ -65,6 +65,13 @@ struct ScreenshotFeature : public Feature
 	void RequestUiCapture();
 	/** Executes one versioned screenshot API command. Mutating calls must run on the game thread. */
 	nlohmann::json HandleApiRequest(const nlohmann::json& a_request);
+	/** Builds a contract response for a command admitted by the main-thread dispatcher. */
+	nlohmann::json MakeApiDispatchError(
+		const nlohmann::json& a_request,
+		std::string_view a_code,
+		std::string_view a_message,
+		bool a_retryable,
+		nlohmann::json a_details);
 	/** Dispatches a settings-based capture through the public screenshot service and returns its receipt. */
 	nlohmann::json RequestApiCapture(std::string_view a_origin = "csx_menu");
 	/** Returns whether Community Shaders screenshot capture is enabled at runtime. */
