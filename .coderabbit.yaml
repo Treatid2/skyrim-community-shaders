@@ -1,6 +1,118 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
 # CodeRabbit AI Configuration
 
 reviews:
+    auto_review:
+        enabled: true
+        drafts: false
+        # Later pushes are requested deliberately so the one-hour service gate
+        # is observed instead of triggering an uncontrolled review per commit.
+        auto_incremental_review: false
+        auto_pause_after_reviewed_commits: 0
+        base_branches:
+            - "main-VR"
+    # A live review confirmed that unmatched files are omitted once positive
+    # filters exist. Keep the source allow-list explicit and pair it with
+    # independent output exclusions so generated source-shaped files stay out.
+    # https://docs.coderabbit.ai/configuration/path-instructions
+    path_filters:
+        - "**/*.bat"
+        - "**/*.c"
+        - "**/*.cc"
+        - "**/*.cmake"
+        - "**/*.cpp"
+        - "**/*.cxx"
+        - "**/*.h"
+        - "**/*.hh"
+        - "**/*.hlsl"
+        - "**/*.hlsli"
+        - "**/*.hpp"
+        - "**/*.hxx"
+        - "**/*.in"
+        - "**/*.ini"
+        - "**/*.inl"
+        - "**/*.ipp"
+        - "**/*.java"
+        - "**/*.js"
+        - "**/*.json"
+        - "**/*.md"
+        - "**/*.patch"
+        - "**/*.ps1"
+        - "**/*.psd1"
+        - "**/*.psm1"
+        - "**/*.py"
+        - "**/*.sh"
+        - "**/*.template"
+        - "**/*.toml"
+        - "**/*.txt"
+        - "**/*.yaml"
+        - "**/*.yml"
+        - "**/CMakeLists.txt"
+        - "**/LICENSE"
+        - "features/*/CORE"
+        - "docs/development/vr-render-scale-comparison-ledger.csv"
+        - "docs/development/vr-renderscale-CSmenu-comparison-ledger.csv"
+        - "COPYING"
+        - "Dockerfile"
+        - ".agents/**/*.md"
+        - ".claude/**/*.md"
+        - ".codex/**/*.toml"
+        - ".github/**/*.md"
+        - ".github/**/*.ps1"
+        - ".github/**/*.yaml"
+        - ".github/**/*.yml"
+        - ".githooks/pre-*"
+        - ".githooks/commit-msg"
+        - ".githooks/post-*"
+        - ".clang-format"
+        - ".clang-format-ignore"
+        - ".clangd"
+        - ".coderabbit.yaml"
+        - ".gitattributes"
+        - ".gitignore"
+        - ".gitmodules"
+        - ".pre-commit-config.yaml"
+        - ".prettierignore"
+        - ".prettierrc.json"
+        - ".releaserc.js"
+        - "tests/shaders/.gitignore"
+        - "!**/.cache/**"
+        - "!**/CMakeFiles/**"
+        - "!**/build/**"
+        - "!**/dist/**"
+        - "!**/node_modules/**"
+        - "!**/obj/**"
+        - "!**/out/**"
+        - "!**/extern/**"
+        - "!**/generated/**"
+        - "!**/@generated/**"
+        - "!**/__generated__/**"
+        - "!**/__generated/**"
+        - "!**/_generated/**"
+        - "!**/gen/**"
+        - "!**/@gen/**"
+        - "!**/__gen__/**"
+        - "!**/__gen/**"
+        - "!**/_gen/**"
+        - "!**/*.generated.*"
+        - "!**/package-lock.json"
+        - "!**/yarn.lock"
+        - "!**/pnpm-lock.yaml"
+        - "!**/bun.lockb"
+        - "!**/*.lock"
+        - "!**/*.min.js"
+        - "!**/*.min.js.map"
+        - "!**/*.min.css"
+        - "!**/*.map"
+        - "!**/*.dll"
+        - "!**/*.exe"
+        - "!**/*.png"
+        - "!**/*.esp"
+        - "!**/*.nif"
+        - "!**/*.PNG"
+        - "!**/*.ttf"
+        - "!**/*.wpc"
     path_instructions:
         - path: "**/*"
           instructions: |
@@ -23,5 +135,3 @@ reviews:
                  - "Related to #123" for partial implementations
 
               Otherwise, use your standard review approach focusing on code quality.
-    path_filters:
-        - "**/*.hlsl"
