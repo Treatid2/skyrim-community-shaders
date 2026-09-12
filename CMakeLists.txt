@@ -1672,6 +1672,11 @@ if(BUILD_CONTROLLER_TESTS)
         tests/upscaling_provider_selection_policy_test.cpp
     )
     add_controller_test(
+        encode_textures_host_policy_test
+        EncodeTexturesHostPolicy
+        tests/encode_textures_host_policy_test.cpp
+    )
+    add_controller_test(
         vr_render_scale_qualification_policy_test
         VRRenderScaleQualificationPolicy
         tests/vr_render_scale_qualification_policy_test.cpp
