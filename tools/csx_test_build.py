@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Iterable, Sequence
 from urllib.parse import quote
 
@@ -31,6 +31,14 @@ REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 TEST_PACKAGE_RE = re.compile(r"^CSX_AIO-[A-Za-z0-9.-]+\.7z$")
 COMPILED_SHADER_SUFFIXES = {".cso", ".pso", ".vso"}
 FORBIDDEN_PACKAGE_MARKERS = ("devbench", "shadercache", "mgo-presets")
+LEGACY_SEED = {
+    "schemaVersion": 1,
+    "sequence": SEED_SEQUENCE,
+    "baseVersion": SEED_BASE_VERSION,
+    "dateUtc": None,
+    "sourceSha": None,
+    "includedPullRequests": [],
+}
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -150,6 +158,14 @@ def build_id(state: dict[str, Any]) -> str:
     return f"RC{state['sequence']}-{state['dateUtc']}"
 
 
+def allocation_commit_subject(state: dict[str, Any]) -> str:
+    validate_state(state)
+    display_version = (
+        f"CSX {state['baseVersion']} RC{state['sequence']} ({state['dateUtc']})"
+    )
+    return f"chore(build): allocate {display_version} [skip ci]"
+
+
 def output_values(state: dict[str, Any], allocated: bool) -> dict[str, str]:
     identity = build_id(state)
     return {
@@ -171,6 +187,7 @@ def output_values(state: dict[str, Any], allocated: bool) -> dict[str, str]:
         "included_prs": ",".join(
             str(number) for number in state["includedPullRequests"]
         ),
+        "commit_subject": allocation_commit_subject(state),
     }
 
 
@@ -432,6 +449,28 @@ def _state_at_commit(
     return parse_state(text, f"{commit_sha}:{relative_state_path}")
 
 
+def _legacy_seed_at_commit(
+    repository: Path,
+    commit_sha: str,
+    relative_state_path: str,
+    *,
+    runner: CommandRunner = subprocess.run,
+) -> dict[str, Any]:
+    text = _checked_output(
+        ["git", "show", f"{commit_sha}:{relative_state_path}"],
+        cwd=repository,
+        runner=runner,
+        description=f"cannot read legacy state at commit {commit_sha}",
+    )
+    try:
+        state = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise StateError("legacy seed state is malformed") from error
+    if state != LEGACY_SEED:
+        raise StateError("earlier state is not the exact supported schema-1 seed")
+    return state
+
+
 def verify_seed_commit(
     repository: Path,
     seed_sha: str,
@@ -458,12 +497,11 @@ def verify_seed_commit(
     if len(ancestry) < 2 or ancestry[0] != seed_commit:
         raise StateError("seed state must be introduced after existing history")
     first_parent = ancestry[1]
-    prior_state = _checked_output(
+    prior_states = _checked_output(
         [
             "git",
             "log",
             "--first-parent",
-            "-1",
             "--format=%H",
             first_parent,
             "--",
@@ -472,14 +510,24 @@ def verify_seed_commit(
         cwd=repository,
         runner=runner,
         description="cannot inspect earlier state history",
-    )
-    if prior_state:
-        raise StateError("root state cannot be restored over an earlier state")
+    ).splitlines()
     state = _state_at_commit(
         repository, seed_commit, relative_state_path, runner=runner
     )
     if state["previousStateSha"] is not None:
         raise StateError("root state must be the immutable RC217 seed")
+    if prior_states:
+        # The repository shipped one schema-1 RC217 seed before the immutable
+        # source/date binding existed. Accept only that one historical state
+        # introduction; any second change is a restoration or reset attempt.
+        if len(prior_states) != 1 or not SHA_RE.fullmatch(prior_states[0]):
+            raise StateError("root state cannot be restored over an earlier state")
+        _legacy_seed_at_commit(
+            repository,
+            prior_states[0],
+            relative_state_path,
+            runner=runner,
+        )
     return state
 
 
@@ -603,10 +651,7 @@ def _verify_allocation_step(
         source_sha=source_sha,
     )
 
-    expected_subject = (
-        f"chore(build): allocate {output_values(state, True)['display_version']} "
-        "[skip ci]"
-    )
+    expected_subject = allocation_commit_subject(state)
     subject = _checked_output(
         ["git", "show", "-s", "--format=%s", allocation],
         cwd=repository,
@@ -630,7 +675,7 @@ def dispatch_decision(
     for run in runs:
         if not isinstance(run, dict):
             raise StateError("GitHub run inventory contains a non-object")
-        if allocation_sha is not None and run.get("headSha") != allocation_sha:
+        if allocation_sha is not None and run.get("head_sha") != allocation_sha:
             raise StateError("GitHub returned a run for a different allocation")
         status = run.get("status")
         conclusion = run.get("conclusion")
@@ -638,6 +683,20 @@ def dispatch_decision(
             "queued", "in_progress", "requested", "waiting", "pending", "completed"
         }:
             raise StateError("GitHub returned an invalid workflow-run status")
+        if status == "completed" and conclusion not in {
+            "action_required",
+            "cancelled",
+            "failure",
+            "neutral",
+            "skipped",
+            "stale",
+            "startup_failure",
+            "success",
+            "timed_out",
+        }:
+            raise StateError("GitHub returned an invalid workflow-run conclusion")
+        if status != "completed" and conclusion is not None:
+            raise StateError("an active workflow run cannot have a conclusion")
         if status != "completed":
             return "existing"
         if conclusion == "success":
@@ -657,7 +716,7 @@ def canonical_distribution_runs(runs: Any, tag_name: str) -> list[dict[str, Any]
     for run in runs:
         if not isinstance(run, dict):
             raise StateError("GitHub run inventory contains a non-object")
-        head_branch = run.get("headBranch")
+        head_branch = run.get("head_branch")
         if not isinstance(head_branch, str):
             raise StateError("GitHub run inventory lacks a canonical ref name")
         if head_branch == tag_name:
@@ -667,19 +726,196 @@ def canonical_distribution_runs(runs: Any, tag_name: str) -> list[dict[str, Any]
 
 def parse_distribution_run_pages(inventory: str) -> list[dict[str, Any]]:
     """Flatten the complete paginated Actions response without truncation."""
+    if not inventory.strip():
+        raise StateError("GitHub returned no workflow-run inventory")
     try:
-        pages = json.loads(inventory or "[]")
+        pages = json.loads(inventory)
     except json.JSONDecodeError as error:
         raise StateError("GitHub returned malformed workflow-run JSON") from error
-    if not isinstance(pages, list):
-        raise StateError("GitHub workflow-run inventory must be a page array")
+    if not isinstance(pages, list) or not pages:
+        raise StateError("GitHub workflow-run inventory must contain a page")
 
     runs: list[dict[str, Any]] = []
+    expected_total: int | None = None
+    run_ids: set[int] = set()
     for page in pages:
-        if not isinstance(page, dict) or not isinstance(page.get("workflow_runs"), list):
+        if not isinstance(page, dict):
             raise StateError("GitHub returned a malformed workflow-run page")
-        runs.extend(page["workflow_runs"])
+        total = page.get("total_count")
+        page_runs = page.get("workflow_runs")
+        if (
+            not isinstance(total, int)
+            or isinstance(total, bool)
+            or total < 0
+            or not isinstance(page_runs, list)
+        ):
+            raise StateError("GitHub returned a malformed workflow-run page")
+        if expected_total is None:
+            expected_total = total
+        elif total != expected_total:
+            raise StateError("GitHub workflow-run pages disagree on total_count")
+        for run in page_runs:
+            if not isinstance(run, dict):
+                raise StateError("GitHub run inventory contains a non-object")
+            run_id = run.get("id")
+            if (
+                not isinstance(run_id, int)
+                or isinstance(run_id, bool)
+                or run_id < 1
+                or run_id in run_ids
+            ):
+                raise StateError("GitHub returned an invalid or duplicate run id")
+            run_ids.add(run_id)
+            runs.append(run)
+    if expected_total != len(runs):
+        raise StateError("GitHub workflow-run inventory is incomplete")
     return runs
+
+
+def _distribution_runs(
+    *,
+    repository_slug: str,
+    workflow: str,
+    allocation_sha: str,
+    tag_name: str,
+    runner: CommandRunner,
+) -> list[dict[str, Any]]:
+    inventory = _checked_output(
+        [
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            "--paginate",
+            "--slurp",
+            f"repos/{repository_slug}/actions/workflows/{quote(workflow, safe='')}/runs",
+            "-f",
+            "event=workflow_dispatch",
+            "-f",
+            f"head_sha={allocation_sha}",
+            "-f",
+            "per_page=100",
+        ],
+        runner=runner,
+        description="cannot reconcile distribution workflow runs",
+    )
+    return canonical_distribution_runs(
+        parse_distribution_run_pages(inventory), tag_name
+    )
+
+
+def authorize_distribution_run(
+    runs: Any,
+    *,
+    current_run_id: int,
+    allocation_sha: str,
+    max_attempts: int = MAX_DISTRIBUTION_ATTEMPTS,
+) -> str:
+    """Authorize one effective build; later duplicate requests are no-ops."""
+    if (
+        not isinstance(current_run_id, int)
+        or isinstance(current_run_id, bool)
+        or current_run_id < 1
+    ):
+        raise StateError("current workflow run id must be a positive integer")
+    if not isinstance(runs, list):
+        raise StateError("GitHub run inventory must be a JSON array")
+
+    earlier_failures = 0
+    prior_success = False
+    current_matches = 0
+    for run in runs:
+        if not isinstance(run, dict):
+            raise StateError("GitHub run inventory contains a non-object")
+        if run.get("head_sha") != allocation_sha:
+            raise StateError("GitHub returned a run for a different allocation")
+        run_id = run.get("id")
+        status = run.get("status")
+        conclusion = run.get("conclusion")
+        if (
+            not isinstance(run_id, int)
+            or isinstance(run_id, bool)
+            or run_id < 1
+            or status
+            not in {
+                "queued",
+                "in_progress",
+                "requested",
+                "waiting",
+                "pending",
+                "completed",
+            }
+        ):
+            raise StateError("GitHub returned a malformed workflow run")
+        if run_id == current_run_id:
+            current_matches += 1
+        if run_id >= current_run_id:
+            continue
+        if status != "completed":
+            if conclusion is not None:
+                raise StateError("an active workflow run cannot have a conclusion")
+            raise StateError(
+                "distribution concurrency admitted two active workflow runs"
+            )
+        if conclusion == "success":
+            prior_success = True
+            continue
+        if conclusion not in {
+            "action_required",
+            "cancelled",
+            "failure",
+            "neutral",
+            "skipped",
+            "stale",
+            "startup_failure",
+            "timed_out",
+        }:
+            raise StateError("GitHub returned an invalid workflow-run conclusion")
+        earlier_failures += 1
+
+    if current_matches != 1:
+        raise StateError("complete inventory must contain the current workflow run")
+    if prior_success:
+        return "noop"
+    if earlier_failures >= max_attempts:
+        raise StateError(
+            f"distribution failed {earlier_failures} times; manual diagnosis is required"
+        )
+    return "build"
+
+
+def authorize_current_distribution_run(
+    *,
+    repository_slug: str,
+    workflow: str,
+    allocation_sha: str,
+    tag_name: str,
+    current_run_id: int,
+    runner: CommandRunner = subprocess.run,
+    max_attempts: int = MAX_DISTRIBUTION_ATTEMPTS,
+) -> str:
+    if not REPOSITORY_RE.fullmatch(repository_slug):
+        raise StateError("repository must use owner/name form")
+    if not SHA_RE.fullmatch(allocation_sha):
+        raise StateError("allocation SHA must be canonical")
+    if not re.fullmatch(
+        r"csx-test-build-RC[1-9][0-9]*-[0-9]{4}-[0-9]{2}-[0-9]{2}",
+        tag_name,
+    ):
+        raise StateError("test-build tag name is invalid")
+    runs = _distribution_runs(
+        repository_slug=repository_slug,
+        workflow=workflow,
+        allocation_sha=allocation_sha,
+        tag_name=tag_name,
+        runner=runner,
+    )
+    return authorize_distribution_run(
+        runs,
+        current_run_id=current_run_id,
+        allocation_sha=allocation_sha,
+        max_attempts=max_attempts,
+    )
 
 
 def ensure_distribution_dispatch(
@@ -702,73 +938,64 @@ def ensure_distribution_dispatch(
     ):
         raise StateError("test-build tag name is invalid")
 
-    dispatch_commands = 0
-    initial_failures: int | None = None
-    while True:
-        inventory = _checked_output(
-            [
-                "gh",
-                "api",
-                "--method",
-                "GET",
-                "--paginate",
-                "--slurp",
-                f"repos/{repository_slug}/actions/workflows/{quote(workflow, safe='')}/runs",
-                "-f",
-                "event=workflow_dispatch",
-                "-f",
-                f"head_sha={allocation_sha}",
-                "-f",
-                "per_page=100",
-            ],
-            runner=runner,
-            description="cannot reconcile distribution workflow runs",
-        )
-        runs = parse_distribution_run_pages(inventory)
-        runs = canonical_distribution_runs(runs, tag_name)
-        decision = dispatch_decision(
-            runs,
-            max_attempts=max_attempts,
-            allocation_sha=allocation_sha,
-        )
-        if decision == "existing":
-            return "existing"
+    runs = _distribution_runs(
+        repository_slug=repository_slug,
+        workflow=workflow,
+        allocation_sha=allocation_sha,
+        tag_name=tag_name,
+        runner=runner,
+    )
+    decision = dispatch_decision(
+        runs,
+        max_attempts=max_attempts,
+        allocation_sha=allocation_sha,
+    )
+    if decision == "existing":
+        return "existing"
 
-        observed_failures = sum(
-            run.get("status") == "completed" and run.get("conclusion") != "success"
-            for run in runs
-        )
-        if initial_failures is None:
-            initial_failures = observed_failures
-        # A transport error may still have created a run that is not visible
-        # yet. Charge those commands in addition to failures from earlier
-        # invocations, without charging a newly visible run twice.
-        if (
-            max(observed_failures, initial_failures + dispatch_commands)
-            >= max_attempts
-        ):
-            raise StateError(
-                "distribution retry budget is exhausted; manual diagnosis is required"
-            )
-        dispatch_commands += 1
-        dispatch = _run(
-            [
-                "gh",
-                "workflow",
-                "run",
-                workflow,
-                "--repo",
-                repository_slug,
-                "--ref",
-                tag_name,
-                "--field",
-                f"allocation-sha={allocation_sha}",
-            ],
+    dispatch = _run(
+        [
+            "gh",
+            "workflow",
+            "run",
+            workflow,
+            "--repo",
+            repository_slug,
+            "--ref",
+            tag_name,
+            "--field",
+            f"allocation-sha={allocation_sha}",
+        ],
+        runner=runner,
+    )
+    if dispatch.returncode == 0:
+        return "dispatched"
+
+    # A failed client command can still have been accepted by GitHub. Reconcile
+    # that single command without issuing another ambiguous request. A later
+    # invocation may recover a genuinely unaccepted request; the distribution
+    # workflow turns any late duplicate into a no-op before effective work.
+    for delay in (10, 20, 40):
+        sleeper(delay)
+        runs = _distribution_runs(
+            repository_slug=repository_slug,
+            workflow=workflow,
+            allocation_sha=allocation_sha,
+            tag_name=tag_name,
             runner=runner,
         )
-        if dispatch.returncode == 0:
-            return "dispatched"
-        sleeper(min(10 * (2 ** (dispatch_commands - 1)), 60))
+        if (
+            dispatch_decision(
+                runs,
+                max_attempts=max_attempts,
+                allocation_sha=allocation_sha,
+            )
+            == "existing"
+        ):
+            return "existing"
+    raise StateError(
+        "distribution dispatch outcome is uncertain; manual diagnosis is required"
+    )
 
 
 def verify_test_distribution(
@@ -802,9 +1029,18 @@ def verify_test_distribution(
         raise StateError("test distribution archive is empty")
 
     for member in members:
+        windows_path = PureWindowsPath(member)
         normalized = member.replace("\\", "/")
-        parts = [part for part in normalized.split("/") if part not in {"", "."}]
-        if normalized.startswith("/") or ".." in parts:
+        posix_path = PurePosixPath(normalized)
+        parts = [part for part in posix_path.parts if part not in {"", "."}]
+        if (
+            "\0" in member
+            or windows_path.drive
+            or windows_path.root
+            or posix_path.is_absolute()
+            or ".." in parts
+            or any(":" in part for part in parts)
+        ):
             raise StateError(f"test distribution contains an unsafe path: {member}")
         lowered = [part.lower() for part in parts]
         if any(
@@ -902,6 +1138,19 @@ def make_parser() -> argparse.ArgumentParser:
     dispatch_parser.add_argument("--allocation-sha", required=True)
     dispatch_parser.add_argument("--tag-name", required=True)
 
+    authorize_parser = subparsers.add_parser(
+        "authorize-run",
+        help="authorize one effective distribution run and no-op duplicates",
+    )
+    authorize_parser.add_argument("--repository-slug", required=True)
+    authorize_parser.add_argument(
+        "--workflow", default="test-build-distribution.yaml"
+    )
+    authorize_parser.add_argument("--allocation-sha", required=True)
+    authorize_parser.add_argument("--tag-name", required=True)
+    authorize_parser.add_argument("--current-run-id", type=int, required=True)
+    authorize_parser.add_argument("--github-output", type=Path)
+
     package_parser = subparsers.add_parser(
         "verify-package", help="verify one staged test distribution"
     )
@@ -921,6 +1170,23 @@ def main(argv: list[str] | None = None) -> int:
                     allocation_sha=args.allocation_sha,
                     tag_name=args.tag_name,
                 )
+            )
+            return 0
+
+        if args.command == "authorize-run":
+            decision = authorize_current_distribution_run(
+                repository_slug=args.repository_slug,
+                workflow=args.workflow,
+                allocation_sha=args.allocation_sha,
+                tag_name=args.tag_name,
+                current_run_id=args.current_run_id,
+            )
+            emit(
+                {
+                    "decision": decision,
+                    "should_build": str(decision == "build").lower(),
+                },
+                args.github_output,
             )
             return 0
 

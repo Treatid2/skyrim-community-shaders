@@ -10,6 +10,7 @@ on:
                 type: string
 
 permissions:
+    actions: read
     contents: read
 
 concurrency:
@@ -26,6 +27,7 @@ jobs:
             display-version: ${{ steps.identity.outputs.display_version }}
             package-name: ${{ steps.identity.outputs.package_name }}
             source-sha: ${{ steps.identity.outputs.source_sha }}
+            should-build: ${{ steps.authorization.outputs.should_build }}
         steps:
             - name: Checkout exact allocation
               uses: actions/checkout@v6
@@ -77,13 +79,29 @@ jobs:
                     --state version/test-build.json | sed -n 's/^base_version=//p')
                   SOURCE_BASE=$(jq -r '.configurePresets[] | select(.name == "VR") | .cacheVariables.CSX_VERSION' CMakePresets.json)
                   if [ "$STATE_BASE" != "$SOURCE_BASE" ]; then
-                    echo "State base version $STATE_BASE does not match source base version $SOURCE_BASE." >&2
-                    exit 1
+                      echo "State base version $STATE_BASE does not match source base version $SOURCE_BASE." >&2
+                      exit 1
                   fi
+
+            - name: Authorize one effective distribution
+              id: authorization
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  ALLOCATION_SHA: ${{ inputs.allocation-sha }}
+                  TAG_NAME: ${{ steps.identity.outputs.tag_name }}
+                  CURRENT_RUN_ID: ${{ github.run_id }}
+              run: |
+                  python tools/csx_test_build.py authorize-run \
+                    --repository-slug "${{ github.repository }}" \
+                    --allocation-sha "$ALLOCATION_SHA" \
+                    --tag-name "$TAG_NAME" \
+                    --current-run-id "$CURRENT_RUN_ID" \
+                    --github-output "$GITHUB_OUTPUT"
 
     build:
         name: Build ${{ needs.metadata.outputs.display-version }}
         needs: metadata
+        if: needs.metadata.outputs.should-build == 'true'
         uses: ./.github/workflows/_shared-build.yaml
         with:
             ref: ${{ inputs.allocation-sha }}

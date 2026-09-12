@@ -137,6 +137,7 @@ jobs:
                   DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
                   SOURCE_SHA: ${{ steps.allocation.outputs.source_sha }}
                   DISPLAY_VERSION: ${{ steps.allocation.outputs.display_version }}
+                  COMMIT_SUBJECT: ${{ steps.allocation.outputs.commit_subject }}
                   TAG_NAME: ${{ steps.allocation.outputs.tag_name }}
               run: |
                   set -euo pipefail
@@ -152,7 +153,7 @@ jobs:
                   git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
                   git add version/test-build.json
                   git commit \
-                    -m "build(release): allocate test build [skip ci]" \
+                    -m "$COMMIT_SUBJECT" \
                     -m "Rationale:
                   Record one durable identity for the settled merge batch." \
                     -m "Implementation:

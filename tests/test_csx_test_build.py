@@ -16,6 +16,8 @@ from tools.csx_test_build import (
     SEED_SOURCE_SHA,
     StateError,
     allocate,
+    allocation_commit_subject,
+    authorize_distribution_run,
     build_id,
     discover_pull_requests,
     discover_pull_requests_from_subjects,
@@ -48,7 +50,10 @@ SEED = {
 
 
 def run_pages(runs: list[dict[str, object]]) -> str:
-    return json.dumps([{"total_count": len(runs), "workflow_runs": runs}])
+    normalized = [dict({"id": index}, **run) for index, run in enumerate(runs, 1)]
+    return json.dumps(
+        [{"total_count": len(normalized), "workflow_runs": normalized}]
+    )
 
 
 def completed(
@@ -89,6 +94,7 @@ class TestBuildStateTests(unittest.TestCase):
         self.assertEqual(
             values["package_name"], "CSX_AIO-3.19-VR-RC218-2026-09-07.7z"
         )
+        self.assertEqual(values["commit_subject"], allocation_commit_subject(state))
 
     def test_same_source_is_idempotent(self) -> None:
         initial, _ = allocate(
@@ -356,6 +362,58 @@ class AllocationCommitTests(unittest.TestCase):
         with self.assertRaisesRegex(StateError, "cannot be restored"):
             verify_seed_commit(self.repository, restored_seed, STATE_PATH)
 
+    def test_exact_schema_one_seed_can_migrate_once(self) -> None:
+        default_branch = git(self.repository, "branch", "--show-current")
+        git(self.repository, "reset", "--hard", self.baseline_sha)
+        legacy_sha = self.commit_state(
+            {
+                "schemaVersion": 1,
+                "sequence": SEED_SEQUENCE,
+                "baseVersion": SEED_BASE_VERSION,
+                "dateUtc": None,
+                "sourceSha": None,
+                "includedPullRequests": [],
+            },
+            "build: record legacy seed",
+        )
+        git(self.repository, "checkout", "-b", "seed-migration")
+        topic_sha = self.commit_state(SEED, "build: bind seed to RC217")
+        git(self.repository, "checkout", default_branch)
+        git(self.repository, "merge", "--no-ff", "-m", "Merge seed migration", topic_sha)
+        migration_sha = git(self.repository, "rev-parse", "HEAD")
+
+        self.assertEqual(
+            verify_seed_commit(self.repository, migration_sha, STATE_PATH), SEED
+        )
+        self.assertEqual(
+            git(
+                self.repository,
+                "log",
+                "--first-parent",
+                "-1",
+                "--format=%H",
+                f"{migration_sha}^",
+                "--",
+                STATE_PATH.as_posix(),
+            ),
+            legacy_sha,
+        )
+
+    def test_schema_one_reversion_cannot_reset_the_seed(self) -> None:
+        self.commit_state(self.next_state(SEED, self.seed_sha))
+        legacy = {
+            "schemaVersion": 1,
+            "sequence": SEED_SEQUENCE,
+            "baseVersion": SEED_BASE_VERSION,
+            "dateUtc": None,
+            "sourceSha": None,
+            "includedPullRequests": [],
+        }
+        self.commit_state(legacy, "build: regress to legacy seed")
+        restored_seed = self.commit_state(SEED, "build: restore schema two seed")
+        with self.assertRaisesRegex(StateError, "cannot be restored"):
+            verify_seed_commit(self.repository, restored_seed, STATE_PATH)
+
     def test_deleted_seed_cannot_be_reintroduced(self) -> None:
         git(self.repository, "rm", STATE_PATH.as_posix())
         git(self.repository, "commit", "-m", "build: remove state")
@@ -432,13 +490,40 @@ class DispatchTests(unittest.TestCase):
     def test_paginated_inventory_is_flattened(self) -> None:
         inventory = json.dumps(
             [
-                {"workflow_runs": [{"databaseId": 1}]},
-                {"workflow_runs": [{"databaseId": 2}]},
+                {"total_count": 2, "workflow_runs": [{"id": 1}]},
+                {"total_count": 2, "workflow_runs": [{"id": 2}]},
             ]
         )
         self.assertEqual(
-            [run["databaseId"] for run in parse_distribution_run_pages(inventory)],
+            [run["id"] for run in parse_distribution_run_pages(inventory)],
             [1, 2],
+        )
+
+    def test_inventory_requires_positive_completeness_evidence(self) -> None:
+        malformed = (
+            "",
+            "[]",
+            json.dumps([{"workflow_runs": []}]),
+            json.dumps([{"total_count": 1, "workflow_runs": []}]),
+            json.dumps(
+                [
+                    {"total_count": 2, "workflow_runs": [{"id": 1}]},
+                    {"total_count": 3, "workflow_runs": [{"id": 2}]},
+                ]
+            ),
+            json.dumps(
+                [{"total_count": 2, "workflow_runs": [{"id": 1}, {"id": 1}]}]
+            ),
+        )
+        for inventory in malformed:
+            with self.subTest(inventory=inventory), self.assertRaises(StateError):
+                parse_distribution_run_pages(inventory)
+
+        self.assertEqual(
+            parse_distribution_run_pages(
+                json.dumps([{"total_count": 0, "workflow_runs": []}])
+            ),
+            [],
         )
 
     def test_active_or_successful_run_is_idempotent(self) -> None:
@@ -461,15 +546,15 @@ class DispatchTests(unittest.TestCase):
         with self.assertRaisesRegex(StateError, "invalid workflow-run status"):
             dispatch_decision([{}])
 
-    def test_earlier_failures_reduce_uncertain_dispatch_budget(self) -> None:
+    def test_uncertain_dispatch_is_not_reissued_in_one_invocation(self) -> None:
         dispatches = 0
         inventories = 0
         runs = [
             {
                 "status": "completed",
                 "conclusion": "failure",
-                "headSha": "a" * 40,
-                "headBranch": TAG_NAME,
+                "head_sha": "a" * 40,
+                "head_branch": TAG_NAME,
             }
         ] * 2
 
@@ -485,7 +570,7 @@ class DispatchTests(unittest.TestCase):
                 return completed(args, returncode=1, stderr="transport uncertain")
             raise AssertionError(args)
 
-        with self.assertRaisesRegex(StateError, "manual diagnosis"):
+        with self.assertRaisesRegex(StateError, "outcome is uncertain"):
             ensure_distribution_dispatch(
                 repository_slug="owner/repository",
                 workflow="test-build-distribution.yaml",
@@ -495,24 +580,21 @@ class DispatchTests(unittest.TestCase):
                 sleeper=lambda _: None,
             )
         self.assertEqual(dispatches, 1)
-        self.assertEqual(inventories, 2)
+        self.assertEqual(inventories, 4)
 
-    def test_final_uncertain_attempt_is_reconciled(self) -> None:
+    def test_uncertain_attempt_is_reconciled_without_resend(self) -> None:
         dispatches = 0
 
         def runner(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
             nonlocal dispatches
             if args[:2] == ["gh", "api"]:
-                runs = (
-                    [
-                        {
-                            "status": "queued",
-                            "headSha": "a" * 40,
-                            "headBranch": TAG_NAME,
-                        }
-                    ]
-                    if dispatches == 3 else []
-                )
+                runs = [] if dispatches == 0 else [
+                    {
+                        "status": "queued",
+                        "head_sha": "a" * 40,
+                        "head_branch": TAG_NAME,
+                    }
+                ]
                 return completed(args, stdout=run_pages(runs))
             if args[:3] == ["gh", "workflow", "run"]:
                 dispatches += 1
@@ -530,7 +612,7 @@ class DispatchTests(unittest.TestCase):
             ),
             "existing",
         )
-        self.assertEqual(dispatches, 3)
+        self.assertEqual(dispatches, 1)
 
     def test_uncertain_dispatch_is_reconciled_before_retry(self) -> None:
         calls = 0
@@ -546,8 +628,8 @@ class DispatchTests(unittest.TestCase):
                     else [
                         {
                             "status": "queued",
-                            "headSha": "a" * 40,
-                            "headBranch": TAG_NAME,
+                            "head_sha": "a" * 40,
+                            "head_branch": TAG_NAME,
                         }
                     ]
                 )
@@ -577,8 +659,8 @@ class DispatchTests(unittest.TestCase):
                 runs = [
                     {
                         "status": "queued",
-                        "headSha": "a" * 40,
-                        "headBranch": "arbitrary-branch",
+                        "head_sha": "a" * 40,
+                        "head_branch": "arbitrary-branch",
                     }
                 ]
                 return completed(args, stdout=run_pages(runs))
@@ -605,8 +687,8 @@ class DispatchTests(unittest.TestCase):
                 runs = [
                     {
                         "status": "queued",
-                        "headSha": "b" * 40,
-                        "headBranch": TAG_NAME,
+                        "head_sha": "b" * 40,
+                        "head_branch": TAG_NAME,
                     }
                 ]
                 return completed(args, stdout=run_pages(runs))
@@ -619,6 +701,96 @@ class DispatchTests(unittest.TestCase):
                 allocation_sha="a" * 40,
                 tag_name=TAG_NAME,
                 runner=runner,
+            )
+
+    def test_later_duplicate_run_is_an_explicit_noop(self) -> None:
+        runs = [
+            {
+                "id": 10,
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": "a" * 40,
+            },
+            {
+                "id": 11,
+                "status": "in_progress",
+                "conclusion": None,
+                "head_sha": "a" * 40,
+            },
+        ]
+        self.assertEqual(
+            authorize_distribution_run(
+                runs,
+                current_run_id=11,
+                allocation_sha="a" * 40,
+            ),
+            "noop",
+        )
+
+    def test_failed_distribution_allows_bounded_successor(self) -> None:
+        runs = [
+            {
+                "id": 10,
+                "status": "completed",
+                "conclusion": "failure",
+                "head_sha": "a" * 40,
+            },
+            {
+                "id": 11,
+                "status": "in_progress",
+                "conclusion": None,
+                "head_sha": "a" * 40,
+            },
+        ]
+        self.assertEqual(
+            authorize_distribution_run(
+                runs,
+                current_run_id=11,
+                allocation_sha="a" * 40,
+            ),
+            "build",
+        )
+
+    def test_two_active_distribution_runs_fail_closed(self) -> None:
+        runs = [
+            {
+                "id": run_id,
+                "status": "in_progress",
+                "conclusion": None,
+                "head_sha": "a" * 40,
+            }
+            for run_id in (10, 11)
+        ]
+        with self.assertRaisesRegex(StateError, "concurrency admitted two"):
+            authorize_distribution_run(
+                runs,
+                current_run_id=11,
+                allocation_sha="a" * 40,
+            )
+
+    def test_distribution_run_guard_enforces_attempt_limit(self) -> None:
+        runs = [
+            {
+                "id": run_id,
+                "status": "completed",
+                "conclusion": "failure",
+                "head_sha": "a" * 40,
+            }
+            for run_id in (10, 11, 12)
+        ]
+        runs.append(
+            {
+                "id": 13,
+                "status": "in_progress",
+                "conclusion": None,
+                "head_sha": "a" * 40,
+            }
+        )
+        with self.assertRaisesRegex(StateError, "manual diagnosis"):
+            authorize_distribution_run(
+                runs,
+                current_run_id=13,
+                allocation_sha="a" * 40,
             )
 
 
@@ -668,6 +840,31 @@ class TestDistributionPackageTests(unittest.TestCase):
                     return completed(args, stdout=f"{member}\n")
 
                 with self.assertRaisesRegex(StateError, "forbidden material"):
+                    verify_test_distribution(dist, self.EXPECTED, runner=runner)
+
+    def test_platform_independent_absolute_archive_paths_are_rejected(self) -> None:
+        unsafe = (
+            "/SKSE/Plugins/CommunityShaders.dll",
+            "../SKSE/Plugins/CommunityShaders.dll",
+            "C:/SKSE/Plugins/CommunityShaders.dll",
+            "C:SKSE/Plugins/CommunityShaders.dll",
+            r"\SKSE\Plugins\CommunityShaders.dll",
+            r"\\server\share\CommunityShaders.dll",
+            r"\\?\C:\SKSE\Plugins\CommunityShaders.dll",
+            "SKSE/Plugins/CommunityShaders.dll:alternate",
+        )
+        for member in unsafe:
+            with self.subTest(member=member), tempfile.TemporaryDirectory() as temporary:
+                dist = Path(temporary)
+                archive = dist / self.EXPECTED
+                archive.write_bytes(b"archive")
+
+                def runner(
+                    args: list[str], **_: object
+                ) -> subprocess.CompletedProcess[str]:
+                    return completed(args, stdout=f"{member}\n")
+
+                with self.assertRaisesRegex(StateError, "unsafe path"):
                     verify_test_distribution(dist, self.EXPECTED, runner=runner)
 
     def test_unreadable_archive_is_rejected(self) -> None:
@@ -751,6 +948,19 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("expected-package-name:", workflow)
         self.assertIn('"$DISPATCH_REF" != "refs/tags/$TAG_NAME"', workflow)
         self.assertIn('"$DISPATCH_SHA" != "$ALLOCATION_SHA"', workflow)
+        self.assertIn("authorize-run", workflow)
+        self.assertIn("if: needs.metadata.outputs.should-build == 'true'", workflow)
+
+    def test_allocation_publisher_uses_verified_commit_subject(self) -> None:
+        workflow = (
+            ROOT / ".github" / "workflows" / "test-build-allocate.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "COMMIT_SUBJECT: ${{ steps.allocation.outputs.commit_subject }}",
+            workflow,
+        )
+        self.assertIn('git commit \\\n                    -m "$COMMIT_SUBJECT"', workflow)
+        self.assertNotIn("build(release): allocate test build", workflow)
 
     def test_test_package_upload_uses_the_verified_file_only(self) -> None:
         workflow = (
