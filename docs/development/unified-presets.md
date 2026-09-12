@@ -18,10 +18,6 @@ When the active adapter is known to be non-NVIDIA, CSX resolves the preference
 directly to FSR without publishing DLSS as the runtime target. On NVIDIA, CSX
 waits for Streamline's capability result before publishing either DLSS or the
 fallback. An unknown adapter remains unresolved rather than guessing.
-
--   `upscaleMethod=3` requests DLSS when Streamline reports DLSS available;
--   `upscaleMethodNoDLSS=2` selects FSR when DLSS is unavailable.
-
 Provider-specific tuning remains in the same generated JSON. DLSS reads its
 preset and sharpener values; FSR reads its own sharpness and runtime-provider
 settings. The graphics-quality policy is otherwise shared.
