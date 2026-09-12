@@ -25,24 +25,24 @@ configuration changes.
 
 ## Representative outcomes
 
-| Path                                                     | Outcome | Reason                              |
-| -------------------------------------------------------- | ------- | ----------------------------------- |
-| `src/Features/Wetness.cpp`                               | Include | C++ source positive                 |
-| `.github/workflows/build.yml`                            | Include | Literal hidden-policy positive      |
-| `.githooks/pre-commit`                                   | Include | Literal hook-name positive          |
-| `.clang-format`                                          | Include | Literal root-policy positive        |
-| `tests/shaders/.gitignore`                               | Include | Literal nested-policy positive      |
-| `package/Shaders/Common/Color.hlsli`                     | Include | Shader-source positive              |
-| `features/Upscaling/Shaders/FSR2/foo.hlsl`               | Include | Shader-source positive              |
-| `docs/development/vr-render-scale-comparison-ledger.csv` | Include | Checked-in evidence exception       |
-| `out/Release/output.hlsl`                                | Exclude | Default output and HLSL exclusions  |
-| `.github/actions/build/build/output.hlsl`                | Exclude | Default build and HLSL exclusions   |
-| `.githooks/helper.exe`                                   | Exclude | Default executable exclusion        |
-| `.github/actions/view.min.css`                           | Exclude | Default minified CSS exclusion      |
-| `.github/actions/view.min.js.map`                        | Exclude | Default source-map exclusion        |
-| `.github/actions/package-lock.json`                      | Exclude | Default lock-file exclusion         |
-| `.githooks/helper.dll`                                   | Exclude | Default binary exclusion            |
-| `package/example.nif`                                    | Exclude | Repository-specific asset exclusion |
+| Path                                                     | Outcome | Reason                           |
+| -------------------------------------------------------- | ------- | -------------------------------- |
+| `src/Features/Wetness.cpp`                               | Include | C++ source positive              |
+| `.github/workflows/build.yml`                            | Include | Literal hidden-policy positive   |
+| `.githooks/pre-commit`                                   | Include | Literal hook-name positive       |
+| `.clang-format`                                          | Include | Literal root-policy positive     |
+| `tests/shaders/.gitignore`                               | Include | Literal nested-policy positive   |
+| `package/Shaders/Common/Color.hlsli`                     | Include | Shader-source positive           |
+| `features/Upscaling/Shaders/FSR2/foo.hlsl`               | Include | Shader-source positive           |
+| `docs/development/vr-render-scale-comparison-ledger.csv` | Include | Checked-in evidence exception    |
+| `out/Release/output.hlsl`                                | Exclude | Configured output exclusion      |
+| `.github/actions/build/build/output.hlsl`                | Exclude | Configured build exclusion       |
+| `.githooks/helper.exe`                                   | Exclude | Configured and default exclusion |
+| `.github/actions/view.min.css`                           | Exclude | Configured and default exclusion |
+| `.github/actions/view.min.js.map`                        | Exclude | Configured and default exclusion |
+| `.github/actions/package-lock.json`                      | Exclude | Configured and default exclusion |
+| `.githooks/helper.dll`                                   | Exclude | Configured and default exclusion |
+| `package/example.nif`                                    | Exclude | Configured game-asset exclusion  |
 
 The output examples deliberately exercise positive/negative overlap where
 their extensions also look like source. CodeRabbit's selected-file response is
