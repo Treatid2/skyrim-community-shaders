@@ -120,6 +120,14 @@ namespace
 	constexpr float kMaxWaterWindSmoothingFrameTime = 0.25f;
 	constexpr std::size_t kMaxOverrideHierarchyDepth = 64;
 
+	const RE::TESWorldSpace* GetUsedParentWorldspace(const RE::TESWorldSpace* a_worldspace)
+	{
+		if (!a_worldspace || !static_cast<bool>(a_worldspace->parentUseFlags))
+			return nullptr;
+
+		return a_worldspace->parentWorld;
+	}
+
 	using Profile = AdaptiveBrightness::Profile;
 
 	bool UsesClassifiedPointLightMultipliers(const SharedLightingSettings& a_settings)
@@ -2917,7 +2925,7 @@ const std::vector<const AdaptiveBrightness::LocationOverride*>& AdaptiveBrightne
 	std::vector<const RE::TESWorldSpace*> worldspaces;
 	for (auto* worldspace = forms.worldspace;
 		worldspace && worldspaces.size() < kMaxOverrideHierarchyDepth;
-		worldspace = worldspace->parentWorld) {
+		worldspace = GetUsedParentWorldspace(worldspace)) {
 		worldspaces.push_back(worldspace);
 	}
 	for (auto it = worldspaces.rbegin(); it != worldspaces.rend(); ++it)
@@ -3047,7 +3055,7 @@ const AdaptiveBrightness::LocationOverride* AdaptiveBrightness::GetInheritedLoca
 			inheritedIndex = ResolveWorldspaceHierarchyOverrideIndex(forms.worldspace);
 	} else if (a_target.type == kOverrideTypeWorldspace) {
 		inheritedIndex = ResolveWorldspaceHierarchyOverrideIndex(
-			forms.worldspace ? forms.worldspace->parentWorld : nullptr);
+			GetUsedParentWorldspace(forms.worldspace));
 	}
 
 	if (inheritedIndex == kInvalidLocationOverrideIndex || inheritedIndex >= settings.locationOverrides.size())
@@ -3159,7 +3167,7 @@ std::size_t AdaptiveBrightness::ResolveWorldspaceHierarchyOverrideIndex(const RE
 	// Parent chains are normally shallow and acyclic. The cap prevents malformed
 	// plugin data from trapping the render thread in an unbounded traversal.
 	std::size_t depth = 0;
-	for (auto* current = a_worldspace; current && depth < kMaxOverrideHierarchyDepth; current = current->parentWorld, ++depth) {
+	for (auto* current = a_worldspace; current && depth < kMaxOverrideHierarchyDepth; current = GetUsedParentWorldspace(current), ++depth) {
 		const auto resolvedIndex = FindLocationOverrideIndexByForm(current);
 		if (resolvedIndex != kInvalidLocationOverrideIndex && resolvedIndex < settings.locationOverrides.size())
 			return resolvedIndex;
