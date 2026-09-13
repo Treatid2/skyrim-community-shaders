@@ -395,7 +395,14 @@ class FomodPackageTests(unittest.TestCase):
 
     def test_runtime_choices_describe_both_horizon_states(self) -> None:
         root = BUILDER.build_module_config().getroot()
-        for plugin in root.findall("./installSteps/installStep/optionalFileGroups/group/plugins/plugin")[:2]:
+        steps = root.findall("./installSteps/installStep")
+        self.assertEqual(len(steps), 1)
+        plugins = steps[0].findall("./optionalFileGroups/group/plugins/plugin")
+        self.assertEqual(
+            {flag.get("name") for flag in steps[0].findall(".//conditionFlags/flag")},
+            {BUILDER.RUNTIME_FLAG},
+        )
+        for plugin in plugins[:2]:
             self.assertIn("with and without Horizon Fix", plugin.findtext("description"))
 
     def test_rejects_runtime_cache_missing_horizon_coverage(self) -> None:
@@ -676,6 +683,36 @@ class FomodPackageTests(unittest.TestCase):
                         core, se_cache, vr_cache, output, "v3.18.0"
                     )
             self.assertFalse(output.exists())
+
+    def test_preserves_staging_tree_when_output_acquisition_loses_race(self) -> None:
+        for include_se_ae in (False, True):
+            with self.subTest(include_se_ae=include_se_ae), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                core, se_cache, vr_cache = self._inputs(root)
+                output = root / "staged"
+                marker = output / "other-invocation.txt"
+                original_mkdir = Path.mkdir
+
+                def racing_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+                    if path == output:
+                        original_mkdir(path)
+                        marker.write_bytes(b"owned elsewhere")
+                    original_mkdir(path, *args, **kwargs)
+
+                with (
+                    mock.patch.object(Path, "mkdir", new=racing_mkdir),
+                    self.assertRaises(FileExistsError),
+                ):
+                    BUILDER.stage_package(
+                        core,
+                        se_cache if include_se_ae else None,
+                        vr_cache,
+                        output,
+                        "v3.18.0",
+                        include_se_ae=include_se_ae,
+                    )
+
+                self.assertEqual(marker.read_bytes(), b"owned elsewhere")
 
     def test_rejects_residual_loose_compiled_shader(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
