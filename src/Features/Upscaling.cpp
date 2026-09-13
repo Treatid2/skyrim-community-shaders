@@ -13,6 +13,7 @@
 #include "Hooks.h"
 #include "Menu.h"
 #include "Menu/Fonts.h"
+#include "Profiler.h"
 #include "RE/B/BSOpenVR.h"
 #include "RE/B/BarterMenu.h"
 #include "RE/M/MapMenu.h"
@@ -24,6 +25,9 @@
 #include "Upscaling/FSRHostLifecyclePolicy.h"
 #include "Upscaling/FSRTemporalTuningDevBenchBridge.h"
 #include "Upscaling/FSRTemporalTuningSerialization.h"
+#ifdef DEVBENCH_BRIDGE_ENABLED
+#	include "Upscaling/ColourPipelineProbe.h"
+#endif
 #include "Upscaling/FidelityFX.h"
 #include "Upscaling/MotionSharpeningSettings.h"
 #include "Upscaling/NvidiaComIdentity.h"
@@ -25651,9 +25655,10 @@ bool Upscaling::ApplyPendingPerfModeRenderTargetRecreate(const char* a_caller)
 							  VRRenderScaleRetryKind a_retryKind = VRRenderScaleRetryKind::Other,
 							  uint64_t a_nativeRestoreRetirementSerial = 0
 #ifdef DEVBENCH_BRIDGE_ENABLED
-							  , std::source_location a_retrySource = std::source_location::current()
+							  ,
+							  std::source_location a_retrySource = std::source_location::current()
 #endif
-	) {
+						  ) {
 		const auto controllerSnapshot = GetVRRenderScaleTransitionSnapshot();
 		if (relatchEpoch != 0 &&
 			controllerSnapshot.targetEpoch != 0 &&
@@ -30028,9 +30033,9 @@ void Upscaling::TryPromoteVRRenderScaleSubmitStageContract(uint32_t a_currentFra
 	}
 	const auto revokeProofDrivenRelease = [&](
 #ifdef DEVBENCH_BRIDGE_ENABLED
-		const char* a_reason
+											  const char* a_reason
 #endif
-	) {
+										  ) {
 		const std::scoped_lock lock(
 			submitStageVendorResumeStableEyeMaskMutex);
 		if (stabilitySerial == submitStageVendorResumeStabilitySerial) {
@@ -30067,7 +30072,8 @@ void Upscaling::TryPromoteVRRenderScaleSubmitStageContract(uint32_t a_currentFra
 			qualityMode,
 			dlssPreset
 #ifdef DEVBENCH_BRIDGE_ENABLED
-			, &fullEyeObservation
+			,
+			&fullEyeObservation
 #endif
 		);
 #ifdef DEVBENCH_BRIDGE_ENABLED
@@ -30081,7 +30087,8 @@ void Upscaling::TryPromoteVRRenderScaleSubmitStageContract(uint32_t a_currentFra
 				qualityMode,
 				dlssPreset
 #ifdef DEVBENCH_BRIDGE_ENABLED
-				, &centerObservation
+				,
+				&centerObservation
 #endif
 			);
 #ifdef DEVBENCH_BRIDGE_ENABLED
@@ -30120,7 +30127,8 @@ void Upscaling::TryPromoteVRRenderScaleSubmitStageContract(uint32_t a_currentFra
 					"submit-stage viewport recycle");
 				RecordVRRenderScaleTransitionRetry(VRRenderScaleRetryKind::Backend
 #ifdef DEVBENCH_BRIDGE_ENABLED
-					, "dlss_viewport_recycle"
+					,
+					"dlss_viewport_recycle"
 #endif
 				);
 			}
@@ -31734,7 +31742,8 @@ bool Upscaling::CanAdmitVRRenderScalePostLoadRecoveryRelatch(
 		RecordVRRenderScaleTransitionRetry(
 			recoverySnapshot.cleanupDrained ? VRRenderScaleRetryKind::Pressure : VRRenderScaleRetryKind::Retirement
 #ifdef DEVBENCH_BRIDGE_ENABLED
-			, recoverySnapshot.cleanupDrained ? "post_load_memory_settle" : "post_load_cleanup_drain"
+			,
+			recoverySnapshot.cleanupDrained ? "post_load_memory_settle" : "post_load_cleanup_drain"
 #endif
 		);
 	}
@@ -41148,23 +41157,23 @@ FidelityFX::UpscaleResult Upscaling::DispatchFoveatedVendorEyeComposite(UpscaleM
 		const auto& centerRect = foveatedRectCache.rects[eyeIndex];
 		auto& centerOutput = foveatedCenterColorOut[eyeIndex];
 		const bool composited = centerOutput && centerOutput->srv &&
-		       DispatchFoveatedSpatialComposite(
-				   params.peripherySourceSRV,
-				   centerOutput->srv.get(),
-				   outputColorUAV,
-				   params.peripherySourceWidth,
-				   params.peripherySourceHeight,
-				   params.outputWidthPerEye,
-				   params.outputHeight,
-				   centerRect,
-				   params.peripherySourceScaleX,
-				   params.peripherySourceScaleY,
-				   params.peripherySourceOffsetX,
-				   params.peripherySourceOffsetY,
-				   params.centerScale,
-				   params.centerHorizontalScale,
-				   centerOffset,
-				   params.centerBlendFeather);
+		                        DispatchFoveatedSpatialComposite(
+									params.peripherySourceSRV,
+									centerOutput->srv.get(),
+									outputColorUAV,
+									params.peripherySourceWidth,
+									params.peripherySourceHeight,
+									params.outputWidthPerEye,
+									params.outputHeight,
+									centerRect,
+									params.peripherySourceScaleX,
+									params.peripherySourceScaleY,
+									params.peripherySourceOffsetX,
+									params.peripherySourceOffsetY,
+									params.centerScale,
+									params.centerHorizontalScale,
+									centerOffset,
+									params.centerBlendFeather);
 		return composited ? FidelityFX::UpscaleResult::Ready : FidelityFX::UpscaleResult::Failed;
 	}
 
@@ -42256,17 +42265,20 @@ bool Upscaling::PreparePerEyeInputs(ID3D11Resource* colorSrc, ID3D11Resource* de
 
 	// Extract both eyes' required inputs from combined stereo buffers.
 	// Reactive / transparency / encoded motion vectors can be pre-generated directly per-eye by the encode pass.
-	for (uint32_t i = 0; i < 2; ++i) {
-		uint32_t offsetXIn = (i == 1) ? eyeWidthIn : 0;
-		D3D11_BOX srcBox = { offsetXIn, 0, 0, offsetXIn + eyeWidthIn, eyeHeightIn, 1 };
+	{
+		CS_GPU_PASS("Upscaling::PreparePerEyeInputCopies");
+		for (uint32_t i = 0; i < 2; ++i) {
+			uint32_t offsetXIn = (i == 1) ? eyeWidthIn : 0;
+			D3D11_BOX srcBox = { offsetXIn, 0, 0, offsetXIn + eyeWidthIn, eyeHeightIn, 1 };
 
-		context->CopySubresourceRegion(vrIntermediateColorIn[i]->resource.get(), 0, 0, 0, 0, colorSrc, 0, &srcBox);
-		if (copyDepthInput)
-			context->CopySubresourceRegion(vrIntermediateDepth[i]->resource.get(), 0, 0, 0, 0, depthSrc, 0, &srcBox);
-		if (copyAuxiliaryInputs) {
-			context->CopySubresourceRegion(vrIntermediateMotionVectors[i]->resource.get(), 0, 0, 0, 0, mvecSrc, 0, &srcBox);
-			context->CopySubresourceRegion(vrIntermediateTransparencyMask[i]->resource.get(), 0, 0, 0, 0, transparencySrc, 0, &srcBox);
-			context->CopySubresourceRegion(vrIntermediateReactiveMask[i]->resource.get(), 0, 0, 0, 0, reactiveSrc, 0, &srcBox);
+			context->CopySubresourceRegion(vrIntermediateColorIn[i]->resource.get(), 0, 0, 0, 0, colorSrc, 0, &srcBox);
+			if (copyDepthInput)
+				context->CopySubresourceRegion(vrIntermediateDepth[i]->resource.get(), 0, 0, 0, 0, depthSrc, 0, &srcBox);
+			if (copyAuxiliaryInputs) {
+				context->CopySubresourceRegion(vrIntermediateMotionVectors[i]->resource.get(), 0, 0, 0, 0, mvecSrc, 0, &srcBox);
+				context->CopySubresourceRegion(vrIntermediateTransparencyMask[i]->resource.get(), 0, 0, 0, 0, transparencySrc, 0, &srcBox);
+				context->CopySubresourceRegion(vrIntermediateReactiveMask[i]->resource.get(), 0, 0, 0, 0, reactiveSrc, 0, &srcBox);
+			}
 		}
 	}
 
@@ -42602,10 +42614,13 @@ void Upscaling::FinalizePerEyeOutputs(ID3D11Resource* colorDst)
 		!vrIntermediateColorOut[1] || !vrIntermediateColorOut[1]->resource) {
 		return;
 	}
-	for (uint32_t i = 0; i < 2; ++i) {
-		const auto& outputEyeRegion = outputStereoLayout.eyes[i];
-		D3D11_BOX outBox = { 0, 0, 0, outputEyeRegion.width, outputEyeRegion.height, 1 };
-		context->CopySubresourceRegion(colorDst, 0, outputEyeRegion.minX, 0, 0, vrIntermediateColorOut[i]->resource.get(), 0, &outBox);
+	{
+		CS_GPU_PASS("Upscaling::FinalizePerEyeOutputCopies");
+		for (uint32_t i = 0; i < 2; ++i) {
+			const auto& outputEyeRegion = outputStereoLayout.eyes[i];
+			D3D11_BOX outBox = { 0, 0, 0, outputEyeRegion.width, outputEyeRegion.height, 1 };
+			context->CopySubresourceRegion(colorDst, 0, outputEyeRegion.minX, 0, 0, vrIntermediateColorOut[i]->resource.get(), 0, &outBox);
+		}
 	}
 }
 
@@ -48875,6 +48890,8 @@ bool Upscaling::TryArmVRRenderScalePostMutationPresentationGrace(
 void Upscaling::ServiceVRRenderScalePostMutationWatchdog(
 	const char* a_context)
 {
+	CS_PROFILE_CPU_SCOPE("Upscaling::RenderScaleWatchdog");
+
 	// Normal rendering pays one predictable atomic-zero check and takes no lock.
 	if (vrRenderScalePostMutationSerializationEpoch.load(
 			std::memory_order_acquire) == 0) {
@@ -53047,7 +53064,9 @@ VRRenderScaleRetryTelemetry::Context Upscaling::CaptureVRRenderScaleRetryContext
 		return {};
 	const auto controller = GetVRRenderScaleTransitionSnapshot();
 	const auto& profile = controller.applying.valid && controller.applying.transitionEpoch == controller.targetEpoch ?
-		controller.applying : controller.requested.valid ? controller.requested : controller.applied;
+	                          controller.applying :
+	                      controller.requested.valid ? controller.requested :
+	                                                   controller.applied;
 	std::scoped_lock lock(vrRenderScaleStressSessionMutex);
 	if (!vrRenderScaleStressSession.active)
 		return {};
@@ -53145,14 +53164,16 @@ void Upscaling::RecordVRRenderScaleViewportPreparation(
 	if (viewport.pending) {
 		event.type = EventType::ViewportWaitEnd;
 		event.reason = a_result == Streamline::DLSSViewportPreparationResult::Ready ?
-			"viewport_preparation_ready" : "viewport_preparation_failed";
+		                   "viewport_preparation_ready" :
+		                   "viewport_preparation_failed";
 		event.beginSequence = viewport.begin.sequence;
 		event.beginQpc = viewport.begin.qpc;
 		event.beginFrame = viewport.begin.frame;
 		event.pendingObservations = viewport.pendingObservations;
 	} else {
-		event.type = pending ? EventType::ViewportWaitBegin :
-			a_result == Streamline::DLSSViewportPreparationResult::Ready ? EventType::ViewportReady : EventType::Failure;
+		event.type = pending                                                      ? EventType::ViewportWaitBegin :
+		             a_result == Streamline::DLSSViewportPreparationResult::Ready ? EventType::ViewportReady :
+		                                                                            EventType::Failure;
 		event.pendingObservations = pending ? 1u : 0u;
 	}
 	event.sequence = telemetry.nextSequence;
@@ -53239,7 +53260,8 @@ json Upscaling::BuildVRRenderScaleRetryTelemetry() const
 			{ "stableCycles", event.stableCycles }, { "requiredStableCycles", event.requiredStableCycles },
 			{ "proofDrivenRelease", event.proofDrivenRelease }, { "settleGuardRequired", event.settleGuardRequired },
 			{ "guardDeadlineFrame", event.guardStartFrame != 0 && event.settleGuardRequired ?
-				json(static_cast<uint64_t>(event.guardStartFrame) + event.minimumSettleFrames) : json(nullptr) }
+										json(static_cast<uint64_t>(event.guardStartFrame) + event.minimumSettleFrames) :
+										json(nullptr) }
 		};
 		if (event.viewportObserved) {
 			const auto& viewport = event.viewport;
@@ -56213,7 +56235,8 @@ void Upscaling::RecordVRRenderScaleTransitionRetry(VRRenderScaleRetryKind a_kind
 	if (recorded)
 		RecordVRRenderScaleStressEvent(VRRenderScaleStressEventType::Retry, a_kind
 #ifdef DEVBENCH_BRIDGE_ENABLED
-			, VRRenderScaleFailureKind::None, a_reason, a_source
+			,
+			VRRenderScaleFailureKind::None, a_reason, a_source
 #endif
 		);
 }
@@ -56260,7 +56283,8 @@ void Upscaling::RecordVRRenderScaleCoalescedDuplicate()
 
 void Upscaling::RecordVRRenderScaleStressEvent(VRRenderScaleStressEventType a_type, VRRenderScaleRetryKind a_retryKind, VRRenderScaleFailureKind a_failureKind
 #ifdef DEVBENCH_BRIDGE_ENABLED
-	, const char* a_reason, std::source_location a_source
+	,
+	const char* a_reason, std::source_location a_source
 #endif
 )
 {
@@ -56344,9 +56368,10 @@ void Upscaling::RecordVRRenderScaleStressEvent(VRRenderScaleStressEventType a_ty
 		diagnostic.context = { event.sessionID, event.requestID, event.transitionEpoch,
 			static_cast<uint32_t>(event.method), event.qualityMode, event.dlssPreset };
 		diagnostic.frame = event.frame;
-		diagnostic.type = a_type == VRRenderScaleStressEventType::Retry ? EventType::Retry :
-			a_type == VRRenderScaleStressEventType::Applied ? EventType::Applied :
-			a_type == VRRenderScaleStressEventType::Stable ? EventType::Stable : EventType::Failure;
+		diagnostic.type = a_type == VRRenderScaleStressEventType::Retry   ? EventType::Retry :
+		                  a_type == VRRenderScaleStressEventType::Applied ? EventType::Applied :
+		                  a_type == VRRenderScaleStressEventType::Stable  ? EventType::Stable :
+		                                                                    EventType::Failure;
 		diagnostic.reason = a_reason;
 		diagnostic.retryKind = static_cast<uint32_t>(a_retryKind);
 		diagnostic.sourceFile = a_source.file_name();
@@ -58976,6 +59001,26 @@ void Upscaling::MenuManagerDrawInterfaceStartHook::thunk(int64_t a1)
 void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32_t a3, RE::RENDER_TARGET a_target, void* a_4, bool a_5)
 {
 	auto& upscaling = globals::features::upscaling;
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	const std::uint32_t currentProbeFrame = globals::state ? globals::state->frameCount : 0;
+	CSX::Diagnostics::ColourPipelineProbe::ServiceReadbacks(globals::d3d::context, currentProbeFrame);
+	const auto captureImageSpaceStage = [&](CSX::Diagnostics::ColourPipelineProbe::Stage a_stage, const char* a_callsite) {
+		auto* renderer = globals::game::renderer;
+		if (!renderer)
+			return;
+		auto& target = renderer->GetRuntimeData().renderTargets[a_target];
+		CSX::Diagnostics::ColourPipelineProbe::CaptureImageSpaceStage(
+			a_stage,
+			target.texture,
+			target.SRV,
+			target.RTV,
+			target.UAV,
+			static_cast<std::uint32_t>(a_target),
+			a_target == RE::RENDER_TARGET::kMAIN,
+			"Upscaling::Main_PostProcessing::thunk",
+			a_callsite);
+	};
+#endif
 	if (globals::game::isVR)
 		upscaling.ReleaseVRGameEntryVendorWorkGatesIfConverged();
 	auto upscaleMethod = upscaling.GetRuntimeUpscaleMethod();
@@ -59026,6 +59071,11 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 			upscaling.CopySharedD3D12Resources();
 
 		upscaling.PerformUpscaling();
+#ifdef DEVBENCH_BRIDGE_ENABLED
+		captureImageSpaceStage(
+			CSX::Diagnostics::ColourPipelineProbe::Stage::ImageSpaceInput,
+			"immediately before Skyrim Main_PostProcessing original function");
+#endif
 
 		const uint32_t currentFrame = globals::state ? globals::state->frameCount : 0u;
 		const bool vendorDispatchCompleted =
@@ -59037,6 +59087,11 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 			// Skyrim's temporal fallback. Disabling it here exposes the raw frame
 			// that users report as persistent shimmer/flicker during gated loads.
 			func(a_this, a3, a_target, a_4, a_5);
+#ifdef DEVBENCH_BRIDGE_ENABLED
+			captureImageSpaceStage(
+				CSX::Diagnostics::ColourPipelineProbe::Stage::ImageSpaceOutput,
+				"immediately after Skyrim Main_PostProcessing original function");
+#endif
 			return;
 		}
 
@@ -59048,6 +59103,11 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 
 		BSImagespaceShaderISTemporalAA->taaEnabled = false;
 		func(a_this, a3, a_target, a_4, a_5);
+#ifdef DEVBENCH_BRIDGE_ENABLED
+		captureImageSpaceStage(
+			CSX::Diagnostics::ColourPipelineProbe::Stage::ImageSpaceOutput,
+			"immediately after Skyrim Main_PostProcessing original function");
+#endif
 		BSImagespaceShaderISTemporalAA->taaEnabled = false;
 		return;
 	}
@@ -59142,7 +59202,17 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 		upscaling.PrepareFullResolutionPostProcessing();
 
 	BSImagespaceShaderISTemporalAA->taaEnabled = upscaleMethod == UpscaleMethod::kTAA;
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	captureImageSpaceStage(
+		CSX::Diagnostics::ColourPipelineProbe::Stage::ImageSpaceInput,
+		"immediately before Skyrim Main_PostProcessing original function");
+#endif
 	func(a_this, a3, a_target, a_4, a_5);
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	captureImageSpaceStage(
+		CSX::Diagnostics::ColourPipelineProbe::Stage::ImageSpaceOutput,
+		"immediately after Skyrim Main_PostProcessing original function");
+#endif
 
 	BSImagespaceShaderISTemporalAA->taaEnabled = false;
 

@@ -98,12 +98,37 @@ public:
 		float sharpness = 0.0f;
 	};
 #ifdef DEVBENCH_BRIDGE_ENABLED
+	struct FsrColorContractSnapshot
+	{
+		uint64_t revision = 0;
+		bool highDynamicRangeInput = true;
+		bool autoExposure = true;
+		bool hostContextValid = false;
+		bool hostContextHighDynamicRangeInput = true;
+		bool hostContextAutoExposure = true;
+		uint64_t hostContextGeneration = 0;
+		bool runtimeContextValid = false;
+		bool runtimeContextHighDynamicRangeInput = true;
+		bool runtimeContextAutoExposure = true;
+		uint64_t runtimeContextGeneration = 0;
+	};
+
 	struct RuntimeUpscalerDispatchSnapshot
 	{
 		bool valid = false;
 		uint32_t frame = 0;
 		RuntimeUpscalerFramePath path = RuntimeUpscalerFramePath::kInactive;
 		uint64_t serial = 0;
+		uint64_t contextGeneration = 0;
+		uint32_t contextIndex = 0;
+		uint32_t renderWidth = 0;
+		uint32_t renderHeight = 0;
+		uint32_t displayWidth = 0;
+		uint32_t displayHeight = 0;
+		bool highDynamicRangeInput = true;
+		bool autoExposure = true;
+		bool exposureResourceBound = false;
+		float preExposure = 1.0f;
 	};
 #endif
 
@@ -247,7 +272,15 @@ public:
 	std::string GetRuntimeUpscalerProviderName() const;
 	std::string GetRuntimeUpscalerRequestedVersionString() const;
 #ifdef DEVBENCH_BRIDGE_ENABLED
-	/** @brief Render-thread-only copy used to publish actual FSR path evidence under the controller lock. */
+	/** @brief Returns the requested and created FSR colour-input contract for DevBench evidence. */
+	FsrColorContractSnapshot GetDevBenchFsrColorContractSnapshot() const noexcept;
+	/** @brief Atomically changes the runtime-only FSR colour-input contract. */
+	bool SetDevBenchFsrColorContract(
+		uint64_t a_expectedRevision,
+		bool a_highDynamicRangeInput,
+		bool a_autoExposure,
+		uint64_t& a_resultingRevision) noexcept;
+	/** @brief Thread-safe copy of the latest successful FSR dispatch evidence. */
 	RuntimeUpscalerDispatchSnapshot GetRuntimeUpscalerDispatchSnapshotForRenderThread() const;
 #endif
 
@@ -416,7 +449,28 @@ private:
 	RuntimeUpscalerFramePath GetRuntimeUpscalerProviderFramePath(uint32_t a_requestedVersion) const;
 	void RecordRuntimeUpscalerFramePath(RuntimeUpscalerFramePath a_path);
 #ifdef DEVBENCH_BRIDGE_ENABLED
-	void RecordDevBenchSuccessfulDispatch(RuntimeUpscalerFramePath a_path);
+	static constexpr uint64_t kDevBenchFsrColorHdrBit = 1ull << 0;
+	static constexpr uint64_t kDevBenchFsrColorAutoExposureBit = 1ull << 1;
+	static constexpr uint64_t kDevBenchFsrColorContextValidBit = 1ull << 63;
+	static constexpr uint64_t kDevBenchFsrColorRevisionShift = 2;
+	static constexpr uint64_t kDevBenchFsrColorDefaultState =
+		(1ull << kDevBenchFsrColorRevisionShift) |
+		kDevBenchFsrColorHdrBit |
+		kDevBenchFsrColorAutoExposureBit;
+	[[nodiscard]] uint64_t GetDevBenchFsrColorContractState() const noexcept;
+	[[nodiscard]] uint64_t GetDevBenchFsrColorContractFlags() const noexcept;
+	void RecordDevBenchSuccessfulDispatch(
+		RuntimeUpscalerFramePath a_path,
+		uint32_t a_contextIndex,
+		uint32_t a_renderWidth,
+		uint32_t a_renderHeight,
+		uint32_t a_displayWidth,
+		uint32_t a_displayHeight);
+	std::atomic<uint64_t> devBenchFsrColorContractState{ kDevBenchFsrColorDefaultState };
+	std::atomic<uint64_t> devBenchHostContextColorContract{ 0 };
+	std::atomic<uint64_t> devBenchRuntimeContextColorContract{ 0 };
+	std::atomic<uint64_t> devBenchHostContextGeneration{ 0 };
+	std::atomic<uint64_t> devBenchRuntimeContextGeneration{ 0 };
 	mutable std::mutex devBenchSuccessfulDispatchMutex;
 	RuntimeUpscalerDispatchSnapshot devBenchSuccessfulDispatch{};
 	uint64_t devBenchSuccessfulDispatchSerial = 0;
