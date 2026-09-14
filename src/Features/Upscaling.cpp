@@ -20679,8 +20679,8 @@ void Upscaling::CaptureSubmitTemporalSnapshot()
 		.outputHeight = ClampPositiveDimension(outputSize.y),
 		.compositorCycle = submitTemporalCompositorCycle.load(std::memory_order_acquire),
 	};
-	auto* depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture;
-	auto* motion = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR].texture;
+	auto* depth = REX::W32::AsReal(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture);
+	auto* motion = REX::W32::AsReal(renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR].texture);
 	std::lock_guard lock(submitTemporalInputsMutex);
 	if (submitTemporalInputs.snapshot.valid && VRSubmitTemporalSnapshot::IsSameProducer(submitTemporalInputs.snapshot.key, key)) {
 		if (!submitTemporalInputs.snapshot.Matches(key) || submitTemporalInputs.depth.get() != depth || submitTemporalInputs.motion.get() != motion) {
@@ -50567,14 +50567,14 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 		!presentationOnly && !peerInputFreshnessProven &&
 		submitStageCurrentEyePreparedInputs.Matches(currentEyeInputIdentity) &&
 		currentEyeSourceOwners.color.get() == sourceTexture &&
-		currentEyeSourceOwners.depth.get() == depth.texture &&
-		currentEyeSourceOwners.motionVectors.get() == motionVector.texture;
+		currentEyeSourceOwners.depth.get() == REX::W32::AsReal(depth.texture) &&
+		currentEyeSourceOwners.motionVectors.get() == REX::W32::AsReal(motionVector.texture);
 	const bool preparedInputProofMatches =
 		VRSubmitInputFreshnessPolicy::MatchesProducerProof(
 			submitStagePreparedInputProof, submitInputProof) &&
 		submitStagePreparedColorSourceOwner.get() == sourceTexture &&
-		submitStagePreparedDepthSourceOwner.get() == depth.texture &&
-		submitStagePreparedMotionVectorSourceOwner.get() == motionVector.texture;
+		submitStagePreparedDepthSourceOwner.get() == REX::W32::AsReal(depth.texture) &&
+		submitStagePreparedMotionVectorSourceOwner.get() == REX::W32::AsReal(motionVector.texture);
 	const bool submitStagePreparedThisFrame = currentEyePreparedInputsMatch || (VRSubmitTemporalSnapshot::MatchesProducer(submitStagePreparedFrame, submitStagePreparedCycle, currentFrame, a_compositorCycleToken) &&
 																				   submitStagePreparedGeneration == activeContractGeneration &&
 																				   ((presentationOnly && submitStagePreparedFramePresentationOnly) ||
@@ -50596,8 +50596,8 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 			submitStageCurrentEyePreparedInputs.Record(currentEyeInputIdentity, a_foveatedRegionEncode);
 			auto& owners = submitStageCurrentEyeSourceOwners[eyeIndex];
 			owners.color.copy_from(sourceTexture);
-			owners.depth.copy_from(depth.texture);
-			owners.motionVectors.copy_from(motionVector.texture);
+			owners.depth.copy_from(REX::W32::AsReal(depth.texture));
+			owners.motionVectors.copy_from(REX::W32::AsReal(motionVector.texture));
 		}
 	};
 	if (!submitStagePreparedThisFrame && !presentationOnly) {
@@ -50644,8 +50644,8 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 		{
 			std::lock_guard lock(submitTemporalInputsMutex);
 			if (submitTemporalInputs.snapshot.MatchesForDispatch(temporalKey) &&
-				submitTemporalInputs.depth.get() == depth.texture &&
-				submitTemporalInputs.motion.get() == motionVector.texture) {
+				submitTemporalInputs.depth.get() == REX::W32::AsReal(depth.texture) &&
+				submitTemporalInputs.motion.get() == REX::W32::AsReal(motionVector.texture)) {
 				temporalInputs = submitTemporalInputs;
 			}
 		}
@@ -50719,9 +50719,9 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 		recordCurrentEyePreparation(encodedFoveatedRegions);
 		if (submitInputProof.IsValid()) {
 			submitStagePreparedColorSourceOwner.copy_from(sourceTexture);
-			submitStagePreparedDepthSourceOwner.copy_from(depth.texture);
+			submitStagePreparedDepthSourceOwner.copy_from(REX::W32::AsReal(depth.texture));
 			submitStagePreparedMotionVectorSourceOwner.copy_from(
-				motionVector.texture);
+				REX::W32::AsReal(motionVector.texture));
 		} else {
 			submitStagePreparedColorSourceOwner = nullptr;
 			submitStagePreparedDepthSourceOwner = nullptr;
@@ -51091,7 +51091,7 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 			const bool currentMotion = submitInputProof.IsValid() && !ShouldResetHistoryThisFrame() &&
 			                           !resolutionPlan.menuContextActive && !resolutionPlan.loadingMenuActive && !presentationRenderTarget;
 			if (!ApplySubmitStageDLSSSharpening(targetEyeIndex, targetVendorColorOutput,
-					currentMotion ? motionVector.SRV : nullptr, motionRegion)) {
+					currentMotion ? REX::W32::AsReal(motionVector.SRV) : nullptr, motionRegion)) {
 				if (IsSubmitStageDeviceLost())
 					return false;
 				context->CopyResource(vrIntermediateColorOut[targetEyeIndex]->resource.get(), targetVendorColorOutput.resource.get());
@@ -51414,9 +51414,9 @@ bool Upscaling::SubmitVRUpscaledFrame(vr::EVREye a_eye, uint64_t a_compositorCyc
 			recordCurrentEyePreparation(false);
 			if (submitInputProof.IsValid()) {
 				submitStagePreparedColorSourceOwner.copy_from(sourceTexture);
-				submitStagePreparedDepthSourceOwner.copy_from(depth.texture);
+				submitStagePreparedDepthSourceOwner.copy_from(REX::W32::AsReal(depth.texture));
 				submitStagePreparedMotionVectorSourceOwner.copy_from(
-					motionVector.texture);
+					REX::W32::AsReal(motionVector.texture));
 			} else {
 				submitStagePreparedColorSourceOwner = nullptr;
 				submitStagePreparedDepthSourceOwner = nullptr;
@@ -58924,7 +58924,7 @@ void Upscaling::ApplySharpening()
 				};
 			}
 			motionRegionCount = eyeCount;
-			motionSRV = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR].SRV;
+			motionSRV = REX::W32::AsReal(renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR].SRV);
 		}
 	}
 	if (!shouldApplySharpening ||
@@ -59036,10 +59036,10 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 		auto& target = renderer->GetRuntimeData().renderTargets[a_target];
 		CSX::Diagnostics::ColourPipelineProbe::CaptureImageSpaceStage(
 			a_stage,
-			target.texture,
-			target.SRV,
-			target.RTV,
-			target.UAV,
+			REX::W32::AsReal(target.texture),
+			REX::W32::AsReal(target.SRV),
+			REX::W32::AsReal(target.RTV),
+			REX::W32::AsReal(target.UAV),
 			static_cast<std::uint32_t>(a_target),
 			a_target == RE::RENDER_TARGET::kMAIN,
 			"Upscaling::Main_PostProcessing::thunk",
