@@ -1861,6 +1861,162 @@ namespace
 		verifyDrawShader(*stable, "stable-generation publication");
 	}
 
+	void TestImmediateDispatchRetainsCaptureGeneration()
+	{
+		constexpr std::uintptr_t immediateContext = 0xC070;
+		constexpr std::uintptr_t deferredContext = 0xC071;
+		constexpr std::uintptr_t sourceShader = 0xC072;
+		constexpr std::uintptr_t unrelatedShader = 0xC073;
+		constexpr std::uintptr_t successorShader = 0xC074;
+		constexpr std::uint64_t staleArgument = 0xC075;
+		constexpr std::uint64_t successorArgument = 0xC076;
+		auto config = Config();
+		config.maxEvents = 128;
+		config.maxStageShaderObservations = 8;
+		config.maxBytes = Collector::RequiredStorageBytes(config);
+
+		const auto seedSourceCapture = [&](Runtime& a_runtime, bool a_cacheHit) {
+			if (!a_cacheHit)
+				a_runtime.BindStage(immediateContext, ShaderStage::kCompute, sourceShader);
+			Check(a_runtime.StartCapture(config) == StartResult::kStarted,
+				"dispatch turnover source capture did not start");
+			a_runtime.RegisterDeferredContext(deferredContext, 0);
+			a_runtime.BindStage(deferredContext, ShaderStage::kCompute, sourceShader);
+			if (a_cacheHit)
+				a_runtime.BindStage(immediateContext, ShaderStage::kCompute, sourceShader);
+		};
+		const auto verifySuccessorDispatch = [&](const CaptureSnapshot& a_snapshot, std::string_view a_case) {
+			Check(std::none_of(a_snapshot.events.begin(), a_snapshot.events.end(),
+					  [](const EventRecord& event) {
+						  return event.kind == EventKind::kDispatch &&
+				                 event.payload.words[3] == staleArgument;
+					  }),
+				std::format("{} admitted a predecessor dispatch", a_case));
+			const auto dispatch = std::find_if(a_snapshot.events.begin(), a_snapshot.events.end(),
+				[](const EventRecord& event) {
+					return event.kind == EventKind::kDispatch &&
+				           event.payload.words[3] == successorArgument;
+				});
+			Check(dispatch != a_snapshot.events.end() && dispatch->payload.words[2] != 0,
+				std::format("{} did not retain the successor compute shader", a_case));
+			const auto shader = dispatch == a_snapshot.events.end() ? a_snapshot.events.end() :
+			                                                          std::find_if(a_snapshot.events.begin(), a_snapshot.events.end(),
+																		  [dispatch](const EventRecord& event) {
+																			  return event.kind == EventKind::kStageShaderObserved &&
+				                                                                     event.payload.words[0] == dispatch->payload.words[2];
+																		  });
+			Check(shader != a_snapshot.events.end() && shader->payload.words[1] == successorShader,
+				std::format("{} relabelled predecessor shader evidence", a_case));
+		};
+
+		for (const auto cacheHit : { false, true }) {
+			for (const auto operation : { DispatchOperation::kDispatch, DispatchOperation::kDispatchIndirect }) {
+				Runtime runtime;
+				runtime.SetImmediateContext(immediateContext);
+				seedSourceCapture(runtime, cacheHit);
+				runtime.PauseNextImmediateDispatchAdmissionForTesting();
+				std::thread staleWorker([&] {
+					runtime.RecordDispatch(immediateContext, operation, staleArgument, 1, 1);
+				});
+				WaitForDeferredPublicationPause(runtime, staleWorker);
+
+				auto first = runtime.StopCapture();
+				Check(first.has_value() && runtime.StartCapture(config) == StartResult::kStarted,
+					"dispatch turnover successor capture did not start");
+				runtime.RegisterDeferredContext(deferredContext, 0);
+				runtime.BindStage(deferredContext, ShaderStage::kCompute, unrelatedShader);
+				runtime.ResumeDeferredPublicationForTesting();
+				staleWorker.join();
+				runtime.BindStage(immediateContext, ShaderStage::kCompute, successorShader);
+				runtime.RecordDispatch(immediateContext, operation, successorArgument, 1, 1);
+
+				auto second = runtime.StopCapture();
+				Check(second.has_value(), "dispatch turnover successor capture did not stop");
+				verifySuccessorDispatch(
+					*second, std::format("{} dispatch {}", cacheHit ? "cached" : "uncached", static_cast<int>(operation)));
+			}
+		}
+
+		Runtime stoppedRuntime;
+		stoppedRuntime.SetImmediateContext(immediateContext);
+		seedSourceCapture(stoppedRuntime, true);
+		stoppedRuntime.PauseNextImmediateDispatchAdmissionForTesting();
+		std::thread stoppedWorker([&] {
+			stoppedRuntime.RecordDispatch(
+				immediateContext, DispatchOperation::kDispatch, staleArgument, 1, 1);
+		});
+		WaitForDeferredPublicationPause(stoppedRuntime, stoppedWorker);
+		auto stopped = stoppedRuntime.StopCapture();
+		stoppedRuntime.ResumeDeferredPublicationForTesting();
+		stoppedWorker.join();
+		Check(stopped.has_value(), "dispatch no-successor capture did not stop");
+
+		Runtime stableRuntime;
+		stableRuntime.SetImmediateContext(immediateContext);
+		seedSourceCapture(stableRuntime, true);
+		stableRuntime.PauseNextImmediateDispatchAdmissionForTesting();
+		std::thread stableWorker([&] {
+			stableRuntime.RecordDispatch(
+				immediateContext, DispatchOperation::kDispatch, successorArgument, 1, 1);
+		});
+		WaitForDeferredPublicationPause(stableRuntime, stableWorker);
+		stableRuntime.ResumeDeferredPublicationForTesting();
+		stableWorker.join();
+		auto stable = stableRuntime.StopCapture();
+		Check(stable.has_value() && std::any_of(stable->events.begin(), stable->events.end(),
+										[](const EventRecord& event) {
+											return event.kind == EventKind::kDispatch &&
+			                                       event.payload.words[3] == successorArgument;
+										}),
+			"stable-generation dispatch was not recorded");
+	}
+
+	void TestFilteredCaptureMaintainsImmediateStageBinding()
+	{
+		constexpr std::uintptr_t immediateContext = 0xC080;
+		constexpr std::uintptr_t sourceShader = 0xC081;
+		constexpr std::uintptr_t replacementShader = 0xC082;
+		auto filteredConfig = Config();
+		filteredConfig.requestedEventKindMask = EventKindBit(EventKind::kEyeSubmitted);
+		filteredConfig.maxBytes = Collector::RequiredStorageBytes(filteredConfig);
+		auto executionConfig = Config();
+		executionConfig.maxEvents = 64;
+		executionConfig.maxStageShaderObservations = 8;
+		executionConfig.maxBytes = Collector::RequiredStorageBytes(executionConfig);
+
+		for (const auto replacement : { replacementShader, std::uintptr_t{ 0 } }) {
+			Runtime runtime;
+			runtime.SetImmediateContext(immediateContext);
+			runtime.BindStage(immediateContext, ShaderStage::kCompute, sourceShader);
+			Check(runtime.StartCapture(filteredConfig) == StartResult::kStarted,
+				"filtered binding capture did not start");
+			runtime.BindStage(immediateContext, ShaderStage::kCompute, replacement);
+			auto filtered = runtime.StopCapture();
+			Check(filtered.has_value(), "filtered binding capture did not stop");
+
+			Check(runtime.StartCapture(executionConfig) == StartResult::kStarted,
+				"binding inheritance capture did not start");
+			runtime.RecordDispatch(immediateContext, DispatchOperation::kDispatch, replacement, 1, 1);
+			auto execution = runtime.StopCapture();
+			Check(execution.has_value(), "binding inheritance capture did not stop");
+			const auto dispatch = std::find_if(execution->events.begin(), execution->events.end(),
+				[](const EventRecord& event) { return event.kind == EventKind::kDispatch; });
+			Check(dispatch != execution->events.end(), "binding inheritance dispatch was not recorded");
+			if (replacement == 0) {
+				Check(dispatch->payload.words[2] == 0,
+					"filtered null bind retained the previous compute shader");
+				continue;
+			}
+			const auto shader = std::find_if(execution->events.begin(), execution->events.end(),
+				[dispatch](const EventRecord& event) {
+					return event.kind == EventKind::kStageShaderObserved &&
+				           event.payload.words[0] == dispatch->payload.words[2];
+				});
+			Check(shader != execution->events.end() && shader->payload.words[1] == replacement,
+				"filtered replacement bind restored the obsolete compute shader");
+		}
+	}
+
 	void TestDeferredPublicationRetainsCaptureGeneration()
 	{
 		constexpr std::uintptr_t oldContext = 0xC100;
@@ -2200,6 +2356,8 @@ int main()
 		TestDeferredRecordingReportsPartialFilteredAndFailedFinishes();
 		TestDiagnosticCatalogueAdmissionFailuresFailOpen();
 		TestImmediateStagePublicationRetainsCaptureGeneration();
+		TestImmediateDispatchRetainsCaptureGeneration();
+		TestFilteredCaptureMaintainsImmediateStageBinding();
 		TestDeferredPublicationRetainsCaptureGeneration();
 		TestDeferredControlPublicationRetainsRecordingLifetime();
 		return 0;

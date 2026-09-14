@@ -378,6 +378,7 @@ namespace CSX::RenderMap
 		void FailNextCommandListCatalogueAdmissionForTesting() noexcept;
 		void PauseNextDeferredPublicationForTesting() noexcept;
 		void PauseNextImmediateStagePublicationForTesting() noexcept;
+		void PauseNextImmediateDispatchAdmissionForTesting() noexcept;
 		void PauseNextDeferredFinishCleanupForTesting() noexcept;
 		bool IsDeferredPublicationPausedForTesting() const noexcept;
 		void ResumeDeferredPublicationForTesting() noexcept;
@@ -497,6 +498,7 @@ namespace CSX::RenderMap
 #if defined(CSX_RENDER_MAP_TESTING)
 		void PauseDeferredPublicationBeforeAppendForTesting() noexcept;
 		void PauseImmediateStagePublicationForTesting() noexcept;
+		void PauseImmediateDispatchBeforeAppendForTesting() noexcept;
 		void PauseDeferredFinishCleanupForTesting() noexcept;
 #endif
 		void ResetImmediatePipelineState() noexcept;
@@ -505,7 +507,7 @@ namespace CSX::RenderMap
 		ImmediateStageObservation ReadImmediateStageObservation(ShaderStage a_stage) const noexcept;
 		void ApplyEffectiveResourceViewResetLocked() noexcept;
 		std::uint64_t NextCommandStreamSequence() noexcept;
-		std::uint64_t EnsureBoundStageObservation(ShaderStage a_stage) noexcept;
+		ImmediateStageObservation EnsureBoundStageObservation(ShaderStage a_stage) noexcept;
 		StageShaderObservationResult ObserveBoundStage(
 			ShaderStage a_stage,
 			std::uintptr_t a_d3dObject) noexcept;
@@ -568,6 +570,7 @@ namespace CSX::RenderMap
 		std::atomic_bool failNextCommandListCatalogueAdmission{ false };
 		std::atomic_bool pauseNextDeferredPublication{ false };
 		std::atomic_bool pauseNextImmediateStagePublication{ false };
+		std::atomic_bool pauseNextImmediateDispatchAdmission{ false };
 		std::atomic_bool pauseNextDeferredFinishCleanup{ false };
 		std::atomic_bool deferredPublicationPaused{ false };
 		std::atomic_bool resumeDeferredPublication{ false };

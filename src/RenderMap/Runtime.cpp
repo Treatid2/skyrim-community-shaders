@@ -948,6 +948,13 @@ namespace CSX::RenderMap
 		pauseNextImmediateStagePublication.store(true, std::memory_order_release);
 	}
 
+	void Runtime::PauseNextImmediateDispatchAdmissionForTesting() noexcept
+	{
+		resumeDeferredPublication.store(false, std::memory_order_release);
+		deferredPublicationPaused.store(false, std::memory_order_release);
+		pauseNextImmediateDispatchAdmission.store(true, std::memory_order_release);
+	}
+
 	void Runtime::PauseNextDeferredFinishCleanupForTesting() noexcept
 	{
 		resumeDeferredPublication.store(false, std::memory_order_release);
@@ -979,6 +986,17 @@ namespace CSX::RenderMap
 	void Runtime::PauseImmediateStagePublicationForTesting() noexcept
 	{
 		if (!pauseNextImmediateStagePublication.exchange(false, std::memory_order_acq_rel))
+			return;
+		deferredPublicationPaused.store(true, std::memory_order_release);
+		while (!resumeDeferredPublication.load(std::memory_order_acquire))
+			std::this_thread::yield();
+		deferredPublicationPaused.store(false, std::memory_order_release);
+		resumeDeferredPublication.store(false, std::memory_order_release);
+	}
+
+	void Runtime::PauseImmediateDispatchBeforeAppendForTesting() noexcept
+	{
+		if (!pauseNextImmediateDispatchAdmission.exchange(false, std::memory_order_acq_rel))
 			return;
 		deferredPublicationPaused.store(true, std::memory_order_release);
 		while (!resumeDeferredPublication.load(std::memory_order_acquire))
@@ -1154,19 +1172,19 @@ namespace CSX::RenderMap
 			}
 			return;
 		}
-		if (collector.IsCapturing()) {
-			if (EnsureImmediateContextObservation() == 0)
-				return;
-			NextCommandStreamSequence();
-		}
 		switch (a_stage) {
 		case ShaderStage::kVertex:
 		case ShaderStage::kPixel:
 		case ShaderStage::kCompute:
 			SetImmediateBoundStage(a_stage, a_d3dObject);
-			PublishBoundStageObservation(a_stage, a_d3dObject, ObserveBoundStage(a_stage, a_d3dObject));
 			break;
+		default:
+			return;
 		}
+		if (!collector.IsCapturing() || EnsureImmediateContextObservation() == 0)
+			return;
+		NextCommandStreamSequence();
+		PublishBoundStageObservation(a_stage, a_d3dObject, ObserveBoundStage(a_stage, a_d3dObject));
 	}
 
 	void Runtime::RecordFinishCommandList(
@@ -2070,14 +2088,14 @@ namespace CSX::RenderMap
 		return {};
 	}
 
-	std::uint64_t Runtime::EnsureBoundStageObservation(ShaderStage a_stage) noexcept
+	Runtime::ImmediateStageObservation Runtime::EnsureBoundStageObservation(ShaderStage a_stage) noexcept
 	{
 		const auto existing = ReadImmediateStageObservation(a_stage);
 		const auto activeGeneration = collector.ActiveGeneration();
 		if (existing.observationId != 0 && existing.captureGeneration == activeGeneration)
-			return existing.observationId;
+			return existing;
 		if (existing.d3dObject == 0)
-			return 0;
+			return existing;
 
 		PublishBoundStageObservation(
 			a_stage, existing.d3dObject,
@@ -2085,8 +2103,8 @@ namespace CSX::RenderMap
 		const auto published = ReadImmediateStageObservation(a_stage);
 		return published.observationId != 0 &&
 		               published.captureGeneration == collector.ActiveGeneration() ?
-		           published.observationId :
-		           0;
+		           published :
+		           ImmediateStageObservation{ .d3dObject = published.d3dObject };
 	}
 
 	std::optional<Runtime::PersistentStageShaderIdentity> Runtime::FindCreatedStageShader(
@@ -2218,8 +2236,10 @@ namespace CSX::RenderMap
 			}
 			return;
 		}
-		const auto commandStreamSequence = NextCommandStreamSequence();
 		const auto captureGeneration = collector.ActiveGeneration();
+		if (captureGeneration == 0)
+			return;
+		const auto commandStreamSequence = NextCommandStreamSequence();
 		std::uint64_t preparedGeometrySetupObservationId = 0;
 		if (pendingGeometrySubmission.owner == this) {
 			if (pendingGeometrySubmission.generation == captureGeneration &&
@@ -2241,10 +2261,19 @@ namespace CSX::RenderMap
 		if (preparedGeometrySetupObservationId != 0)
 			pendingGeometrySubmission = {};
 		const auto contextObservationId = EnsureImmediateContextObservation();
-		if (contextObservationId == 0)
+		if (contextObservationId == 0 ||
+			immediateContextObservationGeneration.load(std::memory_order_acquire) != captureGeneration)
 			return;
-		const auto vertexObservationId = EnsureBoundStageObservation(ShaderStage::kVertex);
-		const auto pixelObservationId = EnsureBoundStageObservation(ShaderStage::kPixel);
+		const auto vertexObservation = EnsureBoundStageObservation(ShaderStage::kVertex);
+		const auto pixelObservation = EnsureBoundStageObservation(ShaderStage::kPixel);
+		const auto vertexObservationId = vertexObservation.captureGeneration == captureGeneration ?
+		                                     vertexObservation.observationId :
+		                                     0;
+		const auto pixelObservationId = pixelObservation.captureGeneration == captureGeneration ?
+		                                    pixelObservation.observationId :
+		                                    0;
+		if (collector.ActiveGeneration() != captureGeneration)
+			return;
 		std::uint64_t submissionObservationId = 0;
 		if (pendingVisibilitySubmission.owner == this &&
 			pendingVisibilitySubmission.generation == captureGeneration &&
@@ -2315,12 +2344,23 @@ namespace CSX::RenderMap
 			}
 			return;
 		}
-		const auto contextObservationId = EnsureImmediateContextObservation();
-		if (contextObservationId == 0)
-			return;
-		const auto computeObservationId = EnsureBoundStageObservation(ShaderStage::kCompute);
-		const auto commandStreamSequence = NextCommandStreamSequence();
 		const auto captureGeneration = collector.ActiveGeneration();
+		if (captureGeneration == 0)
+			return;
+		const auto commandStreamSequence = NextCommandStreamSequence();
+		const auto contextObservationId = EnsureImmediateContextObservation();
+		if (contextObservationId == 0 ||
+			immediateContextObservationGeneration.load(std::memory_order_acquire) != captureGeneration)
+			return;
+		const auto computeObservation = EnsureBoundStageObservation(ShaderStage::kCompute);
+#if defined(CSX_RENDER_MAP_TESTING)
+		PauseImmediateDispatchBeforeAppendForTesting();
+#endif
+		if (collector.ActiveGeneration() != captureGeneration)
+			return;
+		const auto computeObservationId = computeObservation.captureGeneration == captureGeneration ?
+		                                      computeObservation.observationId :
+		                                      0;
 		collector.RecordForGeneration(
 			EventKind::kDispatch,
 			DispatchCallPayload(
