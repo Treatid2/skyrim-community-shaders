@@ -2300,14 +2300,35 @@ def copy_publication_candidate(source: Path, staging: Path, label: str) -> None:
     leave an elevated build readable only from an Administrator shell. A new
     path created beneath the output root inherits the output root's ACL instead.
     """
-    if path_entry_exists(staging):
+    source_is_directory = source.is_dir()
+    staging_owned = False
+    try:
+        if source_is_directory:
+            staging.mkdir()
+            staging_owned = True
+        else:
+            staging_stream = staging.open("xb")
+            staging_owned = True
+            staging_stream.close()
+    except FileExistsError as exc:
+        if staging_owned:
+            discard_publication_staging(staging)
+            raise SystemExit(
+                f"failed to acquire staging for {label}: {staging}"
+            ) from exc
         raise SystemExit(
             f"refusing to replace unexpected publication staging path: {staging}"
-        )
+        ) from exc
+    except OSError as exc:
+        if staging_owned:
+            discard_publication_staging(staging)
+        raise SystemExit(
+            f"failed to acquire staging for {label}: {staging}"
+        ) from exc
 
     try:
-        if source.is_dir():
-            shutil.copytree(source, staging)
+        if source_is_directory:
+            shutil.copytree(source, staging, dirs_exist_ok=True)
         else:
             shutil.copy2(source, staging)
     except OSError as exc:

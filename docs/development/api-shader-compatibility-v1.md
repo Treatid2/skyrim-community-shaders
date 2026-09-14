@@ -52,12 +52,13 @@ domain (identity, major contract, resource fingerprint, and scopes), while its
 exact identity also contains the current and supported minor range. A
 Water-only provider therefore cannot invalidate Grass or Lighting records.
 
-An exact lookup is attempted first. If it misses, CSX searches retained records
-in the same provider domain and accepts the newest record whose supported minor
-range overlaps the current range. A major-contract, resource, scope, source,
-compile-state, or feature-ABI change still causes a miss. Compatible and
-incompatible versions may coexist until ordinary pack compaction retains the
-newest record for each logical shader identity.
+CSX searches all retained records in the same provider domain and accepts the
+newest record whose supported minor range overlaps the current range. Exact
+identity remains compatibility metadata, not a priority override. A
+major-contract, resource, scope, source, compile-state, or feature-ABI change
+still causes a miss. Compatible and incompatible versions may coexist until
+ordinary pack compaction retains the newest record for each logical shader
+identity.
 
 The canonical data, not a friendly label or timestamp, is authoritative.
 Digests are lookup accelerators and corruption checks. Pack records retain the

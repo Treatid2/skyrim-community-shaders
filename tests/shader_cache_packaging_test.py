@@ -260,6 +260,139 @@ class ShaderCachePackagingTests(unittest.TestCase):
             self.assertTrue(staging.is_dir())
             self.assertFalse(destination.exists())
 
+    def test_runtime_publication_preserves_unowned_stage_after_acquisition_race(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            out_root = root / "out"
+            out_root.mkdir()
+            destination = self._publication_cache(out_root / "VR", b"previous")
+            candidate = self._publication_cache(root / "candidate", b"candidate")
+            staging = out_root / ".VR.publishing"
+            marker = staging / "other-invocation.bin"
+            original_mkdir = Path.mkdir
+            raced = False
+
+            def racing_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+                nonlocal raced
+                if path == staging and not raced:
+                    raced = True
+                    original_mkdir(path, *args, **kwargs)
+                    marker.write_bytes(b"owned elsewhere")
+                original_mkdir(path, *args, **kwargs)
+
+            with (
+                mock.patch.object(Path, "mkdir", new=racing_mkdir),
+                self.assertRaisesRegex(SystemExit, "unexpected publication staging"),
+            ):
+                BUILDER.publish_runtime_cache(candidate, out_root, "VR")
+
+            self.assertEqual(marker.read_bytes(), b"owned elsewhere")
+            self.assertEqual(
+                (destination / BUILDER.CACHE_DIRECTORY / "marker.bin").read_bytes(),
+                b"previous",
+            )
+
+    def test_archive_publication_preserves_unowned_stage_after_acquisition_race(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            out_root = root / "out"
+            out_root.mkdir()
+            candidate = root / "ShaderCache-VR-test.7z"
+            candidate.write_bytes(b"candidate")
+            destination = out_root / candidate.name
+            destination.write_bytes(b"previous")
+            staging = out_root / f".{candidate.name}.publishing"
+            original_open = Path.open
+            raced = False
+
+            def racing_open(
+                path: Path,
+                mode: str = "r",
+                *args: object,
+                **kwargs: object,
+            ):
+                nonlocal raced
+                if path == staging and mode == "xb" and not raced:
+                    raced = True
+                    with original_open(path, "wb") as stream:
+                        stream.write(b"owned elsewhere")
+                return original_open(path, mode, *args, **kwargs)
+
+            with (
+                mock.patch.object(Path, "open", new=racing_open),
+                self.assertRaisesRegex(SystemExit, "unexpected publication staging"),
+            ):
+                BUILDER.publish_cache_archive(candidate, out_root, "VR")
+
+            self.assertEqual(staging.read_bytes(), b"owned elsewhere")
+            self.assertEqual(destination.read_bytes(), b"previous")
+
+    def test_directory_staging_removes_owned_partial_copy_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "candidate"
+            source.mkdir()
+            (source / "cache.bin").write_bytes(b"candidate")
+            staging = root / ".VR.publishing"
+
+            def fail_owned_copy(
+                source_path: Path,
+                destination_path: Path,
+                **kwargs: object,
+            ) -> None:
+                self.assertEqual(source_path, source)
+                self.assertTrue(kwargs["dirs_exist_ok"])
+                (destination_path / "partial.bin").write_bytes(b"partial")
+                raise PermissionError("simulated partial directory copy")
+
+            with (
+                mock.patch.object(BUILDER.shutil, "copytree", new=fail_owned_copy),
+                self.assertRaisesRegex(SystemExit, "failed to stage VR cache"),
+            ):
+                BUILDER.copy_publication_candidate(source, staging, "VR cache")
+
+            self.assertFalse(staging.exists())
+
+    def test_archive_staging_removes_owned_partial_copy_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "ShaderCache-VR-test.7z"
+            source.write_bytes(b"candidate")
+            staging = root / ".ShaderCache-VR-test.7z.publishing"
+
+            def fail_owned_copy(source_path: Path, destination_path: Path) -> None:
+                self.assertEqual(source_path, source)
+                destination_path.write_bytes(b"partial")
+                raise PermissionError("simulated partial archive copy")
+
+            with (
+                mock.patch.object(BUILDER.shutil, "copy2", new=fail_owned_copy),
+                self.assertRaisesRegex(SystemExit, "failed to stage VR cache archive"),
+            ):
+                BUILDER.copy_publication_candidate(
+                    source,
+                    staging,
+                    "VR cache archive",
+                )
+
+            self.assertFalse(staging.exists())
+
+    def test_archive_publication_replaces_existing_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            out_root = root / "out"
+            out_root.mkdir()
+            candidate = root / "ShaderCache-VR-test.7z"
+            candidate.write_bytes(b"candidate")
+            destination = out_root / candidate.name
+            destination.write_bytes(b"previous")
+
+            published = BUILDER.publish_cache_archive(candidate, out_root, "VR")
+
+            self.assertEqual(published, destination)
+            self.assertEqual(destination.read_bytes(), b"candidate")
+            self.assertFalse((out_root / f".{candidate.name}.publishing").exists())
+
     def test_runtime_publication_replaces_cache_and_removes_recovery_copy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
