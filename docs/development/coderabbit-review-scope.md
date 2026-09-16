@@ -9,7 +9,8 @@ Positive path filters cover:
 
 -   code, shaders, tests, scripts, configuration, and documentation by source
     extension;
--   known extensionless source and policy files;
+-   known extensionless source and policy files, including the exact tracked
+    `.githooks/pre-commit` hook;
 -   root and nested hidden policy files that require literal hidden-path
     coverage; and
 -   the two checked-in render-scale CSV evidence ledgers.
@@ -42,9 +43,16 @@ configuration changes.
 | `.github/actions/view.min.js.map`                        | Exclude | Configured and default exclusion |
 | `.github/actions/package-lock.json`                      | Exclude | Configured and default exclusion |
 | `.githooks/helper.dll`                                   | Exclude | Configured and default exclusion |
+| `.githooks/pre-commit.bin`                               | Exclude | No source positive               |
+| `.githooks/post-checkout.dds`                            | Exclude | No source positive               |
+| `.githooks/pre-commit.svg`                               | Exclude | No source positive               |
 | `package/example.nif`                                    | Exclude | Configured game-asset exclusion  |
 
 The output examples deliberately exercise positive/negative overlap where
 their extensions also look like source. CodeRabbit's selected-file response is
 the final integration check; a schema pass alone does not establish selection
 semantics.
+
+Hook files are named individually. Adding another hook therefore requires an
+explicit source entry instead of a prefix wildcard that could re-admit binary,
+media, or generated output with a hook-like basename.
