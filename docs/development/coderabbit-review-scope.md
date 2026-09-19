@@ -16,9 +16,9 @@ Positive path filters cover:
 -   the two checked-in render-scale CSV evidence ledgers.
 
 Custom negative filters independently exclude build, dependency, generated,
-binary, lock, minified, source-map, media, and game-asset outputs. They are
-retained even where CodeRabbit currently supplies the same default so a broad
-source-extension positive cannot re-admit those files.
+binary, archive, lock, minified, source-map, media, font, and game-asset
+outputs. They are retained even where CodeRabbit currently supplies the same
+default so a broad source-extension positive cannot re-admit those files.
 
 When a file matches both a source positive and an output negative, exclusion is
 the required outcome. This is the bounded mixed-rule behavior to re-check after
@@ -42,10 +42,11 @@ configuration changes.
 | `.github/actions/view.min.css`                           | Exclude | Configured and default exclusion |
 | `.github/actions/view.min.js.map`                        | Exclude | Configured and default exclusion |
 | `.github/actions/package-lock.json`                      | Exclude | Configured and default exclusion |
+| `docs/development/generated-unified-preset-report.json`  | Exclude | Exact generated-report exclusion |
 | `.githooks/helper.dll`                                   | Exclude | Configured and default exclusion |
-| `.githooks/pre-commit.bin`                               | Exclude | No source positive               |
-| `.githooks/post-checkout.dds`                            | Exclude | No source positive               |
-| `.githooks/pre-commit.svg`                               | Exclude | No source positive               |
+| `.githooks/pre-commit.bin`                               | Exclude | Configured binary exclusion      |
+| `.githooks/post-checkout.dds`                            | Exclude | Configured game-asset exclusion  |
+| `.githooks/pre-commit.svg`                               | Exclude | Configured image exclusion       |
 | `package/example.nif`                                    | Exclude | Configured game-asset exclusion  |
 
 The output examples deliberately exercise positive/negative overlap where
