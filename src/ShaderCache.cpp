@@ -64,11 +64,7 @@ namespace SIE
 
 		std::string NormalizedPathKey(const std::filesystem::path& a_path)
 		{
-			std::string key = a_path.lexically_normal().string();
-#ifdef _WIN32
-			std::transform(key.begin(), key.end(), key.begin(), [](unsigned char a_char) { return static_cast<char>(std::tolower(a_char)); });
-#endif
-			return key;
+			return Util::ShaderSourceProvenance::NormalizedPathKey(a_path);
 		}
 
 		void FoldClosureFingerprint(
@@ -138,37 +134,13 @@ namespace SIE
 
 				std::string line;
 				while (std::getline(ifs, line)) {
-					size_t pos = line.find_first_not_of(" \t");
-					if (pos == std::string::npos || line[pos] != '#')
+					const auto directive = Util::ShaderSourceProvenance::ParseIncludeDirective(line);
+					if (!directive)
 						continue;
-
-					pos = line.find_first_not_of(" \t", pos + 1);
-					if (pos == std::string::npos || line.compare(pos, 7, "include") != 0)
-						continue;
-
-					// Accept both quoted and angle-bracket includes; under-tracking either
-					// form risks serving a stale cache, which the textual scan must never do.
-					const size_t afterInclude = pos + 7;
-					const size_t firstDelim = line.find_first_of("\"<", afterInclude);
-					if (firstDelim == std::string::npos)
-						continue;
-
-					const char closeDelim = line[firstDelim] == '"' ? '"' : '>';
-					const size_t secondDelim = line.find(closeDelim, firstDelim + 1);
-					if (secondDelim == std::string::npos || secondDelim == firstDelim + 1)
-						continue;
-
-					const std::string includeName = line.substr(firstDelim + 1, secondDelim - firstDelim - 1);
-
-					std::error_code rootEc, parentEc;
-					std::filesystem::path includePath = a_shadersRoot / includeName;
-					if (!std::filesystem::is_regular_file(includePath, rootEc)) {
-						includePath = a_path.parent_path() / includeName;
-						if (!std::filesystem::is_regular_file(includePath, parentEc))
-							continue;
+					if (auto includePath = Util::ShaderSourceProvenance::ResolveIncludePath(
+							directive->type, directive->name, a_path, a_shadersRoot)) {
+						includes.push_back(std::move(*includePath));
 					}
-
-					includes.push_back(std::move(includePath));
 				}
 
 				std::lock_guard lock(a_parseCacheMutex);
@@ -198,6 +170,14 @@ namespace SIE
 		};
 		std::unordered_map<std::string, ShaderClosureCacheEntry> g_shaderClosureCache;
 		std::mutex g_shaderClosureCacheMutex;
+		struct ClosureDigestEntry
+		{
+			std::uint64_t generation;
+			Util::ContentHash::Hash128 closureFingerprint;
+			Util::ContentHash::Hash128 digest;
+		};
+		std::unordered_map<std::string, ClosureDigestEntry> g_shaderClosureDigestCache;
+		std::mutex g_shaderClosureDigestCacheMutex;
 
 		void InvalidateShaderSourceCaches()
 		{
@@ -210,6 +190,10 @@ namespace SIE
 			{
 				std::lock_guard lock(g_shaderClosureCacheMutex);
 				g_shaderClosureCache.clear();
+			}
+			{
+				std::lock_guard lock(g_shaderClosureDigestCacheMutex);
+				g_shaderClosureDigestCache.clear();
 			}
 		}
 
@@ -235,16 +219,6 @@ namespace SIE
 			std::shared_lock epochLock(g_shaderSourceEpochMutex);
 			return GetMaxShaderMTimeLocked(a_path, a_shadersRoot);
 		}
-
-		struct ClosureDigestEntry
-		{
-			std::uint64_t generation;
-			Util::ContentHash::Hash128 closureFingerprint;
-			Util::ContentHash::Hash128 digest;
-		};
-
-		std::unordered_map<std::string, ClosureDigestEntry> g_shaderClosureDigestCache;
-		std::mutex g_shaderClosureDigestCacheMutex;
 
 		std::optional<Util::ContentHash::Hash128> GetShaderContentDigestInternal(
 			const std::filesystem::path& a_path,
@@ -336,16 +310,7 @@ namespace SIE
 		{
 			std::shared_lock epochLock(g_shaderSourceEpochMutex);
 			if (a_refresh) {
-				// Compiler input verification must observe edits before the watcher
-				// catches up, including replacements that preserve file timestamps.
-				std::unordered_map<std::string, IncludeParseEntry> parseCache;
-				std::mutex parseCacheMutex;
-				std::unordered_map<std::string, std::chrono::system_clock::time_point> mtimeResults;
-				GetMaxShaderMTimeInternal(a_path, a_shadersRoot, parseCache, parseCacheMutex, mtimeResults);
-				std::unordered_map<std::string, std::optional<Util::ContentHash::Hash128>> digestResults;
-				bool complete = true;
-				return GetShaderContentDigestInternal(
-					a_path, a_shadersRoot, parseCache, parseCacheMutex, digestResults, complete);
+				return Util::ShaderSourceProvenance::ReadFreshClosureDigest(a_path, a_shadersRoot);
 			}
 			const auto generation = g_shaderSourceGeneration.load(std::memory_order_acquire);
 			Util::ContentHash::Hash128 fingerprint{};
@@ -901,7 +866,9 @@ namespace SIE
 			const Util::ContentHash::Hash128& a_compileStateDigest,
 			std::optional<Util::ContentHash::Hash128> a_sourceDigest = std::nullopt)
 		{
-			const auto sourceDigest = a_sourceDigest ? a_sourceDigest : GetShaderContentDigest(a_shaderPath, ShaderSourceRoot());
+			const auto sourceDigest = a_sourceDigest ?
+			                              a_sourceDigest :
+			                              GetShaderContentDigest(a_shaderPath, ShaderSourceRoot(), true);
 			if (!sourceDigest)
 				return std::nullopt;
 			auto compatibility = CSX::Api::GetShaderCompatibilityRequirementSet(
@@ -1162,47 +1129,76 @@ namespace SIE
 	class TrackingIncludeHandler : public ID3DInclude
 	{
 	public:
+		struct OpenedInclude
+		{
+			std::filesystem::path path;
+			std::vector<char> bytes;
+		};
+
 		// Captured include paths (normalized)
 		std::vector<std::string> includes;
 		// Owned buffers for include contents; kept alive for the lifetime of this handler
-		std::vector<std::vector<char>> buffers;
-		std::filesystem::path baseDir;
+		std::vector<OpenedInclude> buffers;
+		std::filesystem::path sourcePath;
+		std::filesystem::path shadersRoot;
 
-		TrackingIncludeHandler(const std::filesystem::path& base) :
-			baseDir(base) {}
+		TrackingIncludeHandler(
+			const std::filesystem::path& a_sourcePath,
+			const std::filesystem::path& a_shadersRoot) :
+			sourcePath(a_sourcePath), shadersRoot(a_shadersRoot) {}
 
-		HRESULT Open(D3D_INCLUDE_TYPE IncludeType, LPCSTR pFileName, LPCVOID /*pParentData*/, LPCVOID* ppData, UINT* pBytes) override
+		HRESULT Open(
+			D3D_INCLUDE_TYPE a_includeType,
+			LPCSTR a_fileName,
+			LPCVOID a_parentData,
+			LPCVOID* a_data,
+			UINT* a_bytes) override
 		{
-			(void)IncludeType;
+			if (!a_fileName || !a_data || !a_bytes)
+				return E_INVALIDARG;
+			*a_data = nullptr;
+			*a_bytes = 0;
 			try {
-				std::filesystem::path includePath = baseDir / pFileName;
-				// Normalize path to reduce duplicates (weakly_canonical may throw)
-				std::error_code ec;
-				auto canonical = std::filesystem::weakly_canonical(includePath, ec);
-				std::string pathStr = (ec ? includePath.string() : canonical.string());
-				// On Windows, normalize to lowercase for comparison
-#ifdef _WIN32
-				std::transform(pathStr.begin(), pathStr.end(), pathStr.begin(), [](unsigned char c) { return std::tolower(c); });
-#endif
-				includes.push_back(pathStr);
+				const std::filesystem::path* parentPath = &sourcePath;
+				if (a_parentData) {
+					const auto parent = std::find_if(buffers.begin(), buffers.end(), [&](const auto& a_buffer) {
+						return a_buffer.bytes.data() == a_parentData;
+					});
+					if (parent == buffers.end())
+						return E_FAIL;
+					parentPath = &parent->path;
+				}
+
+				Util::ShaderSourceProvenance::IncludeType provenanceType;
+				if (a_includeType == D3D_INCLUDE_LOCAL)
+					provenanceType = Util::ShaderSourceProvenance::IncludeType::Local;
+				else if (a_includeType == D3D_INCLUDE_SYSTEM)
+					provenanceType = Util::ShaderSourceProvenance::IncludeType::System;
+				else
+					return E_INVALIDARG;
+				const auto includePath = Util::ShaderSourceProvenance::ResolveIncludePath(
+					provenanceType, a_fileName, *parentPath, shadersRoot);
+				if (!includePath)
+					return E_FAIL;
 
 				// Read file into owned buffer
-				std::ifstream ifs(pathStr, std::ios::binary | std::ios::ate);
+				std::ifstream ifs(*includePath, std::ios::binary | std::ios::ate);
 				if (!ifs)
 					return E_FAIL;
-				std::streamsize size = ifs.tellg();
-				if (size < 0)
+				const std::streamsize size = ifs.tellg();
+				if (size < 0 || static_cast<std::uintmax_t>(size) > std::numeric_limits<UINT>::max())
 					return E_FAIL;
 				ifs.seekg(0, std::ios::beg);
-				std::vector<char> buf(static_cast<size_t>(size));
+				std::vector<char> buffer(std::max<std::streamsize>(size, 1));
 				if (size > 0) {
-					if (!ifs.read(buf.data(), size))
+					if (!ifs.read(buffer.data(), size))
 						return E_FAIL;
 				}
-				buffers.push_back(std::move(buf));
+				buffers.push_back(OpenedInclude{ *includePath, std::move(buffer) });
 				const auto& storage = buffers.back();
-				*ppData = storage.empty() ? nullptr : storage.data();
-				*pBytes = static_cast<UINT>(storage.size());
+				includes.push_back(Util::ShaderSourceProvenance::NormalizedPathKey(storage.path));
+				*a_data = storage.bytes.data();
+				*a_bytes = static_cast<UINT>(size);
 				return S_OK;
 			} catch (...) {
 				return E_FAIL;
@@ -2597,7 +2593,8 @@ namespace SIE
 						if (std::filesystem::exists(shaderSourcePath)) {
 							if (const auto sourceDigest = GetShaderContentDigest(
 									shaderSourcePath,
-									ShaderSourceRoot())) {
+									ShaderSourceRoot(),
+									true)) {
 								decidedByDigest = true;
 								const auto combined = Util::ContentHash::CombineHashes(
 									*sourceDigest,
@@ -2732,7 +2729,7 @@ namespace SIE
 			cache.MarkCompilationPhaseStarted(a_taskGeneration);
 
 			// Track includes
-			TrackingIncludeHandler includeHandler(std::filesystem::path(path).parent_path());
+			TrackingIncludeHandler includeHandler(path, ShaderSourceRoot());
 			HRESULT compileResult = E_FAIL;
 			const auto sourceDigest = Util::ShaderSourceProvenance::CompileWithStableDigest(
 				[&](bool a_refresh) { return GetShaderContentDigest(path, ShaderSourceRoot(), a_refresh); },
@@ -3343,6 +3340,7 @@ namespace SIE
 	void ShaderCache::Clear()
 	{
 		compilationSet.BumpGeneration();
+		InvalidateShaderSourceCaches();
 
 		{
 			std::unique_lock diskCacheLock{ g_diskCacheMutationMutex };

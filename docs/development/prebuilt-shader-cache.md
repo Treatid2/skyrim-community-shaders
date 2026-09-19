@@ -675,7 +675,8 @@ Before changing the pin:
 2. Compare CRLF normalization, XXH3-128 byte layout, ordered hash combine,
    include parsing, root-first include resolution, Windows path sorting,
    cycle handling, global compile-state text, manifest keys, and ImageSpace
-   source mapping with `src/Utils/ContentHash.h` and `src/ShaderCache.cpp`.
+   source mapping with `src/Utils/ContentHash.h`,
+   `src/Utils/ShaderSourceProvenance.h`, and `src/ShaderCache.cpp`.
 3. Keep `tools/build-shader-cache.py` validation aligned.
 4. If compatibility changes, increment the manifest schema in hlslkit, the
    builder, and `src/Utils/ShaderCacheManifest.h`.
@@ -764,6 +765,11 @@ rescans durable records before any subsequent lookup can use the lane.
 
 Bytecode keeps the source and compile-state digests and optimized/developer
 lane captured for that compilation, including across a deferred disk write.
+Before accepting any managed-pack or manifested loose-disk hit, runtime
+provenance reads the current source-closure bytes; an mtime cache is never
+final authority.
+Both provenance and the D3D include handler resolve quoted and angle includes
+from the shader root first, then from the actual including file's directory.
 The compiler checks its source closure again with fresh file reads before
 admitting the blob for persistence. A detected change or failed verification
 skips disk persistence; a later write never retags an earlier blob with newer

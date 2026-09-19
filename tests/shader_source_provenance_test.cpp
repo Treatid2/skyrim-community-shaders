@@ -34,6 +34,7 @@ namespace
 
 		static void Write(const std::filesystem::path& a_path, const std::string& a_text)
 		{
+			std::filesystem::create_directories(a_path.parent_path());
 			std::ofstream stream(a_path, std::ios::binary | std::ios::trunc);
 			stream << a_text;
 			stream.close();
@@ -52,7 +53,27 @@ namespace
 			}
 			return closure;
 		}
+
+		std::optional<Util::ContentHash::Hash128> ReadFreshDigest() const
+		{
+			return Util::ShaderSourceProvenance::ReadFreshClosureDigest(root, directory);
+		}
 	};
+
+	Util::ContentHash::Hash128 RequiredFileHash(const std::filesystem::path& a_path)
+	{
+		const auto hash = Util::ContentHash::HashFile(a_path);
+		assert(hash);
+		return *hash;
+	}
+
+	std::filesystem::path RequiredCanonical(const std::filesystem::path& a_path)
+	{
+		std::error_code error;
+		const auto canonical = std::filesystem::weakly_canonical(a_path, error);
+		assert(!error);
+		return canonical;
+	}
 }
 
 int main()
@@ -126,5 +147,65 @@ int main()
 		assert(compiled);
 	}
 	assert(readFailures == 2);
+
+	// Persistent admission must inspect current bytes even when mtimes and any
+	// prior in-memory digest hint remain unchanged.
+	for (const bool editRoot : { false, true }) {
+		SourceFixture sameTimestamp;
+		const auto before = sameTimestamp.ReadFreshDigest();
+		assert(before);
+		const auto& editedPath = editRoot ? sameTimestamp.root : sameTimestamp.include;
+		const auto timestamp = std::filesystem::last_write_time(editedPath);
+		SourceFixture::Write(
+			editedPath,
+			editRoot ? "#include \"Common.hlsli\"\nfloat4 main() { return VALUE + 1; }\n" :
+					   "#define VALUE 2\n");
+		std::filesystem::last_write_time(editedPath, timestamp);
+		const auto after = sameTimestamp.ReadFreshDigest();
+		assert(after && after != before);
+		assert(sameTimestamp.ReadFreshDigest() == after);
+		assert(std::filesystem::last_write_time(editedPath) == timestamp);
+	}
+
+	// Both include forms are shader-root-first, with the actual including file's
+	// directory as fallback for nested local files.
+	SourceFixture resolution;
+	const auto shadersRoot = resolution.directory / "Shaders";
+	const auto source = shadersRoot / "Menu" / "Example.hlsl";
+	const auto rootCommon = shadersRoot / "Common.hlsli";
+	const auto localCommon = shadersRoot / "Menu" / "Common.hlsli";
+	SourceFixture::Write(source, "#include \"Common.hlsli\"\nfloat4 main() { return VALUE; }\n");
+	SourceFixture::Write(rootCommon, "#define VALUE 10\n");
+	SourceFixture::Write(localCommon, "#define VALUE 20\n");
+
+	using Util::ShaderSourceProvenance::IncludeType;
+	const auto resolvedLocal = Util::ShaderSourceProvenance::ResolveIncludePath(
+		IncludeType::Local, "Common.hlsli", source, shadersRoot);
+	const auto resolvedSystem = Util::ShaderSourceProvenance::ResolveIncludePath(
+		IncludeType::System, "Common.hlsli", source, shadersRoot);
+	assert(resolvedLocal == RequiredCanonical(rootCommon));
+	assert(resolvedSystem == RequiredCanonical(rootCommon));
+
+	const auto expectedCollisionDigest = Util::ContentHash::CombineHashes(
+		RequiredFileHash(source), RequiredFileHash(rootCommon));
+	assert(Util::ShaderSourceProvenance::ReadFreshClosureDigest(source, shadersRoot) == expectedCollisionDigest);
+
+	const auto systemSource = shadersRoot / "Menu" / "SystemExample.hlsl";
+	SourceFixture::Write(systemSource, "#include <Common.hlsli>\nfloat4 main() { return VALUE; }\n");
+	const auto expectedSystemDigest = Util::ContentHash::CombineHashes(
+		RequiredFileHash(systemSource), RequiredFileHash(rootCommon));
+	assert(Util::ShaderSourceProvenance::ReadFreshClosureDigest(systemSource, shadersRoot) == expectedSystemDigest);
+
+	const auto nestedSource = shadersRoot / "Menu" / "NestedExample.hlsl";
+	const auto nestedParent = shadersRoot / "Menu" / "Parent.hlsli";
+	const auto nestedLeaf = shadersRoot / "Menu" / "LocalOnly" / "Leaf.hlsli";
+	SourceFixture::Write(nestedSource, "#include \"Menu/Parent.hlsli\"\nfloat4 main() { return VALUE; }\n");
+	SourceFixture::Write(nestedParent, "#include \"LocalOnly/Leaf.hlsli\"\n");
+	SourceFixture::Write(nestedLeaf, "#define VALUE 30\n");
+	const auto nestedClosure = Util::ContentHash::CombineHashes(
+		RequiredFileHash(nestedParent), RequiredFileHash(nestedLeaf));
+	const auto expectedNestedDigest = Util::ContentHash::CombineHashes(
+		RequiredFileHash(nestedSource), nestedClosure);
+	assert(Util::ShaderSourceProvenance::ReadFreshClosureDigest(nestedSource, shadersRoot) == expectedNestedDigest);
 	return 0;
 }

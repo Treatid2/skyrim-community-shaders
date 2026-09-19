@@ -1868,6 +1868,7 @@ if(BUILD_CONTROLLER_TESTS)
         ShaderSourceProvenance
         tests/shader_source_provenance_test.cpp
     )
+    target_link_libraries(shader_source_provenance_test PRIVATE xxHash::xxhash)
     add_controller_test(
         generation_claim_test
         GenerationClaim
