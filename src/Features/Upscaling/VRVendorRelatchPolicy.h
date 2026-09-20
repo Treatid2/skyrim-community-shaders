@@ -2517,6 +2517,84 @@ namespace VRVendorRelatchPolicy
 		bool fallbackActive = false;
 	};
 
+	using StartupNativeFallbackAtomicState = std::uint8_t;
+	inline constexpr StartupNativeFallbackAtomicState
+		kStartupNativeFallbackInactive = 0;
+	inline constexpr StartupNativeFallbackAtomicState
+		kStartupNativeFallbackActive = 1u << 0;
+	inline constexpr StartupNativeFallbackAtomicState
+		kStartupNativeFallbackRetryInvalidated = 1u << 1;
+
+	[[nodiscard]] constexpr bool IsStartupNativeFallbackActive(
+		StartupNativeFallbackAtomicState a_state) noexcept
+	{
+		return (a_state & kStartupNativeFallbackActive) != 0;
+	}
+
+	[[nodiscard]] constexpr bool IsStartupNativeFallbackRetryInvalidated(
+		StartupNativeFallbackAtomicState a_state) noexcept
+	{
+		return (a_state & kStartupNativeFallbackRetryInvalidated) != 0;
+	}
+
+	inline void SetStartupNativeFallbackActive(
+		std::atomic<StartupNativeFallbackAtomicState>& a_state,
+		bool a_active) noexcept
+	{
+		if (a_active) {
+			a_state.fetch_or(
+				kStartupNativeFallbackActive,
+				std::memory_order_acq_rel);
+			return;
+		}
+
+		auto observed = a_state.load(std::memory_order_acquire);
+		while (!IsStartupNativeFallbackRetryInvalidated(observed) &&
+			   IsStartupNativeFallbackActive(observed)) {
+			const auto desired = static_cast<StartupNativeFallbackAtomicState>(
+				observed & ~kStartupNativeFallbackActive);
+			if (a_state.compare_exchange_weak(
+					observed,
+					desired,
+					std::memory_order_acq_rel,
+					std::memory_order_acquire)) {
+				return;
+			}
+		}
+	}
+
+	inline void InvalidateStartupNativeFallbackRetry(
+		std::atomic<StartupNativeFallbackAtomicState>& a_state) noexcept
+	{
+		a_state.fetch_or(
+			static_cast<StartupNativeFallbackAtomicState>(
+				kStartupNativeFallbackActive |
+				kStartupNativeFallbackRetryInvalidated),
+			std::memory_order_acq_rel);
+	}
+
+	// Resolution and device-loss invalidation operate on one atomic word. If
+	// invalidation wins, resolution fails; if resolution wins, invalidation
+	// immediately rearms fallback in the same state transition.
+	[[nodiscard]] inline bool TryResolveStartupNativeFallbackAtomic(
+		std::atomic<StartupNativeFallbackAtomicState>& a_state) noexcept
+	{
+		auto observed = a_state.load(std::memory_order_acquire);
+		while (IsStartupNativeFallbackActive(observed) &&
+			   !IsStartupNativeFallbackRetryInvalidated(observed)) {
+			const auto desired = static_cast<StartupNativeFallbackAtomicState>(
+				observed & ~kStartupNativeFallbackActive);
+			if (a_state.compare_exchange_weak(
+					observed,
+					desired,
+					std::memory_order_acq_rel,
+					std::memory_order_acquire)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	// The owner must hold its publication locks while applying this state change.
 	// Keeping proof and mutation together makes stale authority fail closed.
 	[[nodiscard]] constexpr bool TryResolveStartupNativeFallback(

@@ -3060,6 +3060,55 @@ namespace
 		       authority.fallbackActive;
 	}
 
+	bool CoversStartupNativeFallbackAtomicInvalidation()
+	{
+		using State = StartupNativeFallbackAtomicState;
+		std::atomic<State> state{ kStartupNativeFallbackActive };
+
+		if (!TryResolveStartupNativeFallbackAtomic(state) ||
+			IsStartupNativeFallbackActive(state.load(std::memory_order_acquire)) ||
+			TryResolveStartupNativeFallbackAtomic(state)) {
+			return false;
+		}
+
+		SetStartupNativeFallbackActive(state, true);
+		InvalidateStartupNativeFallbackRetry(state);
+		auto observed = state.load(std::memory_order_acquire);
+		if (!IsStartupNativeFallbackActive(observed) ||
+			!IsStartupNativeFallbackRetryInvalidated(observed) ||
+			TryResolveStartupNativeFallbackAtomic(state)) {
+			return false;
+		}
+
+		// These two operations are the complete concurrent boundary. Regardless of
+		// which wins, invalidation must leave terminal fallback armed.
+		for (std::uint32_t iteration = 0; iteration < 128; ++iteration) {
+			state.store(kStartupNativeFallbackActive, std::memory_order_release);
+			std::binary_semaphore resolveStart{ 0 };
+			std::binary_semaphore invalidateStart{ 0 };
+			std::thread resolver([&] {
+				resolveStart.acquire();
+				(void)TryResolveStartupNativeFallbackAtomic(state);
+			});
+			std::thread invalidator([&] {
+				invalidateStart.acquire();
+				InvalidateStartupNativeFallbackRetry(state);
+			});
+			resolveStart.release();
+			invalidateStart.release();
+			resolver.join();
+			invalidator.join();
+
+			observed = state.load(std::memory_order_acquire);
+			if (!IsStartupNativeFallbackActive(observed) ||
+				!IsStartupNativeFallbackRetryInvalidated(observed)) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
 	constexpr bool CoversBoundedPostMutationRecovery()
 	{
 		PostMutationRecoveryAdmission state{
@@ -3980,7 +4029,8 @@ int main()
 {
 	return CoversVendorResetFailureCommitTransaction() &&
 	               CoversPostFailureVendorResetIdentity() &&
-	               CoversPreBoundVendorResetFailureIdentity() ?
+	               CoversPreBoundVendorResetFailureIdentity() &&
+	               CoversStartupNativeFallbackAtomicInvalidation() ?
 	           0 :
 	           1;
 }
