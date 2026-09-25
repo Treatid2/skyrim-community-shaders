@@ -17,8 +17,10 @@ Positive path filters cover:
 
 Custom negative filters independently exclude build, dependency, generated,
 binary, archive, lock, minified, source-map, media, font, and game-asset
-outputs. They are retained even where CodeRabbit currently supplies the same
-default so a broad source-extension positive cannot re-admit those files.
+outputs. This includes source-shaped framework output in dot-directories and
+the vendored FidelityFX and ENB SDK header trees. The negatives are retained
+even where CodeRabbit currently supplies the same default so a broad source-
+extension positive cannot re-admit those files.
 
 When a file matches both a source positive and an output negative, exclusion is
 the required outcome. This is the bounded mixed-rule behavior to re-check after
@@ -38,6 +40,10 @@ configuration changes.
 | `docs/development/vr-render-scale-comparison-ledger.csv` | Include | Checked-in evidence exception    |
 | `out/Release/output.hlsl`                                | Exclude | Configured output exclusion      |
 | `.github/actions/build/build/output.hlsl`                | Exclude | Configured build exclusion       |
+| `.next/cache/manifest.json`                              | Exclude | Configured framework output      |
+| `.yarn/plugins/plugin.js`                                | Exclude | Configured dependency output     |
+| `include/FidelityFX/api/include/ffx_api.h`               | Exclude | Vendored SDK header              |
+| `include/ENB/ENBSeriesSDK.h`                             | Exclude | Vendored SDK header              |
 | `.githooks/helper.exe`                                   | Exclude | Configured and default exclusion |
 | `.github/actions/view.min.css`                           | Exclude | Configured and default exclusion |
 | `.github/actions/view.min.js.map`                        | Exclude | Configured and default exclusion |
