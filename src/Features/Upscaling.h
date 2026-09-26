@@ -10,8 +10,11 @@
 #include "Upscaling/VRPresentationStretchTelemetryPolicy.h"
 #include "Upscaling/VRRenderScaleAuthorityPolicy.h"
 #include "Upscaling/VRRenderScalePreparationPolicy.h"
+#include "Upscaling/VRSubmitColorContract.h"
 #include "Upscaling/VRSubmitInputFreshnessPolicy.h"
 #include "Upscaling/VRSubmitInputReusePolicy.h"
+#include "Upscaling/VRSubmitStereoBatch.h"
+#include "Upscaling/VRSubmitTemporalSnapshot.h"
 #include "Upscaling/VRVendorRelatchPolicy.h"
 #include "Utils/LazyShader.h"
 #include "VR/InSceneOverlaySubmitPolicy.h"
@@ -304,6 +307,7 @@ public:
 		uint qualityMode = 3;            // Shared upscaler preset; defaults to Quality
 		uint dlssPreset = kDLSSPresetK;  // Settings ids: J, K, L, M, F, E (default K)
 		uint renderScaleMode = 1;
+		bool renderScaleLinkedToUpscaling = true;
 		uint perfMode = 1;
 		uint frameLimitMode = 1;
 		uint frameGenerationMode = 0;  // Disabled by default
@@ -311,8 +315,13 @@ public:
 		bool frameGenerationAllowInMenus = false;
 		uint streamlineLogLevel = 0;  // 0=Off, 1=Default, 2=Verbose
 		float sharpnessFSR = 0.9f;
+		FSRTemporalTuningPolicy::Settings fsrTemporalTuning{};
 		float sharpnessDLSS = 0.9f;
 		uint dlssSharpener = static_cast<uint>(DLSSSharpenerMode::RCAS);
+		bool motionAdaptiveRCAS = false;
+		float motionSharpnessAdjustment = -0.5f;
+		float motionSharpnessThreshold = 2.0f;
+		float motionSharpnessCap = 1.0f;
 		bool fsr4RuntimeEnable = true;
 		uint fsr4RuntimeSelectionSchemaVersion = kFsr4RuntimeSelectionSchemaVersion;
 		bool pipelineDiagnostics = false;
@@ -579,6 +588,7 @@ public:
 		uint64_t preparationOptionsGeneration = 0;
 		UpscaleMethod method = UpscaleMethod::kNONE;
 		uint32_t qualityMode = 0;
+		bool renderScaleModePreference = false;
 		bool renderScaleModeEnabled = false;
 		uint32_t dlssPreset = kDLSSPresetK;
 		bool perfModeEnabled = false;
@@ -1592,6 +1602,7 @@ public:
 		float dlssSharpness = 0.0f;
 		float fsrSharpness = 0.0f;
 		float renderScale = 1.0f;
+		bool renderScaleModePreference = false;
 		bool renderScaleModeEnabled = false;
 		bool perfModeEnabled = false;
 		bool fsr4RuntimeEnabled = false;
@@ -1761,6 +1772,10 @@ public:
 		FSRActiveInputCopyCalls,
 		FSRActiveInputPixels,
 		FSRAvoidedInputPixels,
+		FSRDirectGuideInputs,
+		FSRDirectGuidePixels,
+		FSRGuideCopyFallbacks,
+		FSRGuideImportFailures,
 		RuntimeFSRStereoBatchAttempts,
 		RuntimeFSRStereoBatchReuses,
 		RuntimeFSRStereoBatchSuccesses,
@@ -2181,6 +2196,9 @@ public:
 		uint32_t a_fallbackMethod);
 	virtual json CapturePerformanceCostMeasurementState() const override;
 	virtual void RestorePerformanceCostMeasurementState(const json& a_state) override;
+	void DrawVRRenderScaleLinkSetting(UpscaleMethod a_upscaleMethod);
+	/** Apply the shared menu/API link policy without bypassing transition admission. */
+	bool SetRenderScaleLinkedToUpscaling(bool a_enabled);
 	void DrawFoveatedSetupInstructions();
 	void DrawFoveatedSettings(bool a_essentialsLayout = false);
 	virtual void SaveSettings(json& o_json) override;
@@ -2229,6 +2247,8 @@ public:
 #endif
 	/** @brief Resolve material mip bias from the active resolution owner or OpenComposite Unleashed. */
 	float ResolveRuntimeMipBias(bool a_temporal);
+	/** Validates and queues an optional FSR reconstruction profile without changing resolution. */
+	bool SetFSRTemporalTuningSettings(const FSRTemporalTuningPolicy::Settings& a_settings);
 	// Refresh both the cached plan and restart-required state from the current VR render-scale settings.
 	void RefreshRuntimeResolutionState();
 	// Read-side helper: avoid rebuilding the cached plan multiple times in one frame.
@@ -2237,6 +2257,9 @@ public:
 	// Rebuild only the cached plan from already-latched state; backend dispatch code must only read the cached plan.
 	void RefreshRuntimeResolutionPlan();
 	bool IsRenderScaleModeRequested() const;
+	/** Return saved intent while native AA suspends physical Render Scale. */
+	bool GetVRRenderScaleModePreference() const;
+	bool GetVRRenderScalePreferenceForSelection(UpscaleMethod a_targetMethod) const;
 	bool GetVRRenderScaleModeRequested() const;
 	bool CanUseVRRenderScaleMode() const;
 	bool IsVRRenderScaleModeLatched() const;
@@ -2250,6 +2273,7 @@ public:
 	}
 	bool IsVRStartupNativeFallbackSavedIntentActive() const;
 	bool CanRetryVRStartupNativeFallbackFromCSMenu(bool a_forceMemorySample = false);
+	/** Explicit VR intent uses atomic admission; a_allowDefer applies only outside VR. */
 	void SetVRRenderScaleModeRequested(bool a_enabled, const char* a_reason = nullptr, bool a_allowDefer = false, VRUpscalingTransitionOrigin a_origin = VRUpscalingTransitionOrigin::CSMenu);
 	bool IsPerfModeActive() const;
 	bool IsPerfModePresentationActive() const;
@@ -2524,12 +2548,14 @@ public:
 
 	// Helper: Create a Texture2D matching source format at a given size
 	static eastl::unique_ptr<Texture2D> CreateTextureFromSource(ID3D11Resource* src, uint32_t width, uint32_t height,
-		bool copyBindFlags = false, bool createSRV = false, bool createUAV = false, const char* name = nullptr, bool createRTV = false);
+		bool copyBindFlags = false, bool createSRV = false, bool createUAV = false, const char* name = nullptr, bool createRTV = false, bool shareWithRuntime = false);
 
 	// Shared Pipeline Steps
 	bool PreparePerEyeInputs(ID3D11Resource* colorSrc, ID3D11Resource* depthSrc, ID3D11Resource* mvecSrc,
 		ID3D11Resource* reactiveSrc, ID3D11Resource* transparencySrc, bool copyAuxiliaryInputs = true, bool copyDepthInput = true);
 	bool AreVRPerEyeUpscalingResourcesReady(bool requireDepth, bool requireLinearDepth) const;
+	/** Rejects any guide retained by an unsafe optional-provider ownership domain. */
+	bool HasQuarantinedVRGuideInputs() const;
 	bool AreVRIntermediateTexturesCompatibleForFSR(uint32_t a_displayEyeWidth, uint32_t a_displayEyeHeight) const;
 	bool AreActiveVRIntermediateTexturesCompatible(
 		UpscaleMethod a_upscaleMethod,
@@ -2560,7 +2586,8 @@ public:
 		bool a_compositeCommittedMenuLayer = false);
 	void PresentVRMenuDesktopMirror(IDXGISwapChain* a_swapChain);
 	bool EnsureSubmitStageDLSSSharpenerTexture(uint32_t eyeIndex, const Texture2D& colorOutput);
-	bool ApplySubmitStageDLSSSharpening(uint32_t eyeIndex, const Texture2D& sharpenInput);
+	bool ApplySubmitStageDLSSSharpening(uint32_t eyeIndex, const Texture2D& sharpenInput,
+		ID3D11ShaderResourceView* motionVectors, const MotionSharpening::Region& motionRegion);
 
 	void ConfigureTAA();
 	void ConfigureUpscaling(RE::BSGraphics::State* a_state);
@@ -3070,7 +3097,46 @@ public:
 	PerfModeState::BootSnapshot pendingVRRenderScaleRecoverySnapshot{};
 	std::atomic<bool> vrDLSSSettingsRelatched{ false };
 	mutable std::atomic_bool submitStageDeviceLost{ false };
+	struct SubmitEyeCamera
+	{
+		Matrix viewInverse{};
+		Matrix projectionUnjittered{};
+		Matrix viewProjectionUnjittered{};
+		Matrix previousViewProjectionUnjittered{};
+		float4 position{};
+		float4 previousPosition{};
+	};
+	using SubmitTemporalSnapshot = VRSubmitTemporalSnapshot::Snapshot<SubmitEyeCamera>;
+	struct SubmitTemporalInputs
+	{
+		SubmitTemporalSnapshot snapshot;
+		winrt::com_ptr<ID3D11Texture2D> depth;
+		winrt::com_ptr<ID3D11Texture2D> motion;
+	};
+
+private:
+	mutable std::mutex submitTemporalInputsMutex;
+	SubmitTemporalInputs submitTemporalInputs;
+	std::atomic_uint64_t submitTemporalCompositorCycle{ 0 };
+	inline static thread_local const SubmitTemporalSnapshot* submitTemporalDispatchSnapshot = nullptr;
+	inline static thread_local const VRSubmitColorContract::Contract* submitColorDispatchContract = nullptr;
+
+public:
+	/** Captures both world cameras before post-processing can replace engine constants. */
+	void CaptureSubmitTemporalSnapshot();
+	void InvalidateSubmitTemporalSnapshot();
+	/** Only submit dispatches consume frozen inputs; ordinary rendering retains its own camera. */
+	const SubmitTemporalSnapshot* GetSubmitTemporalSnapshotForDispatch() const noexcept { return submitTemporalDispatchSnapshot; }
+	const VRSubmitColorContract::Contract* GetSubmitColorContractForDispatch() const noexcept { return submitColorDispatchContract; }
+	/** Resolves one jitter source for vendor constants and foveated processing. */
+	float2 GetJitterForDispatch() const noexcept
+	{
+		if (const auto* snapshot = GetSubmitTemporalSnapshotForDispatch())
+			return { snapshot->scalars.jitterX, snapshot->scalars.jitterY };
+		return jitter;
+	}
 	uint32_t submitStagePreparedFrame = std::numeric_limits<uint32_t>::max();
+	uint64_t submitStagePreparedCycle = 0;
 	uint32_t submitStagePreparedGeneration = 0;
 	bool submitStagePreparedFramePresentationOnly = false;
 	bool submitStagePreparedFrameFoveatedRegionEncode = false;
@@ -3090,6 +3156,7 @@ public:
 	uint64_t submitStageVendorAdmissionCycle = 0;
 	uint32_t submitStageVendorAdmissionGeneration = 0;
 	uint32_t submitStageVendorAdmissionMethod = static_cast<uint32_t>(UpscaleMethod::kNONE);
+	VRSubmitColorContract::Contract submitStageVendorAdmissionColorContract{};
 	bool submitStageVendorAdmissionPresentationOnly = true;
 	bool submitStageVendorAdmissionExactProviderReady = false;
 	bool submitStageVendorAdmissionAuthoritativeDLSSProfile = false;
@@ -3110,6 +3177,7 @@ public:
 		uint64_t menuLayerGeneration = 0;
 		uint32_t method = static_cast<uint32_t>(UpscaleMethod::kNONE);
 		uint32_t generation = 0;
+		VRSubmitColorContract::Contract colorContract{};
 		uint32_t inputWidth = 0;
 		uint32_t inputHeight = 0;
 		uint32_t outputWidth = 0;
@@ -3134,6 +3202,7 @@ public:
 	{
 		bool ready = false;
 		uint32_t frame = std::numeric_limits<uint32_t>::max();
+		uint64_t compositorCycle = 0;
 		uint32_t method = static_cast<uint32_t>(UpscaleMethod::kNONE);
 		uint32_t generation = 0;
 		uint32_t qualityMode = 0;
@@ -3165,100 +3234,51 @@ public:
 		ID3D11Resource* transparencyMaskIn = nullptr;
 		ID3D11Resource* colorOut = nullptr;
 	};
-	struct SubmitStageRuntimeFSRStereoState
+	using SubmitStageRuntimeFSRStereoBatch = VRSubmitStereoBatch::State<ID3D11Resource, ID3D11Texture2D, FidelityFX::UpscaleRegionParameters
+#ifdef DEVBENCH_BRIDGE_ENABLED
+		,
+		FidelityFX::RuntimeUpscalerDispatchSnapshot
+#endif
+		>;
+	/** Adds retained source ownership and exact pair admission to the batch cache. */
+	struct SubmitStageRuntimeFSRStereoState : SubmitStageRuntimeFSRStereoBatch
 	{
-		bool ready = false;
 		VRSubmitInputFreshnessPolicy::ProducerProof inputProof{};
-		uint32_t frame = std::numeric_limits<uint32_t>::max();
-		uint32_t generation = 0;
-		uint32_t inputWidth = 0;
-		uint32_t inputHeight = 0;
-		uint32_t outputWidth = 0;
-		uint32_t outputHeight = 0;
-		ID3D11Texture2D* sourceTexture = nullptr;
 		winrt::com_ptr<ID3D11Texture2D> sourceTextureOwner;
 		winrt::com_ptr<ID3D11Texture2D> sourceDepthOwner;
 		winrt::com_ptr<ID3D11Texture2D> sourceMotionVectorOwner;
-		std::array<ID3D11Resource*, 2> colorIn{};
-		std::array<ID3D11Resource*, 2> depthIn{};
-		std::array<ID3D11Resource*, 2> motionVectorsIn{};
-		std::array<ID3D11Resource*, 2> reactiveMaskIn{};
-		std::array<ID3D11Resource*, 2> transparencyMaskIn{};
-		std::array<ID3D11Resource*, 2> colorOut{};
 
 		[[nodiscard]] bool Matches(
 			const VRSubmitInputFreshnessPolicy::ProducerProof& a_inputProof,
-			uint32_t a_frame,
-			uint32_t a_generation,
-			uint32_t a_inputWidth,
-			uint32_t a_inputHeight,
-			uint32_t a_outputWidth,
-			uint32_t a_outputHeight,
+			uint32_t a_frame, uint64_t a_compositorCycle, uint32_t a_generation,
+			uint32_t a_inputWidth, uint32_t a_inputHeight,
+			uint32_t a_outputWidth, uint32_t a_outputHeight,
 			ID3D11Texture2D* a_sourceTexture,
 			const std::array<FidelityFX::UpscaleRegionParameters, 2>& a_regions) const
 		{
-			if (!ready ||
-				!VRSubmitInputFreshnessPolicy::MatchesProducerProof(
-					inputProof, a_inputProof) ||
-				frame != a_frame || generation != a_generation ||
-				inputWidth != a_inputWidth || inputHeight != a_inputHeight ||
-				outputWidth != a_outputWidth || outputHeight != a_outputHeight ||
-				sourceTexture != a_sourceTexture ||
-				sourceTextureOwner.get() != a_sourceTexture ||
-				sourceDepthOwner.get() !=
-					reinterpret_cast<ID3D11Texture2D*>(a_inputProof.depthSource) ||
-				sourceMotionVectorOwner.get() !=
-					reinterpret_cast<ID3D11Texture2D*>(
-						a_inputProof.motionVectorSource)) {
-				return false;
-			}
-
-			for (uint32_t eye = 0; eye < a_regions.size(); ++eye) {
-				const auto& region = a_regions[eye];
-				if (colorIn[eye] != region.color || depthIn[eye] != region.depth ||
-					motionVectorsIn[eye] != region.motionVectors || reactiveMaskIn[eye] != region.reactiveMask ||
-					transparencyMaskIn[eye] != region.transparencyCompositionMask || colorOut[eye] != region.output) {
-					return false;
-				}
-			}
-			return true;
+			return VRSubmitInputFreshnessPolicy::MatchesProducerProof(inputProof, a_inputProof) &&
+			       sourceTextureOwner.get() == a_sourceTexture &&
+			       sourceDepthOwner.get() == reinterpret_cast<ID3D11Texture2D*>(a_inputProof.depthSource) &&
+			       sourceMotionVectorOwner.get() == reinterpret_cast<ID3D11Texture2D*>(a_inputProof.motionVectorSource) &&
+			       SubmitStageRuntimeFSRStereoBatch::Matches(a_frame, a_compositorCycle, a_generation,
+					   a_inputWidth, a_inputHeight, a_outputWidth, a_outputHeight, a_sourceTexture, a_regions);
 		}
 
 		void Record(
 			const VRSubmitInputFreshnessPolicy::ProducerProof& a_inputProof,
-			uint32_t a_frame,
-			uint32_t a_generation,
-			uint32_t a_inputWidth,
-			uint32_t a_inputHeight,
-			uint32_t a_outputWidth,
-			uint32_t a_outputHeight,
+			uint32_t a_frame, uint64_t a_compositorCycle, uint32_t a_generation,
+			uint32_t a_inputWidth, uint32_t a_inputHeight,
+			uint32_t a_outputWidth, uint32_t a_outputHeight,
 			ID3D11Texture2D* a_sourceTexture,
-			const std::array<FidelityFX::UpscaleRegionParameters, 2>& a_regions)
+			const std::array<FidelityFX::UpscaleRegionParameters, 2>& a_regions,
+			const DispatchProof& a_dispatchProof = {})
 		{
-			ready = true;
 			inputProof = a_inputProof;
-			frame = a_frame;
-			generation = a_generation;
-			inputWidth = a_inputWidth;
-			inputHeight = a_inputHeight;
-			outputWidth = a_outputWidth;
-			outputHeight = a_outputHeight;
-			sourceTexture = a_sourceTexture;
 			sourceTextureOwner.copy_from(a_sourceTexture);
-			sourceDepthOwner.copy_from(
-				reinterpret_cast<ID3D11Texture2D*>(a_inputProof.depthSource));
-			sourceMotionVectorOwner.copy_from(
-				reinterpret_cast<ID3D11Texture2D*>(
-					a_inputProof.motionVectorSource));
-			for (uint32_t eye = 0; eye < a_regions.size(); ++eye) {
-				const auto& region = a_regions[eye];
-				colorIn[eye] = region.color;
-				depthIn[eye] = region.depth;
-				motionVectorsIn[eye] = region.motionVectors;
-				reactiveMaskIn[eye] = region.reactiveMask;
-				transparencyMaskIn[eye] = region.transparencyCompositionMask;
-				colorOut[eye] = region.output;
-			}
+			sourceDepthOwner.copy_from(reinterpret_cast<ID3D11Texture2D*>(a_inputProof.depthSource));
+			sourceMotionVectorOwner.copy_from(reinterpret_cast<ID3D11Texture2D*>(a_inputProof.motionVectorSource));
+			SubmitStageRuntimeFSRStereoBatch::Record(a_frame, a_compositorCycle, a_generation,
+				a_inputWidth, a_inputHeight, a_outputWidth, a_outputHeight, a_sourceTexture, a_regions, a_dispatchProof);
 		}
 	};
 	uint32_t submitStageVendorOutputFrame = std::numeric_limits<uint32_t>::max();
@@ -3269,6 +3289,7 @@ public:
 		std::numeric_limits<uint32_t>::max();
 	ID3D11Texture2D* submitStageVendorOutputSourceTexture = nullptr;
 	winrt::com_ptr<ID3D11Texture2D> submitStageVendorOutputSourceOwner;
+	VRSubmitColorContract::Contract submitStageVendorOutputColorContract{};
 	std::array<SubmitStageVendorEyeState, 2> submitStageVendorEyeState = {};
 	std::array<SubmitStageFoveatedCenterState, 2> submitStageFoveatedCenterState = {};
 	SubmitStageRuntimeFSRStereoState submitStageRuntimeFSRStereoState{};
@@ -3310,9 +3331,11 @@ public:
 	std::atomic<uint32_t> vrDLSSRapidTransitionCleanEyeMask{ 0 };
 	std::atomic_bool vrDLSSRapidTransitionGuardLogged{ false };
 	uint32_t submitStageMirrorFrame = std::numeric_limits<uint32_t>::max();
+	uint64_t submitStageMirrorCycle = 0;
 	std::array<bool, 2> submitStageMirrorEyeReady = {};
 	ID3D11Texture2D* submitStageMirrorSourceTexture = nullptr;
 	uint32_t submitStageFoveatedPeripheryTAAFrame = std::numeric_limits<uint32_t>::max();
+	uint64_t submitStageFoveatedPeripheryTAACycle = 0;
 	std::array<bool, 2> submitStageFoveatedPeripheryTAAEyeReady = {};
 	std::atomic_bool vrRenderScaleResourceTrackingSyncPending{ false };
 	void CopySharedD3D12Resources();
@@ -3423,7 +3446,7 @@ public:
 	void ClearVRRenderScaleMemoryRelief();
 	void ApplyVRRenderScaleMemoryReliefTransitionCleanup(const char* a_reason = nullptr, bool a_preserveVRIntermediateTextures = false);
 	void RecordVRRenderScaleFullEyeEvaluation(UpscaleMethod a_upscaleMethod, uint32_t a_eyeIndex, bool a_success);
-	bool RecordVRRenderScaleFidelityObservation(UpscaleMethod a_upscaleMethod, uint32_t a_eyeIndex, bool a_success, uint32_t a_generation, uint32_t a_inputWidth, uint32_t a_inputHeight, uint32_t a_outputWidth, uint32_t a_outputHeight, bool a_evaluated);
+	bool RecordVRRenderScaleFidelityObservation(UpscaleMethod a_upscaleMethod, uint32_t a_eyeIndex, bool a_success, uint32_t a_generation, uint32_t a_inputWidth, uint32_t a_inputHeight, uint32_t a_outputWidth, uint32_t a_outputHeight, bool a_evaluated, const SubmitStageRuntimeFSRStereoState* a_fsrBatch = nullptr);
 	void RecordVRDLSSRenderScaleRelatch(bool a_previousActive, bool a_currentActive, UpscaleMethod a_previousMethod, UpscaleMethod a_currentMethod, VRUpscalingTransitionOrigin a_origin, uint32_t a_frame);
 	bool ShouldBypassVRDLSSFoveatedForRapidTransition();
 	void ClearVRDLSSRapidTransitionGuard();
