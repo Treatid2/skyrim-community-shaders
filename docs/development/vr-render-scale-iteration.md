@@ -1,5 +1,44 @@
 # VR render-scale iteration records
 
+## 2026-09-10: submit contract integration review
+
+Rebased the submit input candidate onto `main-VR` at `ef7c366d`, retaining
+exact input freshness proofs, source COM ownership, and deferred FSR
+handling. The extracted batch cache retains dispatch evidence on reuse.
+Deferred presentation restores the color contract when resource replacement
+clears admission and rejects conflicting color metadata. Production-path
+regressions cover that recovery, Linear rejection, captured host temporal
+scalars, and normalized frame-zero evidence with distinct raw cache keys.
+The deferred color regression failed before the correction and passed after.
+
+This review generated no runtime measurement or candidate qualification
+report. The comparison ledger remains unchanged; the earlier build receipts
+do not qualify the rebased candidate for visual quality or performance.
+
+## 2026-09-09: submit input contracts
+
+The `fix/vr-submit-input-contracts` candidate freezes stereo camera metadata
+before post-processing and makes submit color transfer/range explicit.
+The scope, fallback behavior, and validation cases are recorded in
+[VR submit input contracts](vr-submit-input-contracts.md).
+Adversarial review tightened logical-frame admission, preserved FSR batch
+dispatch evidence across desktop Present, and prevented failed DLSS fallback
+from reopening old token publication. Snapshot ownership is private and
+dispatch jitter selection is shared. Regressions cover these production
+policy and cache boundaries.
+This is an implementation and policy-test record, not a runtime measurement.
+The comparison ledger has no new candidate column because an exact fixture
+and accepted baseline are not configured for this run. Runtime qualification
+must precede any visual-quality, stability, or performance claim.
+
+The optional runtime FSR shared-guide path and its session-only DevBench
+A/B switch are documented in [Runtime FSR shared guide inputs](fsr-shared-guides.md).
+It removes eligible full-eye guide staging copies while preserving the
+existing interop fences, copied fallback and quarantined ownership. This
+implementation has no performance claim or runtime qualification result;
+new measurements must use the existing comparison ledger and reporting
+workflow.
+
 The VR render-scale controller can capture a bounded CSX-menu stress session and write a versioned JSON record for an MCP/Ghidra optimization loop. The capture observes user-driven changes; it never changes render-scale settings itself.
 
 ## Capture workflow
@@ -55,6 +94,24 @@ has no new measured entry in `vr-render-scale-comparison-ledger.csv`:
 focused source and controller validation is recorded in that repair record,
 while runtime qualification remains outstanding. No candidate timing or
 qualification result has been inferred from the source change.
+
+### Render Scale selection link
+
+The optional [Render Scale selection link](vr-render-scale-link.md) separates
+remembered user intent from quality-gated physical activation. The
+`set_render_scale_link` action takes Boolean `enabled` and requires developer
+mode plus an active stress capture. Status exposes `renderScaleSelectionPolicy`;
+ordinary explicit `apply` profiles remain authoritative. The isolated forward
+port from `72b04290b` has no new live qualification or performance measurement.
+Consequently, no candidate measurement is added to the comparison ledger, and
+its historical results must not be treated as evidence for this change.
+
+The 2026-09-10 rebase onto `1afb9eca9` also preserves independent saved
+preferences when performance-measurement restoration rejects a physical
+transition. The rejection remains guarded and is logged with its reason.
+See the [link validation record](vr-render-scale-link.md#validation) for the
+24 restore scenarios and focused checks. This source review adds no runtime
+measurement or qualification result; the existing ledger remains unchanged.
 
 ### Controller actions
 
