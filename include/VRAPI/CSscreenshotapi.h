@@ -49,6 +49,8 @@ namespace CSX::ScreenshotAPI
 	 * threads are marshalled to Skyrim's runtime main thread with a bounded
 	 * queue-admission wait. Once execution begins, Dispatch waits for its
 	 * admission response so a transport failure can never precede mutation.
+	 * Failures after admission are returned as non-retryable JSON command
+	 * errors with a successful transport status.
 	 * Accepted capture work remains asynchronous and is observed through
 	 * request_get or events_poll.
 	 */
