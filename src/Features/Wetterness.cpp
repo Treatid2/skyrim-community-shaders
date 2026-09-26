@@ -4,6 +4,7 @@
 #include "State.h"
 #include "Utils/UI.h"
 #include "WeatherPicker.h"
+#include "Wetterness/PuddleMaskCachePolicy.h"
 
 #include <algorithm>
 #include <array>
@@ -15,6 +16,7 @@
 namespace
 {
 	constexpr uint32_t kWetnessPsSrvPrecipOcclusionSlot = 70u;
+	constexpr uint32_t kWetnessPsSrvPuddleMaskSlot = 71u;
 
 	// Reference depth-model constants used for wetness persistence behavior.
 	constexpr float RAIN_DELTA_PER_SECOND = 2.0f / 3600.0f;
@@ -118,6 +120,27 @@ namespace
 	constexpr float RAIN_EVENT_DECAY_SECONDS = 43200.0f;
 	constexpr float MIN_WETNESS_DRY_SCALE_AT_MAX_EVENT = 0.12f;
 	constexpr float RUNTIME_DRY_EPSILON = 1e-4f;
+
+	Wetterness::PuddleMaskMode SanitizePuddleMaskMode(int64_t value)
+	{
+		return value >= 0 && value <= static_cast<int64_t>(Wetterness::PuddleMaskMode::LegacyProcedural) ?
+		           static_cast<Wetterness::PuddleMaskMode>(value) :
+		           Wetterness::PuddleMaskMode::Textured;
+	}
+
+	Wetterness::PuddleMaskMode ResolveEffectivePuddleMaskMode(
+		Wetterness::PuddleMaskMode a_selectedMode,
+		bool a_resourceAvailable)
+	{
+		auto effectiveMode = SanitizePuddleMaskMode(static_cast<int64_t>(a_selectedMode));
+		if (!a_resourceAvailable &&
+			(effectiveMode == Wetterness::PuddleMaskMode::Textured ||
+				effectiveMode == Wetterness::PuddleMaskMode::TexturedHighQuality)) {
+			effectiveMode = Wetterness::PuddleMaskMode::Simple;
+		}
+		return effectiveMode;
+	}
+
 	struct WetternessUiPresetDefinition
 	{
 		const char* name;
@@ -182,6 +205,7 @@ namespace
 	Wetterness::PerFrame g_cachedCommonBufferData{};
 	bool g_hasCachedCommonBufferData = false;
 	uint32_t g_cachedCommonBufferFrame = 0;
+	std::uint64_t g_cachedCommonBufferPuddleMaskGeneration = 0;
 	REX::W32::XMFLOAT4X4 g_lastValidOcclusionViewProj{};
 	bool g_hasLastValidOcclusionViewProj = false;
 	uint32_t g_lastValidOcclusionViewProjFrame = 0;
@@ -1162,12 +1186,6 @@ static void DrawWeatherAnalysisLabel(const char* a_label)
 	ImGui::Spacing();
 }
 
-void Wetterness::SetupResources()
-{
-	// No authored puddle-mask resources are required.
-	// Puddle placement is generated procedurally in shader.
-}
-
 void Wetterness::ResetRuntimeState() const
 {
 	runtimeState = {};
@@ -1176,6 +1194,7 @@ void Wetterness::ResetRuntimeState() const
 	g_cachedCommonBufferData = {};
 	g_hasCachedCommonBufferData = false;
 	g_cachedCommonBufferFrame = 0;
+	g_cachedCommonBufferPuddleMaskGeneration = 0;
 	g_lastValidOcclusionViewProj = {};
 	g_hasLastValidOcclusionViewProj = false;
 	g_lastValidOcclusionViewProjFrame = 0;
@@ -1206,6 +1225,28 @@ void Wetterness::DrawEnabledCheckbox()
 	}
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::TextUnformatted("Enables wetness visuals. Off = no rain film, puddles, or shore wetness.");
+	}
+}
+
+void Wetterness::DrawPuddleMaskSettings()
+{
+	static constexpr const char* modeNames[] = {
+		"Simple",
+		"Textured",
+		"Textured High Quality",
+		"Legacy Procedural"
+	};
+	int selectedMode = static_cast<int>(puddleMaskMode);
+	if (ImGui::Combo("Puddle Mask", &selectedMode, modeNames, IM_ARRAYSIZE(modeNames))) {
+		puddleMaskMode = SanitizePuddleMaskMode(static_cast<uint32_t>(selectedMode));
+		InvalidateSanitizedSettingsCache();
+	}
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::TextUnformatted("Simple uses slope only, without puddle islands; Radius and Layout have no effect. Textured (default) uses one cached noise lookup. High Quality adds a second lookup for more variation. Legacy Procedural preserves the original 3D Perlin pattern at a higher shader cost.");
+	}
+	if ((puddleMaskMode == PuddleMaskMode::Textured || puddleMaskMode == PuddleMaskMode::TexturedHighQuality) &&
+		!puddleMaskSrv) {
+		ImGui::TextDisabled("Puddle mask texture unavailable; using Simple until resources are recreated.");
 	}
 }
 
@@ -1674,6 +1715,7 @@ void Wetterness::DrawSettings()
 
 		ImGui::Separator();
 		ImGui::TextUnformatted("Puddles");
+		DrawPuddleMaskSettings();
 
 		ImGui::SliderFloat("Puddle Wetness", &settings.MaxPuddleWetness, 0.0f, 6.0f);
 		markPresetDirtyIfEdited();
@@ -2033,6 +2075,8 @@ void Wetterness::DrawPerformanceSettings(bool a_advanced)
 		ImGui::EndTable();
 	}
 
+	DrawPuddleMaskSettings();
+
 	if (!a_advanced) {
 		return;
 	}
@@ -2082,7 +2126,8 @@ json Wetterness::CapturePerformanceSettingsState() const
 		{ "WetnessDistanceFadeRange", wetnessDistanceFadeRange },
 		{ "RainGrassGlossiness", rainGrassGlossiness },
 		{ "RainGrassSpecularStrength", rainGrassSpecularStrength },
-		{ "RainGrassDarkening", rainGrassDarkening }
+		{ "RainGrassDarkening", rainGrassDarkening },
+		{ "PuddleMaskMode", static_cast<uint32_t>(puddleMaskMode) }
 	};
 }
 
@@ -2129,6 +2174,7 @@ void Wetterness::RestorePerformanceCostMeasurementState(const json& a_state)
 	rainGrassGlossiness = a_state.value("RainGrassGlossiness", rainGrassGlossiness);
 	rainGrassSpecularStrength = a_state.value("RainGrassSpecularStrength", rainGrassSpecularStrength);
 	rainGrassDarkening = ClampRainGrassDarkening(a_state.value("RainGrassDarkening", rainGrassDarkening));
+	puddleMaskMode = SanitizePuddleMaskMode(JsonValueOr<int64_t>(a_state, "PuddleMaskMode", static_cast<int64_t>(puddleMaskMode)));
 	enableWeatherDrivenDryingModel = a_state.value("EnableWeatherDrivenDryingModel", enableWeatherDrivenDryingModel);
 
 	SanitizePersistentUiState(settings, modernWetIndirectSpecularScale, legacyWetIndirectSpecularScale, puddleDryingHours, puddleLayout, rainReflectionBalance, puddleSkyReflectionScale, postRainWaterClarity, shorePersistentDarkeningStrength, wetnessDistanceFadeRange);
@@ -2142,8 +2188,28 @@ Wetterness::PerFrame Wetterness::GetCommonBufferData() const
 {
 	const bool canUseFrameCache = globals::state != nullptr;
 	const uint32_t frameIndex = canUseFrameCache ? globals::state->frameCount : 0u;
-	if (canUseFrameCache && g_hasCachedCommonBufferData && g_cachedCommonBufferFrame == frameIndex) {
+	const PuddleMaskCachePolicy::Stamp currentCacheStamp{ frameIndex, puddleMaskResourceGeneration };
+	const PuddleMaskCachePolicy::Stamp cachedCacheStamp{
+		g_cachedCommonBufferFrame,
+		g_cachedCommonBufferPuddleMaskGeneration
+	};
+	const auto cacheDecision = PuddleMaskCachePolicy::Evaluate(
+		canUseFrameCache,
+		g_hasCachedCommonBufferData,
+		cachedCacheStamp,
+		currentCacheStamp);
+	if (cacheDecision == PuddleMaskCachePolicy::Decision::Reuse) {
 		return g_cachedCommonBufferData;
+	}
+	if (cacheDecision == PuddleMaskCachePolicy::Decision::RefreshResourcePublication) {
+		PerFrame data = g_cachedCommonBufferData;
+		data.PuddleMaskMode = static_cast<uint32_t>(
+			ResolveEffectivePuddleMaskMode(puddleMaskMode, puddleMaskSrv != nullptr));
+		g_lastFrameData = data;
+		g_hasLastFrameData = true;
+		g_cachedCommonBufferData = data;
+		g_cachedCommonBufferPuddleMaskGeneration = puddleMaskResourceGeneration;
+		return data;
 	}
 
 	if (!loaded || settings.EnableWetterness == 0u) {
@@ -2155,6 +2221,7 @@ Wetterness::PerFrame Wetterness::GetCommonBufferData() const
 			g_cachedCommonBufferData = data;
 			g_hasCachedCommonBufferData = true;
 			g_cachedCommonBufferFrame = frameIndex;
+			g_cachedCommonBufferPuddleMaskGeneration = puddleMaskResourceGeneration;
 		}
 		return data;
 	}
@@ -2563,6 +2630,8 @@ Wetterness::PerFrame Wetterness::GetCommonBufferData() const
 	data.GrassWetnessPhase = grassLightingWetnessPhase;
 	data.GrassWetRoughness = std::clamp(1.0f - wetGrassGlossiness * 0.01f, 0.0f, 1.0f);
 	data.GrassWetDarkeningStrength = ClampRainGrassDarkening(rainGrassDarkening);
+	data.PuddleMaskMode = static_cast<uint32_t>(
+		ResolveEffectivePuddleMaskMode(puddleMaskMode, puddleMaskSrv != nullptr));
 	const float activePuddleSkyReflectionScale = masterWetnessEnabled ?
 	                                                 ClampFiniteOrDefault(
 														 puddleSkyReflectionScale,
@@ -2623,6 +2692,7 @@ Wetterness::PerFrame Wetterness::GetCommonBufferData() const
 		g_cachedCommonBufferData = data;
 		g_hasCachedCommonBufferData = true;
 		g_cachedCommonBufferFrame = frameIndex;
+		g_cachedCommonBufferPuddleMaskGeneration = puddleMaskResourceGeneration;
 	}
 
 	return data;
@@ -2635,6 +2705,11 @@ void Wetterness::Prepass()
 	if (!renderer || !context) {
 		return;
 	}
+
+	ID3D11ShaderResourceView* activePuddleMask = (!g_hasLastFrameData || g_lastFrameData.settings.EnableWetterness != 0u) ?
+	                                                 puddleMaskSrv.get() :
+	                                                 nullptr;
+	context->PSSetShaderResources(kWetnessPsSrvPuddleMaskSlot, 1, &activePuddleMask);
 
 	if (g_hasLastFrameData && g_lastFrameData.settings.EnableWetterness == 0u) {
 		ID3D11ShaderResourceView* nullSrv = nullptr;
@@ -2670,6 +2745,7 @@ void Wetterness::LoadSettings(json& o_json)
 	puddleDryingHours = DEFAULT_PUDDLE_DRYING_HOURS;
 	enableWeatherDrivenDryingModel = true;
 	debugSettings = {};
+	puddleMaskMode = PuddleMaskMode::Textured;
 	if (isObject) {
 		try {
 			settings = o_json.get<Settings>();
@@ -2691,6 +2767,13 @@ void Wetterness::LoadSettings(json& o_json)
 	rainReflectionBalance = JsonValueOr<float>(o_json, "RainReflectionBalance", DEFAULT_RAIN_REFLECTION_BALANCE);
 	puddleSkyReflectionScale = JsonValueOr<float>(o_json, "PuddleSkyReflectionScale", DEFAULT_PUDDLE_SKY_REFLECTION_SCALE);
 	postRainWaterClarity = JsonValueOr<float>(o_json, "PostRainWaterClarity", DEFAULT_POST_RAIN_WATER_CLARITY);
+	if (isObject && o_json.contains("PuddleMaskMode")) {
+		puddleMaskMode = SanitizePuddleMaskMode(JsonValueOr<int64_t>(o_json, "PuddleMaskMode", static_cast<int64_t>(PuddleMaskMode::Textured)));
+	} else if (isObject && o_json.contains("EnableProceduralPuddleNoise")) {
+		puddleMaskMode = JsonValueToBool(o_json["EnableProceduralPuddleNoise"], true) ?
+		                     PuddleMaskMode::Textured :
+		                     PuddleMaskMode::Simple;
+	}
 	shorePersistentDarkeningStrength = JsonValueOr<float>(o_json, "ShorePersistentDarkeningStrength", SHORE_PERSISTENT_DARKENING_DEFAULT);
 	wetnessDistanceFadeRange = JsonValueOr<float>(
 		o_json,
@@ -2770,6 +2853,7 @@ void Wetterness::SaveSettings(json& o_json)
 	o_json["RainGrassSpecularStrength"] = rainGrassSpecularStrength;
 	rainGrassDarkening = ClampRainGrassDarkening(rainGrassDarkening);
 	o_json["RainGrassDarkening"] = rainGrassDarkening;
+	o_json["PuddleMaskMode"] = static_cast<uint32_t>(puddleMaskMode);
 	o_json["EnableWeatherDrivenDryingModel"] = enableWeatherDrivenDryingModel;
 
 	o_json["DebugSettings"] = debugSettings;
@@ -2778,6 +2862,7 @@ void Wetterness::SaveSettings(json& o_json)
 void Wetterness::RestoreDefaultSettings()
 {
 	settings = {};
+	puddleMaskMode = PuddleMaskMode::Textured;
 	enableWeatherDrivenDryingModel = true;
 	puddleDryingHours = DEFAULT_PUDDLE_DRYING_HOURS;
 	puddleLayout = DEFAULT_PUDDLE_LAYOUT;
