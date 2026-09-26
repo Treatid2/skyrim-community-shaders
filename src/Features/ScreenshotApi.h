@@ -1,12 +1,15 @@
 #pragma once
 
 #include "Api/ServiceFoundation.h"
+#include "Features/ScreenshotApiPolicy.h"
+#include "ScreenshotManifestSnapshot.h"
 
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -30,26 +33,34 @@ class ScreenshotApi
 public:
 	using json = nlohmann::json;
 
-	ScreenshotApi();
+	explicit ScreenshotApi(std::shared_ptr<CSX::Api::ServiceFoundation> a_service);
 	~ScreenshotApi();
+	static std::shared_ptr<CSX::Api::ServiceFoundation> CreateServiceFoundation();
 
 	json HandleRequest(ScreenshotFeature& a_feature, const json& a_request);
+	json MakeDispatchError(
+		const json& a_request,
+		std::string_view a_code,
+		std::string_view a_message,
+		bool a_retryable,
+		json a_details = json::object()) const;
 	void Tick(ScreenshotFeature& a_feature, uint64_t a_engineFrame);
 
 	void OnSourceWaiting(std::string_view a_requestId, std::string_view a_actualSourceKind);
+	void OnSourceAcquired(std::string_view a_requestId, json a_acquisition);
 	void OnSourceFallback(
 		std::string_view a_requestId,
 		std::string_view a_reason,
 		std::string_view a_actualSourceKind = {});
 	void OnArtifactQueued(std::string_view a_requestId, const std::filesystem::path& a_path);
-	void OnArtifactEncoding(std::string_view a_requestId);
+	void OnArtifactEncoding(std::string_view a_requestId) noexcept;
 	void OnArtifactTerminal(
 		std::string_view a_requestId,
 		bool a_success,
 		const std::filesystem::path& a_path,
 		std::string_view a_error = {},
-		json a_actual = json::object());
-	void OnSourceTerminal(std::string_view a_requestId, std::string_view a_state, std::string_view a_error = {});
+		const json* a_actual = nullptr) noexcept;
+	void OnSourceTerminal(std::string_view a_requestId, std::string_view a_state, std::string_view a_error = {}) noexcept;
 	void OnFeatureDisabled(std::string_view a_reason);
 	void BeginShutdown(std::string_view a_reason);
 	bool DrainForShutdown(std::chrono::milliseconds a_timeout);
@@ -70,6 +81,8 @@ private:
 		uint32_t sequenceOrdinal = 0;
 		uint64_t scheduledEngineFrame = 0;
 		uint64_t scheduledTimestampUs = 0;
+		std::string scheduledUtc;
+		std::string scheduleBasis;
 		uint64_t eventIndex = 0;
 		std::string acceptedUtc;
 		std::string terminalUtc;
@@ -87,9 +100,13 @@ private:
 		uint32_t successfulArtifacts = 0;
 		bool sourceAcquired = false;
 		bool sequenceFinished = false;
+		bool publicationUnresolved = false;
+		bool unresolvedArtifactCommitted = false;
 		std::chrono::steady_clock::time_point createdAt = std::chrono::steady_clock::now();
 		std::chrono::steady_clock::time_point terminalAt{};
 	};
+
+	using ManifestChildNode = CSX::Screenshot::ManifestChildNode;
 
 	struct SequenceRecord
 	{
@@ -117,7 +134,10 @@ private:
 		std::string failurePolicy = "continue";
 		bool stopRequested = false;
 		bool cancelRequested = false;
+		bool abortRequested = false;
+		std::string abortCode;
 		bool finalizing = false;
+		std::string finalTerminalOutcome;
 		bool frameManifest = true;
 		std::string activeChildRequestId;
 		std::size_t nextCheckpointChildCount = 10;
@@ -126,7 +146,8 @@ private:
 		std::filesystem::path directory;
 		std::filesystem::path partialManifestPath;
 		std::filesystem::path finalManifestPath;
-		json children = json::array();
+		std::shared_ptr<const ManifestChildNode> manifestChildren;
+		std::size_t childCount = 0;
 		json packaging = json::object();
 	};
 
@@ -137,7 +158,8 @@ private:
 		bool final = false;
 		std::filesystem::path destination;
 		std::filesystem::path partialPath;
-		json document = json::object();
+		json header = json::object();
+		std::shared_ptr<const ManifestChildNode> children;
 	};
 
 	struct ManifestResult
@@ -151,13 +173,25 @@ private:
 		std::string error;
 	};
 
+	struct ManifestWork
+	{
+		ManifestJob job;
+		ManifestResult result;
+		uint32_t applicationFailures = 0;
+		std::chrono::steady_clock::time_point nextApplicationAttempt{};
+		bool applicationFailureRecorded = false;
+		bool packagingEventPublished = false;
+	};
+
 	struct ManifestWorkerState
 	{
 		std::mutex mutex;
-		std::condition_variable condition;
-		std::deque<ManifestJob> jobs;
-		std::deque<ManifestResult> results;
+		std::condition_variable_any condition;
+		std::list<ManifestWork> jobs;
+		std::deque<std::shared_ptr<const ManifestChildNode>> retiredChildren;
+		std::list<ManifestWork> results;
 		std::size_t outstanding = 0;
+		bool resultApplicationActive = false;
 		bool stopRequested = false;
 		bool exited = false;
 	};
@@ -170,17 +204,38 @@ private:
 		json capture = json::object();
 	};
 
-	CSX::Api::ServiceFoundation service;
+	struct DispatchEntry
+	{
+		std::string requestId;
+		std::string parentRequestId;
+		uint32_t sequenceOrdinal = 0;
+		bool sequenceFrame = false;
+		json capture = json::object();
+		std::chrono::steady_clock::time_point expiresAt{};
+	};
+
+	std::shared_ptr<CSX::Api::ServiceFoundation> service;
 	mutable std::mutex mutex;
 	std::unordered_map<std::string, RequestRecord> requests;
 	std::deque<std::string> requestOrder;
 	std::unordered_map<std::string, SequenceRecord> sequences;
+	std::deque<std::string> sequenceOrder;
+	std::size_t sequenceCursor = 0;
+	std::deque<DispatchEntry> manualDispatchQueue;
+	std::deque<DispatchEntry> sequenceDispatchQueue;
+	std::condition_variable_any dispatchDeadlineCondition;
+	uint64_t dispatchQueueRevision = 0;
+	CSX::ScreenshotPolicy::DispatchArbitration dispatchArbitration;
 	json persistedSettings = nullptr;
 	uint64_t completedArtifacts = 0;
 	uint64_t failedArtifacts = 0;
 	bool acceptingRequests = true;
 	std::shared_ptr<ManifestWorkerState> manifestWorkerState;
 	std::thread manifestWorker;
+	// Both service loops are explicitly stopped and joined before coordinator
+	// state or the isolated manifest worker can be released.
+	std::jthread manifestResultDrainer;
+	std::jthread dispatchDeadlineWatchdog;
 
 	static constexpr uint32_t kContractMajor = 1;
 	static constexpr uint32_t kContractMinor = 0;
@@ -225,13 +280,24 @@ private:
 	void TrimLocked();
 	std::size_t CountPendingOperationsLocked() const;
 	void FinishSequenceChildLocked(RequestRecord& a_child);
+	void FinishSourceTerminalLocked(RequestRecord& a_record, std::string_view a_state, std::string_view a_error);
+	void MarkPublicationUnresolved(std::string_view a_requestId, bool a_artifactCommitted) noexcept;
+	void RequestSequenceAbortLocked(SequenceRecord& a_sequence, std::string_view a_code, std::string_view a_reason);
+	std::string SequenceTerminalOutcomeLocked(const SequenceRecord& a_sequence) const;
 	void TryFinalizeSequenceLocked(SequenceRecord& a_sequence);
 	void FinalizeSequenceLocked(SequenceRecord& a_sequence, const ManifestResult* a_manifestResult);
-	json BuildSequenceManifestLocked(const SequenceRecord& a_sequence, bool a_final) const;
 	void QueueSequenceManifestLocked(SequenceRecord& a_sequence, bool a_final);
-	void DrainManifestResultsLocked();
+	bool DrainManifestResultsLocked();
 	static void ManifestWorkerLoop(std::shared_ptr<ManifestWorkerState> a_state);
+	void ManifestResultLoop(std::stop_token a_stopToken);
 	std::optional<DueFrame> PrepareDueFrameLocked(uint64_t a_engineFrame);
+	std::optional<DispatchEntry> PopDispatchLocked();
+	void RequeueDispatchLocked(DispatchEntry a_entry, bool a_manual);
+	bool RemoveQueuedDispatchLocked(std::string_view a_requestId);
+	void SignalDispatchQueueChangedLocked();
+	void DispatchDeadlineLoop(std::stop_token a_stopToken);
+	void MarkSequenceCancellationLocked(SequenceRecord& a_sequence);
+	void CancelQueuedDispatchesLocked(std::string_view a_code, std::string_view a_reason);
 
 	static std::filesystem::path ResolveDestinationDirectory(
 		const ScreenshotFeature& a_feature,

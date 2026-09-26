@@ -2,19 +2,17 @@
 
 #ifdef DEVBENCH_BRIDGE_ENABLED
 
+#	include "Api/DevBenchMainThreadDispatch.h"
 #	include "Api/ServiceFoundation.h"
 #	include "Api/WeatherService.h"
-#	include "Api/RuntimeThreadAffinity.h"
 #	include "BuildProvenance.h"
 
 #	include <DevBenchAPI.h>
 #	include <nlohmann/json.hpp>
 
 #	include <atomic>
-#	include <chrono>
+#	include <exception>
 #	include <functional>
-#	include <future>
-#	include <memory>
 #	include <mutex>
 #	include <optional>
 #	include <stdexcept>
@@ -29,7 +27,6 @@ namespace
 	using CSX::WeatherAPI::Preflight001;
 	using CSX::WeatherAPI::Snapshot001;
 	using CSX::WeatherAPI::Status;
-	constexpr auto kMainThreadTimeout = std::chrono::milliseconds(5000);
 	std::atomic_bool g_registered{ false };
 
 	CSX::Api::ServiceFoundation& Foundation()
@@ -109,31 +106,9 @@ namespace
 		return std::nullopt;
 	}
 
-	json RunOnMainThread(std::function<json()> a_run)
+	CSX::Api::DevBenchMainThreadResult RunOnMainThread(std::function<json()> a_run)
 	{
-		auto* tasks = SKSE::GetTaskInterface();
-		if (!tasks)
-			return { { "error", "SKSE task interface unavailable" } };
-		auto promise = std::make_shared<std::promise<json>>();
-		auto cancelled = std::make_shared<std::atomic_bool>(false);
-		auto future = promise->get_future();
-		tasks->AddTask([promise, cancelled, run = std::move(a_run)]() mutable {
-			CSX::Api::EnterRuntimeMainThreadTask();
-			if (cancelled->load(std::memory_order_acquire))
-				return;
-			try {
-				promise->set_value(run());
-			} catch (const std::exception& e) {
-				promise->set_value(json{ { "error", "main-thread task failed" }, { "detail", e.what() } });
-			} catch (...) {
-				promise->set_value(json{ { "error", "main-thread task failed" } });
-			}
-		});
-		if (future.wait_for(kMainThreadTimeout) != std::future_status::ready) {
-			cancelled->store(true, std::memory_order_release);
-			return { { "error", "main thread did not run within 5000ms" } };
-		}
-		return future.get();
+		return CSX::Api::RunDevBenchMainThreadTask(SKSE::GetTaskInterface(), std::move(a_run));
 	}
 
 	json SnapshotJson(const Snapshot001& a_snapshot)
@@ -251,7 +226,7 @@ namespace
 				return Foundation().MakeError(a_args, "invalid_field", "featureName is required", "validation", false, "featureName");
 		}
 
-		auto result = RunOnMainThread([action, a_args] {
+		auto dispatch = RunOnMainThread([action, a_args] {
 			const auto* api = CSX::Api::GetWeatherService001();
 			if (!api)
 				return json{ { "error", "weather API unavailable" } };
@@ -343,10 +318,11 @@ namespace
 			}
 			return json{ { "error", "validated action was not dispatched" } };
 		});
-		if (result.contains("error")) {
-			const auto message = result.value("detail", result.value("error", std::string("weather API dispatch failed")));
-			return Foundation().MakeError(a_args, "main_thread_dispatch_failed", message, "dispatch", true);
-		}
+		if (dispatch.failure)
+			return Foundation().MakeError(a_args, "main_thread_dispatch_failed", dispatch.failure->message, dispatch.failure->phase, dispatch.failure->retryable);
+		auto result = std::move(dispatch.response);
+		if (result.contains("error"))
+			return Foundation().MakeError(a_args, "main_thread_dispatch_failed", result.value("error", std::string("weather API unavailable")), "execution", false);
 		auto response = Foundation().MakeEnvelope(a_args, true);
 		response["result"] = std::move(result);
 		return response;

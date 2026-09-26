@@ -123,6 +123,11 @@ the caller's next `Dispatch` on the same thread, so clients must copy them.
 Transport failures use `CSX::ScreenshotAPI::Status`; command rejection and
 operation state remain in the normal JSON response envelope.
 
+The service foundation and its session identity exist before the lazy capture
+coordinator. Consequently, an admitted timeout returns the same correlated
+contract envelope even when the main-thread task has not initialized capture
+state yet.
+
 Every request must include `contractMajor`.
 Clients may include `contractMinor`; absence means zero. A major mismatch is a
 structured `unsupported_contract_version` error and must not perform work.
@@ -297,6 +302,8 @@ The response includes at least:
   "limits": {
     "activeSourceCaptures": 1,
     "outstandingArtifacts": 2,
+    "outstandingCaptureJobs": 2,
+    "maximumOutputsPerCaptureJob": 4,
     "pendingOperations": 64,
     "maximumOutputsPerFrame": 4,
     "maximumSequenceFrames": 10000,
@@ -309,8 +316,10 @@ The response includes at least:
 ```
 
 These numbers are examples, not frozen limits. The implementation reports its
-actual values. The present worker's two-outstanding-artifact limit may remain
+actual values. The present worker's two-outstanding-capture-job limit may remain
 initially; a sequence scheduler must adapt rather than enlarge it blindly.
+`outstandingArtifacts` remains as the contract-v1 compatibility alias for this
+same capture-job limit. One capture job may emit several output artifacts.
 
 ### Operational status
 
@@ -334,12 +343,16 @@ worker backlog, and journal retention without initiating work:
   "dispatcher": {
     "activeAcquisitionRequestId": null,
     "pendingOperations": 0,
+    "queuedManualCaptures": 0,
+    "queuedSequenceFrames": 0,
     "activeSequences": 0
   },
   "worker": {
     "running": true,
     "outstandingArtifacts": 0,
     "capacity": 2,
+    "outstandingCaptureJobs": 0,
+    "captureJobCapacity": 2,
     "completedArtifacts": 18,
     "failedArtifacts": 0
   },
@@ -355,6 +368,10 @@ worker backlog, and journal retention without initiating work:
   }
 }
 ```
+
+The legacy `outstandingArtifacts` and `capacity` members remain contract-v1
+aliases for the capture-job counters. New clients should use the explicitly
+named capture-job members.
 
 Counters are monotonic for the server session unless the capability response
 documents a reset action. Readiness timestamps/frame IDs are accompanied by
@@ -596,6 +613,12 @@ Manual/UI still requests and sequences share a fair dispatcher. A sequence may
 have only one child in source acquisition at a time. The coordinator must
 prevent a high-frequency sequence from starving manual requests.
 
+Manual captures retain FIFO order and their arbitration turn while retrying
+source contention or encoder backpressure, up to a ten-second dispatch
+deadline. A completed attempt hands the next turn to the other class.
+Sequence capacity misses are immediately recorded as dropped children so
+the requested `skip` or `abort` policy applies at the missed slot.
+
 ### Failure and stop behavior
 
 `failurePolicy` is `continue` or `abort`.
@@ -606,6 +629,14 @@ prevent a high-frequency sequence from starving manual requests.
 - `request_cancel` is immediate best-effort: cancel unscheduled and waiting
   children, allow irreversible writes to finish, and finalize
   `cancelled`/`cancelled_partial`.
+- A configured backpressure or failure-policy abort reports `failed` or
+  `failed_partial`; it is not a graceful client stop.
+- Final manifest admission is the sequence's terminal-outcome commit point.
+  Stop or cancel commands received after that point return the current receipt
+  with `commandAccepted: false` and do not rewrite the committed outcome.
+- DevBench dispatch reports `dispatcher_admitted` without inviting a retry if
+  main-thread work starts but exceeds the response deadline; that work may
+  still complete, so clients should reconcile through `request_get` or events.
 - Disabling the screenshot feature behaves as immediate cancellation for
   source acquisition. It does not abandon committed worker writes.
 - Device loss, runtime source loss, or worker shutdown must finalize a partial
@@ -630,6 +661,16 @@ CS_sequence_2026-08-20_041530_2f8c91a0/
 every pixel write. On normal finalization it becomes `sequence.json`. Recovery
 can identify an interrupted sequence from the partial manifest and preserved
 frames.
+
+Manifest snapshots are immutable. Both document assembly and retirement of
+retained child snapshots run on the manifest worker. Retirement releases the
+chain iteratively, including when requests are acknowledged or expire, so
+long sequences cannot cause recursive destruction on the render path.
+
+Manifest result publication uses one retry gate shared by the background
+publisher and foreground drains (request, replay, and render tick). Failed
+applications retain exclusive custody and observe the same bounded exponential
+delay before another attempt.
 
 The final manifest includes:
 
@@ -764,6 +805,10 @@ removed by journal expiry.
     "artifactsWritten": 1,
     "artifactsFailed": 0
   },
+  "publication": {
+    "state": "settled",
+    "artifactCommitted": null
+  },
   "artifacts": [
     {
       "artifactId": "a43cdf9a:combined",
@@ -793,6 +838,11 @@ removed by journal expiry.
   "lastEventId": 481
 }
 ```
+
+If a file commit succeeds but terminal publication cannot be completed, the
+receipt reports `publication.state` as `unresolved` and preserves
+`artifactCommitted: true`. A post-commit reporting failure never relabels the
+artifact as an encoding or write failure.
 
 Input-plane format, dimensions, colour space, submitted bounds, orientation,
 tonemap decision, and device generation are recorded when known. Timings are

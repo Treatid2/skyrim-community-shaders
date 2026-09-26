@@ -1,5 +1,9 @@
 #pragma once
 
+#ifdef DEVBENCH_BRIDGE_ENABLED
+#include "VRRenderScaleRetryTelemetry.h"
+#endif
+
 #include "../../Buffer.h"
 #include "../../State.h"
 #include "StreamlineFrameTokenPublication.h"
@@ -477,7 +481,11 @@ public:
 	}
 
 	/** @brief Makes the bounded VR viewport slot for a DLSS profile safe to use without dispatching DLSS. */
-	DLSSViewportPreparationResult PrepareVRDLSSViewport(DLSSViewportRole viewportRole, uint32_t qualityMode, uint32_t dlssPreset);
+	DLSSViewportPreparationResult PrepareVRDLSSViewport(DLSSViewportRole viewportRole, uint32_t qualityMode, uint32_t dlssPreset
+#ifdef DEVBENCH_BRIDGE_ENABLED
+		, VRRenderScaleRetryTelemetry::ViewportObservation* a_observation = nullptr
+#endif
+	);
 	bool ResolveDLSSViewport(DLSSViewportRole viewportRole, sl::ViewportHandle p_viewport, uint32_t eyeIndex, uint32_t qualityMode, uint32_t dlssPreset, sl::ViewportHandle& outViewport);
 	int FindVRDLSSViewportSlot(DLSSViewportRole viewportRole, uint32_t qualityMode, uint32_t dlssPreset) const;
 	bool TryResolveExistingVRDLSSViewport(
@@ -501,7 +509,8 @@ public:
 	bool SetDLSSOptions(DLSSViewportRole viewportRole, sl::ViewportHandle p_viewport, uint32_t eyeIndex, uint32_t width, uint32_t height, bool colorBuffersHDR, uint32_t qualityMode, uint32_t dlssPreset, const DLSSDispatchDiagnostics* diagnostics = nullptr);
 	void InvalidateDLSSOptionsCache();
 	void ResetDLSSIdleFences();
-	void ResetFrameTracking();
+	/** Clears constants tracking while preserving token publication during dispatch failure recovery. */
+	void ResetFrameTracking(StreamlineFrameTokenPublication::ResetScope a_scope = StreamlineFrameTokenPublication::ResetScope::Lifecycle);
 	void ClearLastDLSSFailureState() { lastDLSSFailureDuplicatedConstants = false; }
 	bool WasLastDLSSFailureDuplicatedConstants() const { return lastDLSSFailureDuplicatedConstants; }
 	bool HasDLSSResourcesPendingTeardown() const;

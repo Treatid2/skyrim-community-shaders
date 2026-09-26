@@ -1076,6 +1076,7 @@
     "PostRainWaterClarity": 0.75,
     "PuddleDryingHours": 15.0,
     "PuddleLayout": 3.0,
+    "PuddleMaskMode": 1,
     "PuddleMaxAngle": 0.75,
     "PuddleMinWetness": 0.5249999761581421,
     "PuddleRadiusWorldUnits": 119.05000305175781,

@@ -7,9 +7,11 @@ import configparser
 import copy
 import importlib.util
 import json
+import shutil
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -25,6 +27,135 @@ SPEC.loader.exec_module(BUILDER)
 
 
 class ShaderCachePackagingTests(unittest.TestCase):
+    @staticmethod
+    def _managed_cache(root: Path, runtime: str, *, horizon: bool = True) -> Path:
+        cache = root / BUILDER.CACHE_DIRECTORY
+        variants = [cache]
+        if horizon:
+            variants.append(root / BUILDER.HORIZON_FIX_CACHE_DIRECTORY)
+        for index, variant in enumerate(variants):
+            water = variant / "Water" / "1.pso"
+            water.parent.mkdir(parents=True)
+            water.write_bytes(f"DXBC{runtime}-water-{index}".encode("utf-8"))
+            lighting = variant / "Lighting" / "2.pso"
+            lighting.parent.mkdir()
+            lighting.write_bytes(f"DXBC{runtime}-lighting".encode("utf-8"))
+            (variant / BUILDER.MANIFEST_FILE_NAME).write_text(
+                json.dumps({
+                    "schemaVersion": 1,
+                    "entries": {
+                        "Water/1.pso": "1" * 32,
+                        "Lighting/2.pso": "3" * 32,
+                    },
+                }),
+                encoding="utf-8",
+            )
+        (cache / BUILDER.INFO_FILE_NAME).write_text(
+            f"[Cache]\nPluginVersion = CSX 3.18-VR\nShaderCacheABI = {'a' * 64}\n",
+            encoding="utf-8",
+        )
+        BUILDER.build_managed_shader_packs(
+            REPO, cache, variants[1] if horizon else None, runtime, "a" * 64
+        )
+        return cache
+
+    @staticmethod
+    def _archive_cache(root: Path) -> Path:
+        archive = root.parent / "cache.zip"
+        with zipfile.ZipFile(archive, "w") as stream:
+            for path in root.rglob("*"):
+                if path.is_file():
+                    stream.write(path, path.relative_to(root).as_posix())
+        return archive
+
+    @staticmethod
+    def _publication_cache(root: Path, marker: bytes) -> Path:
+        cache = root / BUILDER.CACHE_DIRECTORY
+        cache.mkdir(parents=True)
+        (cache / BUILDER.INFO_FILE_NAME).write_text(
+            "[Cache]\nPluginVersion = CSX publication test\n",
+            encoding="utf-8",
+        )
+        (cache / "marker.bin").write_bytes(marker)
+        return root
+
+    @unittest.skipUnless(shutil.which("cmake"), "CMake is required to inspect cache archives")
+    def test_managed_archives_cover_se_vr_and_both_horizon_states(self) -> None:
+        for runtime in ("SE", "VR"):
+            for horizon in (False, True):
+                with self.subTest(runtime=runtime, horizon=horizon), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary) / "runtime"
+                    cache = self._managed_cache(root, runtime, horizon=horizon)
+                    manifest = json.loads((cache / BUILDER.PACK_MANIFEST_FILE_NAME).read_text(encoding="utf-8"))
+                    self.assertEqual(manifest["runtime"], runtime)
+                    self.assertEqual(manifest["optimizedRecordCount"], 3 if horizon else 2)
+                    self.assertEqual(
+                        manifest["compatibilityVariants"],
+                        ["default", "legacy-horizon-fix"] if horizon else ["default"],
+                    )
+                    archive = self._archive_cache(root)
+                    BUILDER.validate_cache_archive(
+                        archive, shutil.which("cmake"), runtime, "CSX 3.18-VR",
+                        horizon_variants=horizon,
+                    )
+
+    @unittest.skipUnless(shutil.which("cmake"), "CMake is required to inspect cache archives")
+    def test_archive_rejects_mismatched_abi_and_invalid_manifest_shape(self) -> None:
+        for invalid_manifest in ([], None, {"shaderCacheABI": "b" * 64}):
+            with self.subTest(manifest=invalid_manifest), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "runtime"
+                cache = self._managed_cache(root, "SE")
+                path = cache / BUILDER.PACK_MANIFEST_FILE_NAME
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(invalid_manifest, dict):
+                    manifest.update(invalid_manifest)
+                else:
+                    manifest = invalid_manifest
+                path.write_text(json.dumps(manifest), encoding="utf-8")
+                with self.assertRaises(SystemExit):
+                    BUILDER.validate_cache_archive(
+                        self._archive_cache(root), shutil.which("cmake"), "SE", "CSX 3.18-VR"
+                    )
+
+    @unittest.skipUnless(shutil.which("cmake"), "CMake is required to inspect cache archives")
+    def test_shipped_archive_requires_horizon_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            root = workspace / "runtime"
+            self._managed_cache(root, "VR", horizon=False)
+            with self.assertRaisesRegex(SystemExit, "missing required compatibility variants"):
+                BUILDER.prepare_cache_archive(
+                    root, workspace, "VR", "test", "CSX 3.18-VR", shutil.which("cmake")
+                )
+
+    @unittest.skipUnless(shutil.which("cmake"), "CMake is required to inspect cache archives")
+    def test_archive_rejects_horizon_declaration_without_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "runtime"
+            cache = self._managed_cache(root, "VR", horizon=False)
+            path = cache / BUILDER.PACK_MANIFEST_FILE_NAME
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            manifest["compatibilityVariants"].append("legacy-horizon-fix")
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "coverage"):
+                BUILDER.validate_cache_archive(
+                    self._archive_cache(root), shutil.which("cmake"), "VR", "CSX 3.18-VR",
+                    horizon_variants=True,
+                )
+
+    @unittest.skipUnless(shutil.which("cmake"), "CMake is required to inspect cache archives")
+    def test_archive_rejects_obsolete_separate_horizon_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "runtime"
+            self._managed_cache(root, "VR")
+            extra = root / BUILDER.HORIZON_FIX_CACHE_DIRECTORY / "Info.ini"
+            extra.parent.mkdir()
+            extra.write_text("obsolete", encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "unexpected managed-cache files"):
+                BUILDER.validate_cache_archive(
+                    self._archive_cache(root), shutil.which("cmake"), "VR", "CSX 3.18-VR"
+                )
+
     @staticmethod
     def _sample_shader_config() -> dict[str, object]:
         profile_defines = [
@@ -128,6 +259,287 @@ class ShaderCachePackagingTests(unittest.TestCase):
             )
             self.assertTrue(staging.is_dir())
             self.assertFalse(destination.exists())
+
+    def test_runtime_publication_preserves_unowned_stage_after_acquisition_race(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            out_root = root / "out"
+            out_root.mkdir()
+            destination = self._publication_cache(out_root / "VR", b"previous")
+            candidate = self._publication_cache(root / "candidate", b"candidate")
+            staging = out_root / ".VR.publishing"
+            marker = staging / "other-invocation.bin"
+            original_mkdir = Path.mkdir
+            raced = False
+
+            def racing_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+                nonlocal raced
+                if path == staging and not raced:
+                    raced = True
+                    original_mkdir(path, *args, **kwargs)
+                    marker.write_bytes(b"owned elsewhere")
+                original_mkdir(path, *args, **kwargs)
+
+            with (
+                mock.patch.object(Path, "mkdir", new=racing_mkdir),
+                self.assertRaisesRegex(SystemExit, "unexpected publication staging"),
+            ):
+                BUILDER.publish_runtime_cache(candidate, out_root, "VR")
+
+            self.assertEqual(marker.read_bytes(), b"owned elsewhere")
+            self.assertEqual(
+                (destination / BUILDER.CACHE_DIRECTORY / "marker.bin").read_bytes(),
+                b"previous",
+            )
+
+    def test_archive_publication_preserves_unowned_stage_after_acquisition_race(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            out_root = root / "out"
+            out_root.mkdir()
+            candidate = root / "ShaderCache-VR-test.7z"
+            candidate.write_bytes(b"candidate")
+            destination = out_root / candidate.name
+            destination.write_bytes(b"previous")
+            staging = out_root / f".{candidate.name}.publishing"
+            original_open = Path.open
+            raced = False
+
+            def racing_open(
+                path: Path,
+                mode: str = "r",
+                *args: object,
+                **kwargs: object,
+            ):
+                nonlocal raced
+                if path == staging and mode == "xb" and not raced:
+                    raced = True
+                    with original_open(path, "wb") as stream:
+                        stream.write(b"owned elsewhere")
+                return original_open(path, mode, *args, **kwargs)
+
+            with (
+                mock.patch.object(Path, "open", new=racing_open),
+                self.assertRaisesRegex(SystemExit, "unexpected publication staging"),
+            ):
+                BUILDER.publish_cache_archive(candidate, out_root, "VR")
+
+            self.assertEqual(staging.read_bytes(), b"owned elsewhere")
+            self.assertEqual(destination.read_bytes(), b"previous")
+
+    def test_directory_staging_removes_owned_partial_copy_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "candidate"
+            source.mkdir()
+            (source / "cache.bin").write_bytes(b"candidate")
+            staging = root / ".VR.publishing"
+
+            def fail_owned_copy(
+                source_path: Path,
+                destination_path: Path,
+                **kwargs: object,
+            ) -> None:
+                self.assertEqual(source_path, source)
+                self.assertTrue(kwargs["dirs_exist_ok"])
+                (destination_path / "partial.bin").write_bytes(b"partial")
+                raise PermissionError("simulated partial directory copy")
+
+            with (
+                mock.patch.object(BUILDER.shutil, "copytree", new=fail_owned_copy),
+                self.assertRaisesRegex(SystemExit, "failed to stage VR cache"),
+            ):
+                BUILDER.copy_publication_candidate(source, staging, "VR cache")
+
+            self.assertFalse(staging.exists())
+
+    def test_archive_staging_removes_owned_partial_copy_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "ShaderCache-VR-test.7z"
+            source.write_bytes(b"candidate")
+            staging = root / ".ShaderCache-VR-test.7z.publishing"
+
+            def fail_owned_copy(source_path: Path, destination_path: Path) -> None:
+                self.assertEqual(source_path, source)
+                destination_path.write_bytes(b"partial")
+                raise PermissionError("simulated partial archive copy")
+
+            with (
+                mock.patch.object(BUILDER.shutil, "copy2", new=fail_owned_copy),
+                self.assertRaisesRegex(SystemExit, "failed to stage VR cache archive"),
+            ):
+                BUILDER.copy_publication_candidate(
+                    source,
+                    staging,
+                    "VR cache archive",
+                )
+
+            self.assertFalse(staging.exists())
+
+    def test_archive_publication_replaces_existing_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            out_root = root / "out"
+            out_root.mkdir()
+            candidate = root / "ShaderCache-VR-test.7z"
+            candidate.write_bytes(b"candidate")
+            destination = out_root / candidate.name
+            destination.write_bytes(b"previous")
+
+            published = BUILDER.publish_cache_archive(candidate, out_root, "VR")
+
+            self.assertEqual(published, destination)
+            self.assertEqual(destination.read_bytes(), b"candidate")
+            self.assertFalse((out_root / f".{candidate.name}.publishing").exists())
+
+    def test_runtime_publication_replaces_cache_and_removes_recovery_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            out_root = root / "out"
+            out_root.mkdir()
+            self._publication_cache(out_root / "VR", b"previous")
+            candidate = self._publication_cache(root / "candidate", b"candidate")
+
+            published = BUILDER.publish_runtime_cache(candidate, out_root, "VR")
+
+            self.assertEqual(published, out_root / "VR")
+            self.assertEqual(
+                (published / BUILDER.CACHE_DIRECTORY / "marker.bin").read_bytes(),
+                b"candidate",
+            )
+            self.assertFalse((out_root / ".VR.publishing").exists())
+            self.assertFalse((out_root / ".VR.previous").exists())
+
+    def test_runtime_publication_restores_previous_cache_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            out_root = root / "out"
+            out_root.mkdir()
+            destination = self._publication_cache(out_root / "VR", b"previous")
+            candidate = self._publication_cache(root / "candidate", b"candidate")
+            staging = out_root / ".VR.publishing"
+            original_replace = Path.replace
+
+            def fail_publication(path: Path, target: Path) -> Path:
+                if path == staging:
+                    raise PermissionError("simulated publication failure")
+                return original_replace(path, target)
+
+            with (
+                mock.patch.object(Path, "replace", new=fail_publication),
+                mock.patch.object(BUILDER.time, "sleep"),
+                self.assertRaisesRegex(SystemExit, "validated staging retained"),
+            ):
+                BUILDER.publish_runtime_cache(candidate, out_root, "VR")
+
+            self.assertEqual(
+                (destination / BUILDER.CACHE_DIRECTORY / "marker.bin").read_bytes(),
+                b"previous",
+            )
+            self.assertEqual(
+                (staging / BUILDER.CACHE_DIRECTORY / "marker.bin").read_bytes(),
+                b"candidate",
+            )
+            self.assertFalse((out_root / ".VR.previous").exists())
+
+    def test_runtime_publication_retains_recovery_after_restore_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            out_root = root / "out"
+            out_root.mkdir()
+            destination = self._publication_cache(out_root / "VR", b"previous")
+            staging = out_root / ".VR.publishing"
+            recovery = out_root / ".VR.previous" / "VR"
+            original_replace = Path.replace
+
+            with tempfile.TemporaryDirectory(dir=root) as workspace_text:
+                candidate = self._publication_cache(
+                    Path(workspace_text) / "candidate",
+                    b"candidate",
+                )
+
+                def fail_publication_and_restore(path: Path, target: Path) -> Path:
+                    if path == staging or path == recovery:
+                        raise PermissionError("simulated publication or restore failure")
+                    return original_replace(path, target)
+
+                with (
+                    mock.patch.object(
+                        Path,
+                        "replace",
+                        new=fail_publication_and_restore,
+                    ),
+                    mock.patch.object(BUILDER.time, "sleep"),
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    BUILDER.publish_runtime_cache(candidate, out_root, "VR")
+
+            self.assertFalse(destination.exists())
+            self.assertIn(str(recovery), str(raised.exception))
+            self.assertEqual(
+                (recovery / BUILDER.CACHE_DIRECTORY / "marker.bin").read_bytes(),
+                b"previous",
+            )
+            self.assertEqual(
+                (staging / BUILDER.CACHE_DIRECTORY / "marker.bin").read_bytes(),
+                b"candidate",
+            )
+
+    def test_runtime_publication_refuses_existing_recovery_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            out_root = root / "out"
+            out_root.mkdir()
+            destination = self._publication_cache(out_root / "VR", b"previous")
+            candidate = self._publication_cache(root / "candidate", b"candidate")
+            recovery = out_root / ".VR.previous"
+            recovery.mkdir()
+            (recovery / "operator-note.txt").write_text("retain", encoding="utf-8")
+
+            with self.assertRaisesRegex(SystemExit, "recovery path exists"):
+                BUILDER.publish_runtime_cache(candidate, out_root, "VR")
+
+            self.assertEqual(
+                (destination / BUILDER.CACHE_DIRECTORY / "marker.bin").read_bytes(),
+                b"previous",
+            )
+            self.assertEqual(
+                (recovery / "operator-note.txt").read_text(encoding="utf-8"),
+                "retain",
+            )
+            self.assertFalse((out_root / ".VR.publishing").exists())
+
+    def test_runtime_publication_preserves_interrupted_recovery_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            out_root = root / "out"
+            out_root.mkdir()
+            recovery = self._publication_cache(
+                out_root / ".VR.previous" / "VR",
+                b"previous",
+            )
+            staging = self._publication_cache(
+                out_root / ".VR.publishing",
+                b"candidate",
+            )
+            retry_candidate = self._publication_cache(
+                root / "retry-candidate",
+                b"retry",
+            )
+
+            with self.assertRaisesRegex(SystemExit, "recovery path exists"):
+                BUILDER.publish_runtime_cache(retry_candidate, out_root, "VR")
+
+            self.assertEqual(
+                (recovery / BUILDER.CACHE_DIRECTORY / "marker.bin").read_bytes(),
+                b"previous",
+            )
+            self.assertEqual(
+                (staging / BUILDER.CACHE_DIRECTORY / "marker.bin").read_bytes(),
+                b"candidate",
+            )
+            self.assertFalse((out_root / "VR").exists())
 
     @staticmethod
     def _all_define_names(node: object) -> set[str]:
@@ -257,6 +669,12 @@ class ShaderCachePackagingTests(unittest.TestCase):
         )
 
     def test_vr_horizon_variants_write_opposite_feature_states(self) -> None:
+        compile_states: list[str] = []
+
+        def record_manifest(*args, **kwargs) -> int:
+            compile_states.append(args[2])
+            return 0
+
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             features_dir = root / "stage" / "Features"
@@ -273,6 +691,7 @@ class ShaderCachePackagingTests(unittest.TestCase):
                 BUILDER.write_info_ini(
                     cache_dir,
                     root / "stage",
+                    REPO,
                     "CSX 12.345-VR",
                     "VR",
                     BUILDER.SHIPPED_CACHE_PROFILE,
@@ -282,6 +701,16 @@ class ShaderCachePackagingTests(unittest.TestCase):
                 states = BUILDER.read_feature_states(cache_dir)
                 self.assertIs(states["HorizonFix"], enabled)
                 self.assertTrue(states["CSUtility"])
+                info = configparser.ConfigParser(interpolation=None)
+                info.read(cache_dir / BUILDER.INFO_FILE_NAME, encoding="utf-8-sig")
+                self.assertFalse(info.has_option("HorizonFix", "ShaderCacheABI"))
+                BUILDER.write_shader_cache_manifest(
+                    cache_dir, root / "stage", "VR", {}, record_manifest, "test-shader-abi"
+                )
+
+        self.assertEqual(len(compile_states), 2)
+        self.assertEqual(compile_states[0], compile_states[1])
+        self.assertNotIn("FeatureShaderABI=HorizonFix:", compile_states[0])
 
     def test_horizon_variant_delta_rejects_malformed_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -384,6 +813,7 @@ class ShaderCachePackagingTests(unittest.TestCase):
             BUILDER.write_info_ini(
                 cache_dir,
                 root / "stage",
+                REPO,
                 "CSX 12.345-VR",
                 "VR",
                 BUILDER.PATKA_CACHE_PROFILE,
@@ -447,6 +877,7 @@ class ShaderCachePackagingTests(unittest.TestCase):
                 BUILDER.write_info_ini(
                     cache_dir,
                     root / "stage",
+                    REPO,
                     "CSX 12.345-VR",
                     "VR",
                     BUILDER.PATKA_CACHE_PROFILE,
@@ -491,8 +922,17 @@ class ShaderCachePackagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for runtime in ("SE", "VR"):
+                cache_dir = root / runtime
+                cache_dir.mkdir()
+                (cache_dir / BUILDER.INFO_FILE_NAME).write_text(
+                    "[Cache]\n"
+                    "[LightLimitFix]\n"
+                    "Enabled = true\n"
+                    "ShaderCacheABI = 1\n",
+                    encoding="utf-8",
+                )
                 BUILDER.write_shader_cache_manifest(
-                    root / runtime,
+                    cache_dir,
                     root / "Shaders",
                     runtime,
                     {},
@@ -503,8 +943,8 @@ class ShaderCachePackagingTests(unittest.TestCase):
         self.assertEqual(
             states,
             [
-                f"ShaderCacheABI={'a' * 64};",
-                f"VR;ShaderCacheABI={'a' * 64};",
+                f"ShaderCacheABI={'a' * 64};FeatureShaderABI=LightLimitFix:1;",
+                f"VR;ShaderCacheABI={'a' * 64};FeatureShaderABI=LightLimitFix:1;",
             ],
         )
 

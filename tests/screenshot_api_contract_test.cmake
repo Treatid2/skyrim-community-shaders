@@ -72,9 +72,10 @@ foreach(_action IN ITEMS
 endforeach()
 
 foreach(_event IN ITEMS
-    request.accepted source.waiting source.fallback artifact.queued
+    request.accepted source.waiting source.acquired source.timeout source.fallback artifact.queued
     artifact.encoding artifact.written artifact.failed sequence.frame_scheduled
-    sequence.stop_requested sequence.finalizing request.terminal
+    sequence.frame_dropped sequence.stop_requested sequence.finalizing
+    packaging.queued packaging.completed packaging.failed request.terminal
 )
     string(FIND "${_implementation}" "\"${_event}\"" _event_position)
     if(_event_position EQUAL -1)
@@ -86,12 +87,40 @@ foreach(_required_contract_text IN ITEMS
     runtime_session persistent_user settings_default file_reference
     maximumOutputsPerFrame retentionSeconds manifest_failed
 	DescribeCommittedArtifact BuildProvenance::GetProducer artifact_hash_failed
-	terminalOutcome completedUtc fallbacksPresent cancelled
+	terminalOutcome completedUtc fallbacksPresent cancelled manifestChildren
+	outstandingArtifacts outstandingCaptureJobs captureJobCapacity
+	commandAccepted finalizationCommitted sequence.abort_requested
+	ManifestResultLoop manifestResultDrainer results.splice applicationFailures
+	packagingEventPublished is_nothrow_move_assignable_v
+	manifest_result_publication_retried condition.notify_all
+	nextApplicationAttempt resultApplicationActive PublicationRetryDelay
+	IsPublicationRetryEligible CreateServiceFoundation publicationUnresolved
 )
     string(FIND "${_implementation}" "${_required_contract_text}" _contract_position)
     if(_contract_position EQUAL -1)
         message(FATAL_ERROR "Screenshot API implementation is missing contract behavior: ${_required_contract_text}")
     endif()
+endforeach()
+
+file(READ "${PROJECT_ROOT}/src/Api/ScreenshotService.cpp" _native_adapter)
+foreach(_native_dispatch_contract IN ITEMS
+	WaitForTerminalUntil dispatcher_admitted executionMayComplete
+	MakeApiDispatchError dispatch
+)
+    string(FIND "${_native_adapter}" "${_native_dispatch_contract}" _native_dispatch_position)
+    if(_native_dispatch_position EQUAL -1)
+        message(FATAL_ERROR "Native screenshot dispatch is missing bounded admission behavior: ${_native_dispatch_contract}")
+    endif()
+endforeach()
+
+file(READ "${PROJECT_ROOT}/src/ScreenshotDevBenchBridge.cpp" _bridge)
+foreach(_devbench_dispatch_contract IN ITEMS
+	dispatcher_admitted executionMayComplete MakeApiDispatchError
+)
+	string(FIND "${_bridge}" "${_devbench_dispatch_contract}" _devbench_dispatch_position)
+	if(_devbench_dispatch_position EQUAL -1)
+		message(FATAL_ERROR "DevBench screenshot dispatch is missing contract behavior: ${_devbench_dispatch_contract}")
+	endif()
 endforeach()
 
 file(READ "${PROJECT_ROOT}/docs/development/schemas/screenshot-request-v1.schema.json" _request_schema)
@@ -102,7 +131,6 @@ foreach(_required_schema_text IN ITEMS runtime_session persistent_user settings_
     endif()
 endforeach()
 
-file(READ "${PROJECT_ROOT}/src/ScreenshotDevBenchBridge.cpp" _bridge)
 string(FIND "${_bridge}" "communityshaders.screenshot" _tool_position)
 if(_tool_position EQUAL -1)
     message(FATAL_ERROR "communityshaders.screenshot is not registered")
@@ -128,6 +156,18 @@ string(FIND "${_feature_controls}" "DispatchScreenshotServiceRequest" _control_d
 if(_ui_adapter_position EQUAL -1 OR _ui_v1_position EQUAL -1 OR _control_dispatch_position EQUAL -1)
     message(FATAL_ERROR "Native screenshot UI must submit through the public contract-v1 screenshot service")
 endif()
+foreach(_acquisition_contract_text IN ITEMS
+    BuildAcquisitionRecord publicationGeneration deviceIdentity
+    submittedBounds requiredEyeMask IsSamePublication
+	releaseQueueSlotOnExit queueCommitted
+	"committed to the encoder but its queued event could not be published"
+	artifactActual "post-save handling failed"
+)
+    string(FIND "${_feature_controls}" "${_acquisition_contract_text}" _acquisition_position)
+    if(_acquisition_position EQUAL -1)
+        message(FATAL_ERROR "Screenshot acquisition provenance is missing: ${_acquisition_contract_text}")
+    endif()
+endforeach()
 
 file(READ "${PROJECT_ROOT}/src/Menu.cpp" _menu)
 string(FIND "${_menu}" "screenshotFeature.RequestUiCapture()" _hotkey_v1_position)

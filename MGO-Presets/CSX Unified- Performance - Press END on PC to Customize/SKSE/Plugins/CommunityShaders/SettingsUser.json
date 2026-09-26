@@ -78,8 +78,8 @@
       "maximumVersionExclusive": "3.20"
     },
     "settingsContract": {
-      "revision": 4,
-      "sourceTreeSha256": "1F40B40C95F9C3BF1543890DE9BD3972EDC1DB7EB70DEFC7EF14845C6424BD82"
+      "revision": 5,
+      "sourceTreeSha256": "46E78FC6851A89891EE9F77A326A7B8E52C4216A4D22C2A6E2097D75C90A1938"
     }
   },
   "Upscaling": {
@@ -1090,6 +1090,7 @@
     "PostRainWaterClarity": 0.75,
     "PuddleDryingHours": 15.0,
     "PuddleLayout": 3.0,
+    "PuddleMaskMode": 1,
     "PuddleMaxAngle": 0.75,
     "PuddleMinWetness": 0.5249999761581421,
     "PuddleRadiusWorldUnits": 119.05000305175781,
