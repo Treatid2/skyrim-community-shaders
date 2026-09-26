@@ -1027,6 +1027,7 @@ FidelityFX::LifecycleResult FidelityFX::ReleaseHostFSRResources()
 	fsrContextDisplayHeight = 0;
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	devBenchHostContextColorContract.store(0, std::memory_order_release);
+	devBenchHostContextLastDispatchFrame.store(0, std::memory_order_release);
 #endif
 	if (fsrScratchBuffer) {
 		free(fsrScratchBuffer);
@@ -1228,26 +1229,26 @@ uint64_t FidelityFX::GetDevBenchFsrColorContractState() const noexcept
 
 uint64_t FidelityFX::GetDevBenchFsrColorContractFlags() const noexcept
 {
-	return GetDevBenchFsrColorContractState() &
-	       (kDevBenchFsrColorHdrBit | kDevBenchFsrColorAutoExposureBit);
+	return GetDevBenchFsrColorContractState() & FSRColorContractPolicy::kFlagMask;
 }
 
 FidelityFX::FsrColorContractSnapshot FidelityFX::GetDevBenchFsrColorContractSnapshot() const noexcept
 {
 	const uint64_t requested = GetDevBenchFsrColorContractState();
+	const auto requestedContract = FSRColorContractPolicy::Decode(requested);
 	const uint64_t host = devBenchHostContextColorContract.load(std::memory_order_acquire);
 	const uint64_t runtime = devBenchRuntimeContextColorContract.load(std::memory_order_acquire);
 	return {
-		requested >> kDevBenchFsrColorRevisionShift,
-		(requested & kDevBenchFsrColorHdrBit) != 0,
-		(requested & kDevBenchFsrColorAutoExposureBit) != 0,
-		(host & kDevBenchFsrColorContextValidBit) != 0,
-		(host & kDevBenchFsrColorHdrBit) != 0,
-		(host & kDevBenchFsrColorAutoExposureBit) != 0,
+		requestedContract.revision,
+		requestedContract.highDynamicRangeInput,
+		requestedContract.autoExposure,
+		(host & FSRColorContractPolicy::kContextValidBit) != 0,
+		(host & FSRColorContractPolicy::kHighDynamicRangeInputBit) != 0,
+		(host & FSRColorContractPolicy::kAutoExposureBit) != 0,
 		devBenchHostContextGeneration.load(std::memory_order_acquire),
-		(runtime & kDevBenchFsrColorContextValidBit) != 0,
-		(runtime & kDevBenchFsrColorHdrBit) != 0,
-		(runtime & kDevBenchFsrColorAutoExposureBit) != 0,
+		(runtime & FSRColorContractPolicy::kContextValidBit) != 0,
+		(runtime & FSRColorContractPolicy::kHighDynamicRangeInputBit) != 0,
+		(runtime & FSRColorContractPolicy::kAutoExposureBit) != 0,
 		devBenchRuntimeContextGeneration.load(std::memory_order_acquire),
 	};
 }
@@ -1258,32 +1259,31 @@ bool FidelityFX::SetDevBenchFsrColorContract(
 	bool a_autoExposure,
 	uint64_t& a_resultingRevision) noexcept
 {
-	const uint64_t requestedFlags =
-		(a_highDynamicRangeInput ? kDevBenchFsrColorHdrBit : 0) |
-		(a_autoExposure ? kDevBenchFsrColorAutoExposureBit : 0);
 	auto current = GetDevBenchFsrColorContractState();
 	for (;;) {
-		const uint64_t revision = current >> kDevBenchFsrColorRevisionShift;
-		if (revision != a_expectedRevision) {
-			a_resultingRevision = revision;
+		const auto update = FSRColorContractPolicy::PlanUpdate(
+			current,
+			a_expectedRevision,
+			a_highDynamicRangeInput,
+			a_autoExposure);
+		if (!update.revisionMatched) {
+			a_resultingRevision = update.resultingRevision;
 			return false;
 		}
-		if ((current & (kDevBenchFsrColorHdrBit | kDevBenchFsrColorAutoExposureBit)) == requestedFlags) {
-			a_resultingRevision = revision;
+		if (!update.changed) {
+			a_resultingRevision = update.resultingRevision;
 			return true;
 		}
-		const uint64_t nextRevision = revision + 1;
-		const uint64_t desired = (nextRevision << kDevBenchFsrColorRevisionShift) | requestedFlags;
 		if (devBenchFsrColorContractState.compare_exchange_weak(
 				current,
-				desired,
+				update.desiredState,
 				std::memory_order_acq_rel,
 				std::memory_order_acquire)) {
 			{
 				const std::lock_guard lock(devBenchSuccessfulDispatchMutex);
 				devBenchSuccessfulDispatch = {};
 			}
-			a_resultingRevision = nextRevision;
+			a_resultingRevision = update.resultingRevision;
 			return true;
 		}
 	}
@@ -1394,18 +1394,27 @@ void FidelityFX::RecordDevBenchSuccessfulDispatch(
 	uint32_t a_displayHeight)
 {
 	const std::lock_guard lock(devBenchSuccessfulDispatchMutex);
-	uint64_t serial = ++devBenchSuccessfulDispatchSerial;
-	if (serial == 0)
-		serial = ++devBenchSuccessfulDispatchSerial;
 	const bool runtimePath = a_path == RuntimeUpscalerFramePath::kRuntimeFsr31 ||
 	                         a_path == RuntimeUpscalerFramePath::kRuntimeFsr4;
+	const uint32_t frame = globals::state ? std::max(globals::state->frameCount, 1u) : 0u;
+	(runtimePath ? devBenchRuntimeContextLastDispatchFrame : devBenchHostContextLastDispatchFrame)
+		.store(frame, std::memory_order_release);
 	const uint64_t contextState = (runtimePath ?
 									   devBenchRuntimeContextColorContract :
 									   devBenchHostContextColorContract)
 	                                  .load(std::memory_order_acquire);
+	if (!FSRColorContractPolicy::ContextMatches(
+			contextState,
+			GetDevBenchFsrColorContractState())) {
+		devBenchSuccessfulDispatch = {};
+		return;
+	}
+	uint64_t serial = ++devBenchSuccessfulDispatchSerial;
+	if (serial == 0)
+		serial = ++devBenchSuccessfulDispatchSerial;
 	devBenchSuccessfulDispatch = {
 		true,
-		globals::state ? std::max(globals::state->frameCount, 1u) : 0u,
+		frame,
 		a_path,
 		serial,
 		(runtimePath ? devBenchRuntimeContextGeneration : devBenchHostContextGeneration)
@@ -1415,8 +1424,8 @@ void FidelityFX::RecordDevBenchSuccessfulDispatch(
 		a_renderHeight,
 		a_displayWidth,
 		a_displayHeight,
-		(contextState & kDevBenchFsrColorHdrBit) != 0,
-		(contextState & kDevBenchFsrColorAutoExposureBit) != 0,
+		(contextState & FSRColorContractPolicy::kHighDynamicRangeInputBit) != 0,
+		(contextState & FSRColorContractPolicy::kAutoExposureBit) != 0,
 		false,
 		1.0f,
 	};
@@ -1897,7 +1906,7 @@ FidelityFX::LifecycleResult FidelityFX::CreateFSRResources()
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	colorContractFlags = GetDevBenchFsrColorContractFlags();
 #else
-	colorContractFlags = 0x3u;
+	colorContractFlags = FSRColorContractPolicy::kDefaultFlags;
 #endif
 	for (uint32_t i = 0; i < numContexts; ++i) {
 		FfxFsr3ContextDescription contextDescription{};
@@ -1949,7 +1958,7 @@ FidelityFX::LifecycleResult FidelityFX::CreateFSRResources()
 	fsrContextDisplayHeight = displayHeight;
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	devBenchHostContextColorContract.store(
-		kDevBenchFsrColorContextValidBit | colorContractFlags,
+		FSRColorContractPolicy::ContextState(colorContractFlags),
 		std::memory_order_release);
 	devBenchHostContextGeneration.fetch_add(1, std::memory_order_acq_rel);
 #endif
@@ -2029,6 +2038,7 @@ FidelityFX::LifecycleResult FidelityFX::DestroyRuntimeUpscalerContexts(bool a_wa
 	runtimeUpscalerRequestedVersion = 0;
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	devBenchRuntimeContextColorContract.store(0, std::memory_order_release);
+	devBenchRuntimeContextLastDispatchFrame.store(0, std::memory_order_release);
 #endif
 	return LifecycleResult::Ready;
 }
@@ -2241,10 +2251,13 @@ bool FidelityFX::AreFSRResourcesCompatible(uint32_t a_renderWidth, uint32_t a_re
 	bool colorContractCompatible = true;
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	const uint64_t contextColorContract = devBenchHostContextColorContract.load(std::memory_order_acquire);
-	colorContractCompatible =
-		(contextColorContract & kDevBenchFsrColorContextValidBit) != 0 &&
-		(contextColorContract & (kDevBenchFsrColorHdrBit | kDevBenchFsrColorAutoExposureBit)) ==
-			GetDevBenchFsrColorContractFlags();
+	const uint32_t lastDispatchFrame = devBenchHostContextLastDispatchFrame.load(std::memory_order_acquire);
+	const uint32_t currentFrame = globals::state ? std::max(globals::state->frameCount, 1u) : 0u;
+	const bool dispatchedThisFrame = currentFrame != 0 && lastDispatchFrame == currentFrame;
+	colorContractCompatible = FSRColorContractPolicy::CanReuseContext(
+		contextColorContract,
+		GetDevBenchFsrColorContractState(),
+		dispatchedThisFrame);
 #endif
 	return colorContractCompatible &&
 	       HasFSRResources() &&
@@ -2447,10 +2460,13 @@ bool FidelityFX::AreRuntimeUpscalerContextsCompatible(
 	bool colorContractCompatible = true;
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	const uint64_t contextColorContract = devBenchRuntimeContextColorContract.load(std::memory_order_acquire);
-	colorContractCompatible =
-		(contextColorContract & kDevBenchFsrColorContextValidBit) != 0 &&
-		(contextColorContract & (kDevBenchFsrColorHdrBit | kDevBenchFsrColorAutoExposureBit)) ==
-			GetDevBenchFsrColorContractFlags();
+	const uint32_t lastDispatchFrame = devBenchRuntimeContextLastDispatchFrame.load(std::memory_order_acquire);
+	const uint32_t currentFrame = globals::state ? std::max(globals::state->frameCount, 1u) : 0u;
+	const bool dispatchedThisFrame = currentFrame != 0 && lastDispatchFrame == currentFrame;
+	colorContractCompatible = FSRColorContractPolicy::CanReuseContext(
+		contextColorContract,
+		GetDevBenchFsrColorContractState(),
+		dispatchedThisFrame);
 #endif
 	return colorContractCompatible &&
 	       FSRTemporalTuningPolicy::CanReuseContextProfile(temporalContextRevision,
@@ -3438,7 +3454,7 @@ FidelityFX::LifecycleResult FidelityFX::EnsureRuntimeUpscalerContexts(uint32_t a
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	colorContractFlags = GetDevBenchFsrColorContractFlags();
 #else
-	colorContractFlags = 0x3u;
+	colorContractFlags = FSRColorContractPolicy::kDefaultFlags;
 #endif
 
 	for (uint32_t i = 0; i < a_contextCount; ++i) {
@@ -3558,7 +3574,7 @@ FidelityFX::LifecycleResult FidelityFX::EnsureRuntimeUpscalerContexts(uint32_t a
 	runtimeUpscalerRequestedVersion = a_requestedVersion;
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	devBenchRuntimeContextColorContract.store(
-		kDevBenchFsrColorContextValidBit | colorContractFlags,
+		FSRColorContractPolicy::ContextState(colorContractFlags),
 		std::memory_order_release);
 	devBenchRuntimeContextGeneration.fetch_add(1, std::memory_order_acq_rel);
 #endif

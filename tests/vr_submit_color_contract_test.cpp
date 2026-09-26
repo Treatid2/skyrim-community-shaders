@@ -1,3 +1,4 @@
+#include "Features/Upscaling/FSRColorContractPolicy.h"
 #include "Features/Upscaling/VRSubmitColorContract.h"
 
 namespace
@@ -34,11 +35,44 @@ namespace
 		       kLegacyFsrHighDynamicRange;
 	}
 
+	constexpr bool CoversFsrProcessingControl()
+	{
+		using namespace FSRColorContractPolicy;
+		const auto initial = Decode(kDefaultState);
+		if (initial != Requested{} ||
+			!ContextMatches(ContextState(kDefaultState), kDefaultState)) {
+			return false;
+		}
+
+		const auto stale = PlanUpdate(kDefaultState, 0, false, false);
+		if (stale.revisionMatched || stale.changed || stale.resultingRevision != 1)
+			return false;
+		const auto unchanged = PlanUpdate(kDefaultState, 1, true, true);
+		if (!unchanged.revisionMatched || unchanged.changed ||
+			unchanged.desiredState != kDefaultState || unchanged.resultingRevision != 1) {
+			return false;
+		}
+
+		const auto changed = PlanUpdate(kDefaultState, 1, false, true);
+		const auto decoded = Decode(changed.desiredState);
+		if (!changed.revisionMatched || !changed.changed ||
+			decoded.revision != 2 || decoded.highDynamicRangeInput || !decoded.autoExposure) {
+			return false;
+		}
+		return !CanReuseContext(ContextState(kDefaultState), changed.desiredState, false) &&
+		       CanReuseContext(ContextState(kDefaultState), changed.desiredState, true) &&
+		       CanReuseContext(ContextState(changed.desiredState), changed.desiredState, false);
+	}
+
 	static_assert(CoversPresentationAndVendorAdmission());
 	static_assert(CoversIndependentRangeAndProcessing());
+	static_assert(CoversFsrProcessingControl());
 }
 
 int main()
 {
-	return CoversPresentationAndVendorAdmission() && CoversIndependentRangeAndProcessing() ? 0 : 1;
+	return CoversPresentationAndVendorAdmission() && CoversIndependentRangeAndProcessing() &&
+	               CoversFsrProcessingControl() ?
+	           0 :
+	           1;
 }

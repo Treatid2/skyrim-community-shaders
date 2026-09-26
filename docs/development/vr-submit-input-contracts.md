@@ -99,6 +99,19 @@ unchanged and are named as a legacy processing policy; those flags do not
 relabel the captured source as HDR. This change introduces no gamma conversion,
 new floating-point color buffers, or claim of improved color fidelity.
 
+DevBench builds expose `communityshaders.fsr_color_contract` for controlled
+mapping experiments. Its revisioned `set` action can independently request the
+FSR high-dynamic-range-input and auto-exposure processing flags. A changed
+request invalidates prior dispatch evidence and makes host and runtime FSR
+contexts incompatible, so their existing render-thread lifecycle recreates
+them at the next safe frame boundary. A request made between stereo eyes keeps
+the current context through that frame. Status reports requested and effective
+flags, context generations, dimensions, and the latest successful dispatch
+serial.
+The production default remains both flags enabled. The tool does not mutate the
+source-color contract above, persist settings, select a provider, change
+resolution, or touch DLSS/DLAA behavior.
+
 The selective design lessons came from
 [Open Shaders PR #625](https://github.com/alandtse/open-shaders/pull/625),
 reviewed at `bb776e8bb2b36237e7f22141d653f27e17525927`. Its complete

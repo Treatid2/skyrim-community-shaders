@@ -39,6 +39,14 @@ file(READ
     _fidelityfx_source
 )
 file(READ
+    "${PROJECT_ROOT}/src/Features/Upscaling/FSRColorContractDevBenchBridge.cpp"
+    _fsr_color_contract_bridge
+)
+file(READ
+    "${PROJECT_ROOT}/src/Features/Upscaling/FSRColorContractPolicy.h"
+    _fsr_color_contract_policy
+)
+file(READ
     "${PROJECT_ROOT}/docs/development/vr-render-scale-replacement-telemetry.md"
     _replacement_telemetry_documentation
 )
@@ -256,6 +264,48 @@ foreach(_fsr_failure_contract IN ITEMS
 			"FSR failure evidence is missing: ${_fsr_failure_contract}"
 		)
 	endif()
+endforeach()
+
+foreach(_fsr_color_contract IN ITEMS
+    "communityshaders.fsr_color_contract"
+    "expectedRevision"
+    "highDynamicRangeInput"
+    "autoExposure"
+    "sourceColorContractChanged"
+    "SetDevBenchFsrColorContract("
+    "GetDevBenchFsrColorContractSnapshot()"
+    "GetRuntimeUpscalerDispatchSnapshotForRenderThread()"
+    "FSRColorContractPolicy::PlanUpdate("
+    "FSRColorContractPolicy::ContextMatches("
+    "FSRColorContractDevBenchBridge::Install()"
+)
+    string(FIND
+        "${_fsr_color_contract_bridge}\n${_fsr_color_contract_policy}\n${_fidelityfx_source}\n${_upscaling_source}"
+        "${_fsr_color_contract}"
+        _fsr_color_contract_position
+    )
+    if(_fsr_color_contract_position EQUAL -1)
+        message(FATAL_ERROR
+            "FSR colour-contract control is missing: ${_fsr_color_contract}"
+        )
+    endif()
+endforeach()
+
+foreach(_forbidden_fsr_color_contract IN ITEMS
+    "\"persist\""
+    "SetDLSS"
+    "DLSSUsesHDR"
+)
+    string(FIND
+        "${_fsr_color_contract_bridge}"
+        "${_forbidden_fsr_color_contract}"
+        _forbidden_fsr_color_contract_position
+    )
+    if(NOT _forbidden_fsr_color_contract_position EQUAL -1)
+        message(FATAL_ERROR
+            "FSR colour-contract bridge crossed its boundary: ${_forbidden_fsr_color_contract}"
+        )
+    endif()
 endforeach()
 
 string(FIND "${_upscaling_source}" "admittedExistingDLSSProvider"

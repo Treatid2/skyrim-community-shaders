@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "FSRColorContractPolicy.h"
 #include "FSRSharedGuidePolicy.h"
 
 #include <FidelityFX/host/backends/dx11/ffx_dx11.h>
@@ -250,9 +251,9 @@ public:
 	std::string GetRuntimeUpscalerProviderName() const;
 	std::string GetRuntimeUpscalerRequestedVersionString() const;
 #ifdef DEVBENCH_BRIDGE_ENABLED
-	/** @brief Returns the requested and created FSR colour-input contract for DevBench evidence. */
+	/** @brief Returns the requested and created FSR processing contract for DevBench evidence. */
 	FsrColorContractSnapshot GetDevBenchFsrColorContractSnapshot() const noexcept;
-	/** @brief Atomically changes the runtime-only FSR colour-input contract. */
+	/** @brief Atomically changes the DevBench-only FSR processing contract. */
 	bool SetDevBenchFsrColorContract(
 		uint64_t a_expectedRevision,
 		bool a_highDynamicRangeInput,
@@ -435,14 +436,6 @@ private:
 	RuntimeUpscalerFramePath GetRuntimeUpscalerProviderFramePath(uint32_t a_requestedVersion) const;
 	void RecordRuntimeUpscalerFramePath(RuntimeUpscalerFramePath a_path);
 #ifdef DEVBENCH_BRIDGE_ENABLED
-	static constexpr uint64_t kDevBenchFsrColorHdrBit = 1ull << 0;
-	static constexpr uint64_t kDevBenchFsrColorAutoExposureBit = 1ull << 1;
-	static constexpr uint64_t kDevBenchFsrColorContextValidBit = 1ull << 63;
-	static constexpr uint64_t kDevBenchFsrColorRevisionShift = 2;
-	static constexpr uint64_t kDevBenchFsrColorDefaultState =
-		(1ull << kDevBenchFsrColorRevisionShift) |
-		kDevBenchFsrColorHdrBit |
-		kDevBenchFsrColorAutoExposureBit;
 	[[nodiscard]] uint64_t GetDevBenchFsrColorContractState() const noexcept;
 	[[nodiscard]] uint64_t GetDevBenchFsrColorContractFlags() const noexcept;
 	void RecordDevBenchSuccessfulDispatch(
@@ -452,11 +445,13 @@ private:
 		uint32_t a_renderHeight,
 		uint32_t a_displayWidth,
 		uint32_t a_displayHeight);
-	std::atomic<uint64_t> devBenchFsrColorContractState{ kDevBenchFsrColorDefaultState };
+	std::atomic<uint64_t> devBenchFsrColorContractState{ FSRColorContractPolicy::kDefaultState };
 	std::atomic<uint64_t> devBenchHostContextColorContract{ 0 };
 	std::atomic<uint64_t> devBenchRuntimeContextColorContract{ 0 };
 	std::atomic<uint64_t> devBenchHostContextGeneration{ 0 };
 	std::atomic<uint64_t> devBenchRuntimeContextGeneration{ 0 };
+	std::atomic<uint32_t> devBenchHostContextLastDispatchFrame{ 0 };
+	std::atomic<uint32_t> devBenchRuntimeContextLastDispatchFrame{ 0 };
 	mutable std::mutex devBenchSuccessfulDispatchMutex;
 	RuntimeUpscalerDispatchSnapshot devBenchSuccessfulDispatch{};
 	uint64_t devBenchSuccessfulDispatchSerial = 0;
