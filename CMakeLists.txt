@@ -1646,6 +1646,26 @@ if(BUILD_CONTROLLER_TESTS)
         tests/perf_mode_restart_state_test.cpp
     )
     add_controller_test(
+        motion_sharpening_policy_test
+        MotionSharpeningPolicy
+        tests/motion_sharpening_policy_test.cpp
+    )
+    add_controller_test(
+        sharpener_bindings_test
+        SharpenerBindings
+        tests/sharpener_bindings_test.cpp
+    )
+    target_link_libraries(sharpener_bindings_test PRIVATE d3d11.lib)
+    add_controller_test(
+        motion_sharpening_settings_test
+        MotionSharpeningSettings
+        tests/motion_sharpening_settings_test.cpp
+    )
+    target_link_libraries(
+        motion_sharpening_settings_test
+        PRIVATE nlohmann_json::nlohmann_json
+    )
+    add_controller_test(
         performance_tuning_statistics_test
         PerformanceTuningStatistics
         tests/performance_tuning_statistics_test.cpp
@@ -1732,6 +1752,21 @@ if(BUILD_CONTROLLER_TESTS)
         tests/streamline_frame_token_publication_test.cpp
     )
     add_controller_test(
+        vr_submit_temporal_snapshot_test
+        VRSubmitTemporalSnapshot
+        tests/vr_submit_temporal_snapshot_test.cpp
+    )
+    add_controller_test(
+        vr_submit_color_contract_test
+        VRSubmitColorContract
+        tests/vr_submit_color_contract_test.cpp
+    )
+    add_controller_test(
+        vr_submit_stereo_batch_test
+        VRSubmitStereoBatch
+        tests/vr_submit_stereo_batch_test.cpp
+    )
+    add_controller_test(
         main_thread_dispatch_policy_test
         MainThreadDispatchPolicy
         tests/main_thread_dispatch_policy_test.cpp
@@ -1790,6 +1825,87 @@ if(BUILD_CONTROLLER_TESTS)
         fsr_runtime_lifecycle_policy_test
         FSRRuntimeLifecyclePolicy
         tests/fsr_runtime_lifecycle_policy_test.cpp
+    )
+    add_controller_test(
+        fsr_temporal_tuning_policy_test
+        FSRTemporalTuningPolicy
+        tests/fsr_temporal_tuning_policy_test.cpp
+    )
+    set(_fsr_temporal_test_dir "${CMAKE_CURRENT_BINARY_DIR}/generated/fsr-temporal-tuning")
+    set(_fsr_temporal_headers
+        "${_fsr_temporal_test_dir}/temporal_settings_load_under_test.h"
+        "${_fsr_temporal_test_dir}/temporal_provider_query_under_test.h"
+        "${_fsr_temporal_test_dir}/temporal_provider_result_under_test.h"
+    )
+    add_custom_command(
+        OUTPUT ${_fsr_temporal_headers}
+        COMMAND "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}"
+            "-DOUTPUT_DIRECTORY=${_fsr_temporal_test_dir}" -P
+            "${PROJECT_SOURCE_DIR}/tests/extract_fsr_temporal_tuning.cmake"
+        DEPENDS src/Features/Upscaling.cpp src/Features/Upscaling/FidelityFX.cpp
+            tests/extract_fsr_temporal_tuning.cmake
+        VERBATIM
+    )
+    add_custom_target(fsr_temporal_tuning_test_headers DEPENDS ${_fsr_temporal_headers})
+    add_controller_test(fsr_temporal_tuning_serialization_test FSRTemporalTuningSerialization tests/fsr_temporal_tuning_serialization_test.cpp)
+    add_controller_test(fsr_temporal_tuning_provider_test FSRTemporalTuningProvider tests/fsr_temporal_tuning_provider_test.cpp)
+    foreach(_temporal_test fsr_temporal_tuning_serialization_test fsr_temporal_tuning_provider_test)
+        add_dependencies(${_temporal_test} fsr_temporal_tuning_test_headers)
+        target_include_directories(${_temporal_test} PRIVATE "${_fsr_temporal_test_dir}")
+    endforeach()
+    target_link_libraries(fsr_temporal_tuning_serialization_test PRIVATE nlohmann_json::nlohmann_json)
+
+    add_controller_test(
+        fsr_shared_guides_policy_test
+        FSRSharedGuidesPolicy
+        tests/fsr_shared_guides_policy_test.cpp
+    )
+    set(_fsr_shared_guide_test_dir
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/fsr-shared-guide"
+    )
+    set(_fsr_shared_guide_headers
+        "${_fsr_shared_guide_test_dir}/shared_guide_handle_under_test.h"
+        "${_fsr_shared_guide_test_dir}/shared_guide_import_under_test.h"
+    )
+    add_custom_command(
+        OUTPUT ${_fsr_shared_guide_headers}
+        COMMAND
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}"
+            "-DOUTPUT_DIRECTORY=${_fsr_shared_guide_test_dir}" -P
+            "${PROJECT_SOURCE_DIR}/tests/extract_fsr_shared_guide_interop.cmake"
+        DEPENDS
+            src/Buffer.h
+            src/Features/Upscaling/DX12SwapChain.cpp
+            tests/extract_fsr_shared_guide_interop.cmake
+        VERBATIM
+    )
+    add_executable(
+        fsr_shared_guide_interop_test
+        EXCLUDE_FROM_ALL
+        tests/fsr_shared_guide_interop_test.cpp
+        ${_fsr_shared_guide_headers}
+    )
+    target_compile_features(fsr_shared_guide_interop_test PRIVATE cxx_std_23)
+    target_include_directories(
+        fsr_shared_guide_interop_test
+        PRIVATE "${_fsr_shared_guide_test_dir}"
+    )
+    target_link_libraries(
+        fsr_shared_guide_interop_test
+        PRIVATE d3d11 d3d12 dxgi runtimeobject Microsoft::DirectX-Headers
+    )
+    add_test(NAME FSRSharedGuideInterop COMMAND fsr_shared_guide_interop_test)
+    add_test(
+        NAME FSRSharedGuideInteropCapability
+        COMMAND fsr_shared_guide_interop_test --capability-policy-only
+    )
+    set_tests_properties(
+        FSRSharedGuideInteropCapability
+        PROPERTIES LABELS "ControllerTests"
+    )
+    set_tests_properties(
+        FSRSharedGuideInterop
+        PROPERTIES LABELS "GraphicsTests" SKIP_RETURN_CODE 77
     )
     set(_fsr_eye_dispatch_test_dir
         "${CMAKE_CURRENT_BINARY_DIR}/generated/fsr-eye-dispatch"
@@ -1863,6 +1979,12 @@ if(BUILD_CONTROLLER_TESTS)
         ShaderCacheProvenance
         tests/shader_cache_provenance_test.cpp
     )
+    add_controller_test(
+        shader_source_provenance_test
+        ShaderSourceProvenance
+        tests/shader_source_provenance_test.cpp
+    )
+    target_link_libraries(shader_source_provenance_test PRIVATE xxHash::xxhash)
     add_controller_test(
         generation_claim_test
         GenerationClaim
@@ -2319,15 +2441,26 @@ if(BUILD_CONTROLLER_TESTS)
         src/Utils/CryptoHash.cpp
     )
     target_compile_features(shader_cache_pack_test PRIVATE cxx_std_23)
-    if(MSVC)
-        target_compile_options(shader_cache_pack_test PRIVATE /UNDEBUG)
-    else()
-        target_compile_options(shader_cache_pack_test PRIVATE -UNDEBUG)
-    endif()
+    target_compile_definitions(
+        shader_cache_pack_test
+        PRIVATE CSX_SHADER_CACHE_PACK_TESTING
+    )
     target_include_directories(
         shader_cache_pack_test
         PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src"
     )
+    foreach(
+        CACHE_TEST_TARGET
+        api_shader_compatibility_registry_test
+        shader_cache_pack_test
+        shader_source_provenance_test
+    )
+        if(MSVC)
+            target_compile_options(${CACHE_TEST_TARGET} PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${CACHE_TEST_TARGET} PRIVATE -UNDEBUG)
+        endif()
+    endforeach()
     target_link_libraries(
         shader_cache_pack_test
         PRIVATE bcrypt.lib nlohmann_json::nlohmann_json
@@ -2413,6 +2546,9 @@ if(BUILD_CONTROLLER_TESTS)
         controller_tests
         DEPENDS
             perf_mode_restart_state_test
+            motion_sharpening_policy_test
+            sharpener_bindings_test
+            motion_sharpening_settings_test
             vr_vendor_relatch_policy_test
             vr_render_scale_authority_policy_test
             vr_render_scale_mode_policy_test
@@ -2421,6 +2557,9 @@ if(BUILD_CONTROLLER_TESTS)
             vr_render_scale_qualification_policy_test
             vr_render_scale_replacement_telemetry_policy_test
             streamline_frame_token_publication_test
+            vr_submit_temporal_snapshot_test
+            vr_submit_color_contract_test
+            vr_submit_stereo_batch_test
             main_thread_dispatch_policy_test
             vr_render_scale_preparation_policy_test
             vr_presentation_stretch_telemetry_policy_test
@@ -2428,6 +2567,11 @@ if(BUILD_CONTROLLER_TESTS)
             light_limit_fix_vr_hook_policy_test
             fsr_host_lifecycle_policy_test
             fsr_runtime_lifecycle_policy_test
+            fsr_temporal_tuning_policy_test
+            fsr_temporal_tuning_serialization_test
+            fsr_temporal_tuning_provider_test
+            fsr_shared_guides_policy_test
+            fsr_shared_guide_interop_test
             fsr_eye_dispatch_test
             vr_submit_input_freshness_policy_test
             vr_submit_input_freshness_composition_test
@@ -2436,6 +2580,7 @@ if(BUILD_CONTROLLER_TESTS)
             shader_cache_disable_policy_test
             shader_cache_enable_policy_test
             shader_cache_provenance_test
+            shader_source_provenance_test
             cache_invalidation_test
             shader_compilation_scheduling_policy_test
             volumetric_lighting_tuning_policy_test
