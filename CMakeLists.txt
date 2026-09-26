@@ -42,19 +42,13 @@ set(CSX_TEST_BUILD
     CACHE STRING
     "Optional test distribution identity, for example RC218-2026-09-07."
 )
-if(CSX_TEST_BUILD)
-    if(
-        NOT CSX_TEST_BUILD
-            MATCHES
-            [[^(RC[1-9][0-9]*)-([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])$]]
-    )
-        message(
-            FATAL_ERROR
-            "CSX_TEST_BUILD must use the RC<number>-<YYYY-MM-DD> format."
-        )
-    endif()
-    set(CSX_TEST_BUILD_NUMBER "${CMAKE_MATCH_1}")
-    set(CSX_TEST_BUILD_DATE "${CMAKE_MATCH_2}")
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/TestBuildVersion.cmake")
+csx_parse_test_build(
+    "${CSX_TEST_BUILD}"
+    CSX_TEST_BUILD_NUMBER
+    CSX_TEST_BUILD_DATE
+)
+if(NOT "${CSX_TEST_BUILD}" STREQUAL "")
     set(CSX_BUILD_VERSION
         "${CSX_VERSION} ${CSX_TEST_BUILD_NUMBER} (${CSX_TEST_BUILD_DATE})"
     )
@@ -681,7 +675,7 @@ if(_AIO_FEATURE_DIR_NAMES_TO_EXCLUDE)
     endforeach()
 endif()
 string(TIMESTAMP UTC_NOW "%Y-%m-%dT%H-%MZ" UTC)
-if(CSX_TEST_BUILD)
+if(NOT "${CSX_TEST_BUILD}" STREQUAL "")
     set(CSX_PACKAGE_STAMP "${CSX_VERSION}-${CSX_TEST_BUILD}")
 else()
     set(CSX_PACKAGE_STAMP "${UTC_NOW}")
@@ -1668,6 +1662,26 @@ if(BUILD_CONTROLLER_TESTS)
         tests/perf_mode_restart_state_test.cpp
     )
     add_controller_test(
+        motion_sharpening_policy_test
+        MotionSharpeningPolicy
+        tests/motion_sharpening_policy_test.cpp
+    )
+    add_controller_test(
+        sharpener_bindings_test
+        SharpenerBindings
+        tests/sharpener_bindings_test.cpp
+    )
+    target_link_libraries(sharpener_bindings_test PRIVATE d3d11.lib)
+    add_controller_test(
+        motion_sharpening_settings_test
+        MotionSharpeningSettings
+        tests/motion_sharpening_settings_test.cpp
+    )
+    target_link_libraries(
+        motion_sharpening_settings_test
+        PRIVATE nlohmann_json::nlohmann_json
+    )
+    add_controller_test(
         performance_tuning_statistics_test
         PerformanceTuningStatistics
         tests/performance_tuning_statistics_test.cpp
@@ -1683,9 +1697,65 @@ if(BUILD_CONTROLLER_TESTS)
         tests/vr_render_scale_authority_policy_test.cpp
     )
     add_controller_test(
+        vr_render_scale_mode_policy_test
+        VRRenderScaleModePolicy
+        tests/vr_render_scale_mode_policy_test.cpp
+    )
+    set(_upscaling_restore_test_dir
+        "${CMAKE_CURRENT_BINARY_DIR}/upscaling_restore_test"
+    )
+    set(_upscaling_restore_test_headers
+        "${_upscaling_restore_test_dir}/upscaling_measurement_restore_types.h"
+        "${_upscaling_restore_test_dir}/upscaling_measurement_restore_under_test.h"
+    )
+    add_custom_command(
+        OUTPUT ${_upscaling_restore_test_headers}
+        COMMAND
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}"
+            "-DOUTPUT_DIRECTORY=${_upscaling_restore_test_dir}" -P
+            "${PROJECT_SOURCE_DIR}/tests/extract_upscaling_measurement_restore.cmake"
+        DEPENDS
+            src/Features/Upscaling.cpp
+            src/Features/Upscaling.h
+            tests/extract_upscaling_measurement_restore.cmake
+        VERBATIM
+    )
+    add_controller_test(
+        upscaling_measurement_restore_test
+        UpscalingMeasurementRestore
+        tests/upscaling_measurement_restore_test.cpp
+    )
+    target_sources(
+        upscaling_measurement_restore_test
+        PRIVATE ${_upscaling_restore_test_headers}
+    )
+    target_include_directories(
+        upscaling_measurement_restore_test
+        PRIVATE "${_upscaling_restore_test_dir}"
+    )
+    target_link_libraries(
+        upscaling_measurement_restore_test
+        PRIVATE nlohmann_json::nlohmann_json magic_enum::magic_enum
+    )
+    add_test(
+        NAME VRRenderScaleLinkContract
+        COMMAND
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${CMAKE_CURRENT_SOURCE_DIR}" -P
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/render_scale_link_contract_test.cmake"
+    )
+    set_tests_properties(
+        VRRenderScaleLinkContract
+        PROPERTIES LABELS "ControllerTests"
+    )
+    add_controller_test(
         upscaling_provider_selection_policy_test
         UpscalingProviderSelectionPolicy
         tests/upscaling_provider_selection_policy_test.cpp
+    )
+    add_controller_test(
+        encode_textures_host_policy_test
+        EncodeTexturesHostPolicy
+        tests/encode_textures_host_policy_test.cpp
     )
     add_controller_test(
         vr_render_scale_qualification_policy_test
@@ -1698,9 +1768,29 @@ if(BUILD_CONTROLLER_TESTS)
         tests/vr_render_scale_replacement_telemetry_policy_test.cpp
     )
     add_controller_test(
+        vr_render_scale_retry_telemetry_test
+        VRRenderScaleRetryTelemetry
+        tests/vr_render_scale_retry_telemetry_test.cpp
+    )
+    add_controller_test(
         streamline_frame_token_publication_test
         StreamlineFrameTokenPublication
         tests/streamline_frame_token_publication_test.cpp
+    )
+    add_controller_test(
+        vr_submit_temporal_snapshot_test
+        VRSubmitTemporalSnapshot
+        tests/vr_submit_temporal_snapshot_test.cpp
+    )
+    add_controller_test(
+        vr_submit_color_contract_test
+        VRSubmitColorContract
+        tests/vr_submit_color_contract_test.cpp
+    )
+    add_controller_test(
+        vr_submit_stereo_batch_test
+        VRSubmitStereoBatch
+        tests/vr_submit_stereo_batch_test.cpp
     )
     add_controller_test(
         main_thread_dispatch_policy_test
@@ -1732,6 +1822,28 @@ if(BUILD_CONTROLLER_TESTS)
         VRRenderScaleDevBenchContract
         PROPERTIES LABELS "ControllerTests"
     )
+    add_test(
+        NAME VRSubmitInputFreshnessContract
+        COMMAND
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}" -P
+            "${PROJECT_SOURCE_DIR}/tests/vr_submit_input_freshness_contract_test.cmake"
+    )
+    add_test(
+        NAME FSRMainPassDeferredFallbackContract
+        COMMAND
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}" -P
+            "${PROJECT_SOURCE_DIR}/tests/fsr_main_pass_deferred_fallback_contract_test.cmake"
+    )
+    set_tests_properties(
+        VRSubmitInputFreshnessContract
+        FSRMainPassDeferredFallbackContract
+        PROPERTIES LABELS "ControllerTests"
+    )
+    add_controller_test(
+        fsr_main_pass_policy_test
+        FSRMainPassPolicy
+        tests/fsr_main_pass_policy_test.cpp
+    )
     add_controller_test(
         reflex_policy_test
         ReflexPolicy
@@ -1753,6 +1865,157 @@ if(BUILD_CONTROLLER_TESTS)
         tests/fsr_runtime_lifecycle_policy_test.cpp
     )
     add_controller_test(
+        fsr_temporal_tuning_policy_test
+        FSRTemporalTuningPolicy
+        tests/fsr_temporal_tuning_policy_test.cpp
+    )
+    set(_fsr_temporal_test_dir
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/fsr-temporal-tuning"
+    )
+    set(_fsr_temporal_headers
+        "${_fsr_temporal_test_dir}/temporal_settings_load_under_test.h"
+        "${_fsr_temporal_test_dir}/temporal_provider_query_under_test.h"
+        "${_fsr_temporal_test_dir}/temporal_provider_result_under_test.h"
+    )
+    add_custom_command(
+        OUTPUT ${_fsr_temporal_headers}
+        COMMAND
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}"
+            "-DOUTPUT_DIRECTORY=${_fsr_temporal_test_dir}" -P
+            "${PROJECT_SOURCE_DIR}/tests/extract_fsr_temporal_tuning.cmake"
+        DEPENDS
+            src/Features/Upscaling.cpp
+            src/Features/Upscaling/FidelityFX.cpp
+            tests/extract_fsr_temporal_tuning.cmake
+        VERBATIM
+    )
+    add_custom_target(
+        fsr_temporal_tuning_test_headers
+        DEPENDS ${_fsr_temporal_headers}
+    )
+    add_controller_test(fsr_temporal_tuning_serialization_test FSRTemporalTuningSerialization tests/fsr_temporal_tuning_serialization_test.cpp)
+    add_controller_test(fsr_temporal_tuning_provider_test FSRTemporalTuningProvider tests/fsr_temporal_tuning_provider_test.cpp)
+    foreach(
+        _temporal_test
+        fsr_temporal_tuning_serialization_test
+        fsr_temporal_tuning_provider_test
+    )
+        add_dependencies(${_temporal_test} fsr_temporal_tuning_test_headers)
+        target_include_directories(
+            ${_temporal_test}
+            PRIVATE "${_fsr_temporal_test_dir}"
+        )
+    endforeach()
+    target_link_libraries(
+        fsr_temporal_tuning_serialization_test
+        PRIVATE nlohmann_json::nlohmann_json
+    )
+
+    add_controller_test(
+        fsr_shared_guides_policy_test
+        FSRSharedGuidesPolicy
+        tests/fsr_shared_guides_policy_test.cpp
+    )
+    set(_fsr_shared_guide_test_dir
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/fsr-shared-guide"
+    )
+    set(_fsr_shared_guide_headers
+        "${_fsr_shared_guide_test_dir}/shared_guide_handle_under_test.h"
+        "${_fsr_shared_guide_test_dir}/shared_guide_import_under_test.h"
+    )
+    add_custom_command(
+        OUTPUT ${_fsr_shared_guide_headers}
+        COMMAND
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}"
+            "-DOUTPUT_DIRECTORY=${_fsr_shared_guide_test_dir}" -P
+            "${PROJECT_SOURCE_DIR}/tests/extract_fsr_shared_guide_interop.cmake"
+        DEPENDS
+            src/Buffer.h
+            src/Features/Upscaling/DX12SwapChain.cpp
+            tests/extract_fsr_shared_guide_interop.cmake
+        VERBATIM
+    )
+    add_executable(
+        fsr_shared_guide_interop_test
+        EXCLUDE_FROM_ALL
+        tests/fsr_shared_guide_interop_test.cpp
+        ${_fsr_shared_guide_headers}
+    )
+    target_compile_features(fsr_shared_guide_interop_test PRIVATE cxx_std_23)
+    target_include_directories(
+        fsr_shared_guide_interop_test
+        PRIVATE "${_fsr_shared_guide_test_dir}"
+    )
+    target_link_libraries(
+        fsr_shared_guide_interop_test
+        PRIVATE d3d11 d3d12 dxgi runtimeobject Microsoft::DirectX-Headers
+    )
+    add_test(NAME FSRSharedGuideInterop COMMAND fsr_shared_guide_interop_test)
+    add_test(
+        NAME FSRSharedGuideInteropCapability
+        COMMAND fsr_shared_guide_interop_test --capability-policy-only
+    )
+    set_tests_properties(
+        FSRSharedGuideInteropCapability
+        PROPERTIES LABELS "ControllerTests"
+    )
+    set_tests_properties(
+        FSRSharedGuideInterop
+        PROPERTIES LABELS "GraphicsTests" SKIP_RETURN_CODE 77
+    )
+    set(_fsr_eye_dispatch_test_dir
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/fsr-eye-dispatch"
+    )
+    set(_fsr_eye_dispatch_test_headers
+        "${_fsr_eye_dispatch_test_dir}/fsr_eye_dispatch_types_under_test.h"
+        "${_fsr_eye_dispatch_test_dir}/fsr_eye_dispatch_params_under_test.h"
+        "${_fsr_eye_dispatch_test_dir}/fsr_eye_dispatch_under_test.h"
+        "${_fsr_eye_dispatch_test_dir}/fsr_deferred_presentation_under_test.h"
+        "${_fsr_eye_dispatch_test_dir}/fsr_runtime_gate_under_test.h"
+    )
+    add_custom_command(
+        OUTPUT ${_fsr_eye_dispatch_test_headers}
+        COMMAND
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}"
+            "-DOUTPUT_DIRECTORY=${_fsr_eye_dispatch_test_dir}" -P
+            "${PROJECT_SOURCE_DIR}/tests/extract_fsr_eye_dispatch.cmake"
+        DEPENDS
+            src/Features/Upscaling.cpp
+            src/Features/Upscaling.h
+            src/Features/Upscaling/FidelityFX.cpp
+            src/Features/Upscaling/FidelityFX.h
+            tests/extract_fsr_eye_dispatch.cmake
+        VERBATIM
+    )
+    add_controller_test(
+        fsr_eye_dispatch_test
+        FSREyeDispatch
+        tests/fsr_eye_dispatch_test.cpp
+    )
+    target_sources(
+        fsr_eye_dispatch_test
+        PRIVATE ${_fsr_eye_dispatch_test_headers}
+    )
+    target_include_directories(
+        fsr_eye_dispatch_test
+        PRIVATE "${_fsr_eye_dispatch_test_dir}"
+    )
+    add_controller_test(
+        vr_submit_input_freshness_policy_test
+        VRSubmitInputFreshnessPolicy
+        tests/vr_submit_input_freshness_policy_test.cpp
+    )
+    add_controller_test(
+        vr_submit_input_freshness_composition_test
+        VRSubmitInputFreshnessComposition
+        tests/vr_submit_input_freshness_composition_test.cpp
+    )
+    target_include_directories(
+        vr_submit_input_freshness_composition_test
+        PRIVATE
+            "${PROJECT_SOURCE_DIR}/extern/CommonLibSSE-NG/extern/openvr/headers"
+    )
+    add_controller_test(
         overlay_policy_test
         OverlayPolicy
         tests/overlay_policy_test.cpp
@@ -1772,6 +2035,12 @@ if(BUILD_CONTROLLER_TESTS)
         ShaderCacheProvenance
         tests/shader_cache_provenance_test.cpp
     )
+    add_controller_test(
+        shader_source_provenance_test
+        ShaderSourceProvenance
+        tests/shader_source_provenance_test.cpp
+    )
+    target_link_libraries(shader_source_provenance_test PRIVATE xxHash::xxhash)
     add_controller_test(
         generation_claim_test
         GenerationClaim
@@ -1810,6 +2079,11 @@ if(BUILD_CONTROLLER_TESTS)
         vr_depth_culling_enable_policy_test
         VRDepthCullingEnablePolicy
         tests/vr_depth_culling_enable_policy_test.cpp
+    )
+    add_controller_test(
+        vr_depth_culling_telemetry_policy_test
+        VRDepthCullingTelemetryPolicy
+        tests/vr_depth_culling_telemetry_policy_test.cpp
     )
     add_controller_test(
         vr_depth_culling_temporal_policy_test
@@ -2007,6 +2281,41 @@ if(BUILD_CONTROLLER_TESTS)
         PROPERTIES LABELS "ControllerTests"
     )
 
+    add_controller_test(
+        devbench_main_thread_dispatch_test
+        DevBenchMainThreadDispatch
+        tests/devbench_main_thread_dispatch_test.cpp
+    )
+    target_link_libraries(
+        devbench_main_thread_dispatch_test
+        PRIVATE nlohmann_json::nlohmann_json
+    )
+    set_tests_properties(DevBenchMainThreadDispatch PROPERTIES TIMEOUT 10)
+
+    add_executable(
+        screenshot_service_dispatch_test
+        EXCLUDE_FROM_ALL
+        tests/screenshot_service_dispatch_test.cpp
+        src/Api/ScreenshotServiceDispatch.cpp
+    )
+    target_compile_features(screenshot_service_dispatch_test PRIVATE cxx_std_23)
+    target_include_directories(
+        screenshot_service_dispatch_test
+        PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(
+        screenshot_service_dispatch_test
+        PRIVATE nlohmann_json::nlohmann_json
+    )
+    add_test(
+        NAME ScreenshotServiceDispatch
+        COMMAND screenshot_service_dispatch_test
+    )
+    set_tests_properties(
+        ScreenshotServiceDispatch
+        PROPERTIES LABELS "ControllerTests"
+    )
+
     add_executable(
         screenshot_api_policy_test
         EXCLUDE_FROM_ALL
@@ -2022,6 +2331,107 @@ if(BUILD_CONTROLLER_TESTS)
         ScreenshotApiPolicy
         PROPERTIES LABELS "ControllerTests"
     )
+
+    add_executable(
+        screenshot_manifest_snapshot_test
+        EXCLUDE_FROM_ALL
+        tests/screenshot_manifest_snapshot_test.cpp
+    )
+    target_compile_features(
+        screenshot_manifest_snapshot_test
+        PRIVATE cxx_std_23
+    )
+    target_include_directories(
+        screenshot_manifest_snapshot_test
+        PRIVATE "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(
+        screenshot_manifest_snapshot_test
+        PRIVATE nlohmann_json::nlohmann_json
+    )
+    add_test(
+        NAME ScreenshotManifestSnapshot
+        COMMAND screenshot_manifest_snapshot_test
+    )
+    set_tests_properties(
+        ScreenshotManifestSnapshot
+        PROPERTIES LABELS "ControllerTests"
+    )
+
+    set(_screenshot_capture_test_dir
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/screenshot-capture"
+    )
+    set(_screenshot_capture_test_headers
+        "${_screenshot_capture_test_dir}/screenshot_capture_types_under_test.h"
+        "${_screenshot_capture_test_dir}/screenshot_capture_selection_under_test.h"
+        "${_screenshot_capture_test_dir}/screenshot_capture_present_under_test.h"
+    )
+    add_custom_command(
+        OUTPUT ${_screenshot_capture_test_headers}
+        COMMAND
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}"
+            "-DOUTPUT_DIRECTORY=${_screenshot_capture_test_dir}" -P
+            "${PROJECT_SOURCE_DIR}/tests/extract_screenshot_capture_present.cmake"
+        DEPENDS
+            src/Features/ScreenshotFeature.cpp
+            src/Features/ScreenshotFeature.h
+            tests/extract_screenshot_capture_present.cmake
+        VERBATIM
+    )
+    add_executable(
+        screenshot_capture_present_test
+        EXCLUDE_FROM_ALL
+        tests/screenshot_capture_present_test.cpp
+        ${_screenshot_capture_test_headers}
+    )
+    target_compile_features(screenshot_capture_present_test PRIVATE cxx_std_23)
+    target_include_directories(
+        screenshot_capture_present_test
+        PRIVATE "${PROJECT_SOURCE_DIR}/src" "${_screenshot_capture_test_dir}"
+    )
+    add_test(
+        NAME ScreenshotCapturePresent
+        COMMAND screenshot_capture_present_test
+    )
+    set_tests_properties(
+        ScreenshotCapturePresent
+        PROPERTIES LABELS "ControllerTests"
+    )
+
+    set(_screenshot_dispatch_test_dir
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/screenshot-dispatch"
+    )
+    set(_screenshot_dispatch_test_header
+        "${_screenshot_dispatch_test_dir}/screenshot_dispatch_under_test.h"
+    )
+    add_custom_command(
+        OUTPUT "${_screenshot_dispatch_test_header}"
+        COMMAND
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}"
+            "-DOUTPUT_DIRECTORY=${_screenshot_dispatch_test_dir}" -P
+            "${PROJECT_SOURCE_DIR}/tests/extract_screenshot_dispatch.cmake"
+        DEPENDS
+            src/Features/ScreenshotApi.cpp
+            tests/extract_screenshot_dispatch.cmake
+        VERBATIM
+    )
+    add_executable(
+        screenshot_dispatch_test
+        EXCLUDE_FROM_ALL
+        tests/screenshot_dispatch_test.cpp
+        "${_screenshot_dispatch_test_header}"
+    )
+    target_compile_features(screenshot_dispatch_test PRIVATE cxx_std_23)
+    target_include_directories(
+        screenshot_dispatch_test
+        PRIVATE "${PROJECT_SOURCE_DIR}/src" "${_screenshot_dispatch_test_dir}"
+    )
+    target_link_libraries(
+        screenshot_dispatch_test
+        PRIVATE nlohmann_json::nlohmann_json
+    )
+    add_test(NAME ScreenshotDispatch COMMAND screenshot_dispatch_test)
+    set_tests_properties(ScreenshotDispatch PROPERTIES LABELS "ControllerTests")
 
     add_executable(
         api_upscaling_contract_test
@@ -2116,15 +2526,26 @@ if(BUILD_CONTROLLER_TESTS)
         src/Utils/CryptoHash.cpp
     )
     target_compile_features(shader_cache_pack_test PRIVATE cxx_std_23)
-    if(MSVC)
-        target_compile_options(shader_cache_pack_test PRIVATE /UNDEBUG)
-    else()
-        target_compile_options(shader_cache_pack_test PRIVATE -UNDEBUG)
-    endif()
+    target_compile_definitions(
+        shader_cache_pack_test
+        PRIVATE CSX_SHADER_CACHE_PACK_TESTING
+    )
     target_include_directories(
         shader_cache_pack_test
         PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src"
     )
+    foreach(
+        CACHE_TEST_TARGET
+        api_shader_compatibility_registry_test
+        shader_cache_pack_test
+        shader_source_provenance_test
+    )
+        if(MSVC)
+            target_compile_options(${CACHE_TEST_TARGET} PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${CACHE_TEST_TARGET} PRIVATE -UNDEBUG)
+        endif()
+    endforeach()
     target_link_libraries(
         shader_cache_pack_test
         PRIVATE bcrypt.lib nlohmann_json::nlohmann_json
@@ -2210,12 +2631,21 @@ if(BUILD_CONTROLLER_TESTS)
         controller_tests
         DEPENDS
             perf_mode_restart_state_test
+            motion_sharpening_policy_test
+            sharpener_bindings_test
+            motion_sharpening_settings_test
             vr_vendor_relatch_policy_test
             vr_render_scale_authority_policy_test
+            vr_render_scale_mode_policy_test
+            upscaling_measurement_restore_test
             upscaling_provider_selection_policy_test
             vr_render_scale_qualification_policy_test
             vr_render_scale_replacement_telemetry_policy_test
+            vr_render_scale_retry_telemetry_test
             streamline_frame_token_publication_test
+            vr_submit_temporal_snapshot_test
+            vr_submit_color_contract_test
+            vr_submit_stereo_batch_test
             main_thread_dispatch_policy_test
             vr_render_scale_preparation_policy_test
             vr_presentation_stretch_telemetry_policy_test
@@ -2223,17 +2653,28 @@ if(BUILD_CONTROLLER_TESTS)
             light_limit_fix_vr_hook_policy_test
             fsr_host_lifecycle_policy_test
             fsr_runtime_lifecycle_policy_test
+            fsr_main_pass_policy_test
+            fsr_temporal_tuning_policy_test
+            fsr_temporal_tuning_serialization_test
+            fsr_temporal_tuning_provider_test
+            fsr_shared_guides_policy_test
+            fsr_shared_guide_interop_test
+            fsr_eye_dispatch_test
+            vr_submit_input_freshness_policy_test
+            vr_submit_input_freshness_composition_test
             overlay_policy_test
             performance_tuning_statistics_test
             shader_cache_disable_policy_test
             shader_cache_enable_policy_test
             shader_cache_provenance_test
+            shader_source_provenance_test
             cache_invalidation_test
             wetterness_puddle_mask_cache_policy_test
             shader_compilation_scheduling_policy_test
             volumetric_lighting_tuning_policy_test
             vr_depth_culling_cache_refresh_policy_test
             vr_depth_culling_enable_policy_test
+            vr_depth_culling_telemetry_policy_test
             vr_depth_culling_temporal_policy_test
             vr_wand_interaction_policy_test
             vr_wand_surface_geometry_test
@@ -2250,7 +2691,12 @@ if(BUILD_CONTROLLER_TESTS)
             api_service_registry_test
             api_screenshot_contract_test
             main_thread_dispatch_state_test
+            devbench_main_thread_dispatch_test
+            screenshot_service_dispatch_test
             screenshot_api_policy_test
+            screenshot_manifest_snapshot_test
+            screenshot_capture_present_test
+            screenshot_dispatch_test
             api_upscaling_contract_test
             api_upscaling_service_policy_test
             api_shader_service_policy_test
