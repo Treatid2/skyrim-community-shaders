@@ -198,6 +198,7 @@ struct FidelityFX
 	// setup and GPU dispatch remain controlled test dependencies.
 	void ResolveEligibleRuntimeShaderGate(bool shaderCompilationActive, bool runtimeContextsCompatible)
 	{
+		plan.contextsCompatible = runtimeContextsCompatible;
 		const bool exactCurrentProviderReady = false;
 		const bool awaitingInitialVRRenderScaleLatch = false;
 		const bool runtimePathEligible = true;
