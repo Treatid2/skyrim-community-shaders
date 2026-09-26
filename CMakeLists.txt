@@ -1758,6 +1758,11 @@ if(BUILD_CONTROLLER_TESTS)
         tests/encode_textures_host_policy_test.cpp
     )
     add_controller_test(
+        screen_space_shadows_cache_policy_test
+        ScreenSpaceShadowsCachePolicy
+        tests/screen_space_shadows_cache_policy_test.cpp
+    )
+    add_controller_test(
         vr_render_scale_qualification_policy_test
         VRRenderScaleQualificationPolicy
         tests/vr_render_scale_qualification_policy_test.cpp
@@ -2640,6 +2645,7 @@ if(BUILD_CONTROLLER_TESTS)
             upscaling_measurement_restore_test
             upscaling_provider_selection_policy_test
             encode_textures_host_policy_test
+            screen_space_shadows_cache_policy_test
             vr_render_scale_qualification_policy_test
             vr_render_scale_replacement_telemetry_policy_test
             vr_render_scale_retry_telemetry_test

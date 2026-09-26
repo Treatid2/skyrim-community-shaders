@@ -3918,6 +3918,13 @@ namespace SIE
 
 	void ShaderCache::SetEnabled(bool value)
 	{
+		auto& upscaling = globals::features::upscaling;
+		std::unique_lock<std::recursive_mutex> renderScaleAuthorityLock(
+			upscaling.perfModeRenderTargetRecreateQueueMutex,
+			std::defer_lock);
+		if (globals::game::isVR)
+			renderScaleAuthorityLock.lock();
+
 		const auto action = ShaderCacheEnablePolicy::Resolve({
 			.enabled = IsEnabled(),
 			.enableRequested = IsEnableRequested(),
@@ -3934,7 +3941,6 @@ namespace SIE
 			isEnabled.store(true, std::memory_order_release);
 
 			if (globals::game::isVR) {
-				auto& upscaling = globals::features::upscaling;
 				if (ShaderCacheDisablePolicy::ShouldRequestRelatchOnEnable({
 						.enableAlreadyRequested = enableAlreadyRequested,
 						.vrRenderScaleRequested = upscaling.IsRenderScaleModeRequested(),
