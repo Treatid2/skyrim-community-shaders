@@ -2,8 +2,8 @@
 
 #ifdef DEVBENCH_BRIDGE_ENABLED
 
+#	include "Api/DevBenchMainThreadDispatch.h"
 #	include "Api/ProfilerService.h"
-#	include "Api/RuntimeThreadAffinity.h"
 #	include "Api/ServiceFoundation.h"
 #	include "BuildProvenance.h"
 
@@ -11,11 +11,9 @@
 #	include <nlohmann/json.hpp>
 
 #	include <atomic>
-#	include <chrono>
+#	include <exception>
 #	include <functional>
-#	include <future>
 #	include <limits>
-#	include <memory>
 #	include <mutex>
 #	include <set>
 #	include <stdexcept>
@@ -31,7 +29,6 @@ namespace
 	using CSX::ProfilerAPI::Status;
 	using CSX::ProfilerAPI::TimerDescriptor001;
 	using CSX::ProfilerAPI::TimingDomain;
-	constexpr auto kMainThreadTimeout = std::chrono::milliseconds(5000);
 	std::atomic_bool g_registered{ false };
 	std::mutex g_terminalEventMutex;
 	std::set<std::uint64_t> g_reportedTerminalCaptures;
@@ -53,54 +50,46 @@ namespace
 	const char* StatusName(Status a_status)
 	{
 		switch (a_status) {
-		case Status::kSuccess: return "success";
-		case Status::kInvalidArgument: return "invalid_argument";
-		case Status::kStructureTooSmall: return "structure_too_small";
-		case Status::kUnavailable: return "unavailable";
-		case Status::kWrongThread: return "wrong_thread";
-		case Status::kDisabled: return "disabled";
-		case Status::kBusy: return "busy";
-		case Status::kCaptureNotFound: return "capture_not_found";
-		case Status::kTimerNotFound: return "timer_not_found";
-		default: return "internal_error";
+		case Status::kSuccess:
+			return "success";
+		case Status::kInvalidArgument:
+			return "invalid_argument";
+		case Status::kStructureTooSmall:
+			return "structure_too_small";
+		case Status::kUnavailable:
+			return "unavailable";
+		case Status::kWrongThread:
+			return "wrong_thread";
+		case Status::kDisabled:
+			return "disabled";
+		case Status::kBusy:
+			return "busy";
+		case Status::kCaptureNotFound:
+			return "capture_not_found";
+		case Status::kTimerNotFound:
+			return "timer_not_found";
+		default:
+			return "internal_error";
 		}
 	}
 
 	const char* CaptureStateName(CaptureState a_state)
 	{
 		switch (a_state) {
-		case CaptureState::kRunning: return "running";
-		case CaptureState::kCompleted: return "completed";
-		case CaptureState::kCancelled: return "cancelled";
-		default: return "none";
+		case CaptureState::kRunning:
+			return "running";
+		case CaptureState::kCompleted:
+			return "completed";
+		case CaptureState::kCancelled:
+			return "cancelled";
+		default:
+			return "none";
 		}
 	}
 
-	json RunOnMainThread(std::function<json()> a_run)
+	CSX::Api::DevBenchMainThreadResult RunOnMainThread(std::function<json()> a_run)
 	{
-		auto* tasks = SKSE::GetTaskInterface();
-		if (!tasks)
-			return { { "_dispatchError", "SKSE task interface unavailable" } };
-		auto promise = std::make_shared<std::promise<json>>();
-		auto cancelled = std::make_shared<std::atomic_bool>(false);
-		auto future = promise->get_future();
-		tasks->AddTask([promise, cancelled, run = std::move(a_run)]() mutable {
-			CSX::Api::EnterRuntimeMainThreadTask();
-			if (cancelled->load(std::memory_order_acquire))
-				return;
-			try {
-				promise->set_value(run());
-			} catch (const std::exception& e) {
-				promise->set_value(json{ { "_dispatchError", e.what() } });
-			} catch (...) {
-				promise->set_value(json{ { "_dispatchError", "unknown main-thread failure" } });
-			}
-		});
-		if (future.wait_for(kMainThreadTimeout) != std::future_status::ready) {
-			cancelled->store(true, std::memory_order_release);
-			return { { "_dispatchError", "main thread did not run within 5000ms" } };
-		}
-		return future.get();
+		return CSX::Api::RunDevBenchMainThreadTask(SKSE::GetTaskInterface(), std::move(a_run), CSX::Api::DevBenchDispatchErrorFormat::profiler);
 	}
 
 	json ProgressJson(const CaptureProgress001& a_progress)
@@ -160,8 +149,8 @@ namespace
 	{
 		const auto action = a_args.value("action", std::string{});
 		const bool known = action == "registry" || action == "snapshot" || action == "timers" || action == "history" ||
-			action == "set_enabled" || action == "clear_history" || action == "start_capture" ||
-			action == "capture_status" || action == "cancel_capture" || action == "events" || action == "acknowledge_events";
+		                   action == "set_enabled" || action == "clear_history" || action == "start_capture" ||
+		                   action == "capture_status" || action == "cancel_capture" || action == "events" || action == "acknowledge_events";
 		if (!known)
 			return Foundation().MakeError(a_args, "unknown_action", "action is not supported", "validation", false, "action");
 
@@ -206,7 +195,7 @@ namespace
 				return Foundation().MakeError(a_args, "invalid_field", "domain must be gpu or cpu", "validation", false, "domain");
 		}
 
-		auto result = RunOnMainThread([action, a_args] {
+		auto dispatch = RunOnMainThread([action, a_args] {
 			const auto* api = CSX::Api::GetProfilerService001();
 			if (!api)
 				return json{ { "_dispatchError", "profiler API unavailable" } };
@@ -226,8 +215,8 @@ namespace
 				for (std::uint32_t index = 0; index < count; ++index) {
 					TimerDescriptor001 timer;
 					const auto timerStatus = captureId != 0 ?
-						api->GetCaptureTimerDescriptor(api->context, captureId, index, &timer) :
-						api->GetTimerDescriptor(api->context, index, &timer);
+					                             api->GetCaptureTimerDescriptor(api->context, captureId, index, &timer) :
+					                             api->GetTimerDescriptor(api->context, index, &timer);
 					if (timerStatus != Status::kSuccess)
 						continue;
 					const std::string name = timer.name ? timer.name : "";
@@ -247,8 +236,8 @@ namespace
 				const auto captureId = a_args.value("captureId", 0ull);
 				TimerDescriptor001 timer;
 				const auto timerStatus = captureId != 0 ?
-					api->GetCaptureTimerDescriptor(api->context, captureId, timerIndex, &timer) :
-					api->GetTimerDescriptor(api->context, timerIndex, &timer);
+				                             api->GetCaptureTimerDescriptor(api->context, captureId, timerIndex, &timer) :
+				                             api->GetTimerDescriptor(api->context, timerIndex, &timer);
 				if (timerStatus != Status::kSuccess)
 					return ApiFailure(timerStatus);
 				const auto count = domain == TimingDomain::kCpu ? timer.cpuHistoryCount : timer.gpuHistoryCount;
@@ -258,8 +247,8 @@ namespace
 				for (std::uint32_t sample = offset; sample < count && samples.size() < limit; ++sample) {
 					float value = 0.0f;
 					const auto sampleStatus = captureId != 0 ?
-						api->GetCaptureHistorySample(api->context, captureId, timerIndex, domain, sample, &value) :
-						api->GetHistorySample(api->context, timerIndex, domain, sample, &value);
+					                              api->GetCaptureHistorySample(api->context, captureId, timerIndex, domain, sample, &value) :
+					                              api->GetHistorySample(api->context, timerIndex, domain, sample, &value);
 					if (sampleStatus == Status::kSuccess)
 						samples.push_back(value);
 				}
@@ -300,8 +289,11 @@ namespace
 			return json{ { "_dispatchError", "validated action was not dispatched" } };
 		});
 
+		if (dispatch.failure)
+			return Foundation().MakeError(a_args, "main_thread_dispatch_failed", dispatch.failure->message, dispatch.failure->phase, dispatch.failure->retryable);
+		auto result = std::move(dispatch.response);
 		if (result.contains("_dispatchError"))
-			return Foundation().MakeError(a_args, "main_thread_dispatch_failed", result.value("_dispatchError", std::string("dispatch failed")), "dispatch", true);
+			return Foundation().MakeError(a_args, "main_thread_dispatch_failed", result.value("_dispatchError", std::string("profiler API unavailable")), "execution", false);
 		if (result.contains("_apiError"))
 			return Foundation().MakeError(a_args, result.value("_apiError", std::string("profiler_error")), "profiler operation failed", "execution", result.value("_apiError", std::string{}) == "busy");
 		auto response = Foundation().MakeEnvelope(a_args, true);
