@@ -45,6 +45,19 @@ pwsh .\tools\render-scale-qualification\Start-CSXRenderScaleQualification.ps1 `
     -ExpectedBaselineBuildId '<64-character baseline CSX build ID>'
 ```
 
+### Hosted qualification builds
+
+When a PR changes the render-scale implementation, `PR: Checks` creates two
+additional compile-only artifacts: one from the exact PR base SHA and one from
+the exact PR head SHA. Both builds enable `DEVBENCH_BRIDGE` so the qualification
+runner can bind its telemetry to the loaded DLL's Build ID. The path-gated jobs
+do not deploy, launch, or publish either artifact, and the ordinary PR
+prerelease continues to use the separate release-equivalent DevBench-off build.
+
+Use the artifact whose name contains the full base or head SHA. Preserve its
+`CSX.BuildManifest.json` with the DLL, and verify that manifest before deploying
+the artifact into a task-owned test mod.
+
 Final `PASS` or `LOCAL_PASS` returns 0, qualification `FAIL` returns 2,
 and `INFRASTRUCTURE_ERROR` returns 4. There is no pending or manual-finalization
 state. Infrastructure errors cover transport, exact

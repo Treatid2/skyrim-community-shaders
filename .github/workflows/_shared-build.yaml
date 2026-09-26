@@ -15,6 +15,10 @@ on:
                 description: "Run C++ plugin build"
                 type: boolean
                 default: true
+            devbench-bridge:
+                description: "Compile the developer-only DevBench bridge"
+                type: boolean
+                default: false
             run-shader-validation:
                 description: "Run HLSL shader compilation validation"
                 type: boolean
@@ -100,7 +104,7 @@ jobs:
               uses: lukka/run-cmake@v10
               with:
                   configurePreset: ${{ matrix.compiler.cmake-preset }}
-                  configurePresetAdditionalArgs: "['-DBUILD_SHADER_TESTS=OFF', '-DBUILD_CONTROLLER_TESTS=ON', '-DCSX_REQUIRE_CLEAN_PROVENANCE=ON', '-DCSX_TEST_BUILD=${{ inputs.test-build-id }}', '-DZIP_TO_DIST=${{ inputs.test-build-id != '' && 'OFF' || 'ON' }}', '-DDEVBENCH_BRIDGE=OFF']"
+                  configurePresetAdditionalArgs: "['-DBUILD_SHADER_TESTS=OFF', '-DBUILD_CONTROLLER_TESTS=ON', '-DCSX_REQUIRE_CLEAN_PROVENANCE=ON', '-DCSX_TEST_BUILD=${{ inputs.test-build-id }}', '-DZIP_TO_DIST=${{ inputs.test-build-id != '' && 'OFF' || 'ON' }}', '-DDEVBENCH_BRIDGE=${{ inputs.devbench-bridge && 'ON' || 'OFF' }}']"
                   buildPreset: ${{ matrix.compiler.cmake-preset }}
 
             - name: Verify DLL provenance sidecar
