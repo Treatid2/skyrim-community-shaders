@@ -31,6 +31,14 @@ The comparison ledger has no new candidate column because an exact fixture
 and accepted baseline are not configured for this run. Runtime qualification
 must precede any visual-quality, stability, or performance claim.
 
+The optional runtime FSR shared-guide path and its session-only DevBench
+A/B switch are documented in [Runtime FSR shared guide inputs](fsr-shared-guides.md).
+It removes eligible full-eye guide staging copies while preserving the
+existing interop fences, copied fallback and quarantined ownership. This
+implementation has no performance claim or runtime qualification result;
+new measurements must use the existing comparison ledger and reporting
+workflow.
+
 The VR render-scale controller can capture a bounded CSX-menu stress session and write a versioned JSON record for an MCP/Ghidra optimization loop. The capture observes user-driven changes; it never changes render-scale settings itself.
 
 ## Capture workflow
