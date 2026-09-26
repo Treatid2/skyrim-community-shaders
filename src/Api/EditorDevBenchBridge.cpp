@@ -2,8 +2,8 @@
 
 #ifdef DEVBENCH_BRIDGE_ENABLED
 
+#	include "Api/DevBenchMainThreadDispatch.h"
 #	include "Api/EditorService.h"
-#	include "Api/RuntimeThreadAffinity.h"
 #	include "Api/ServiceFoundation.h"
 #	include "BuildProvenance.h"
 #	include "CSEditor/EditorWindow.h"
@@ -12,10 +12,8 @@
 #	include <nlohmann/json.hpp>
 
 #	include <atomic>
-#	include <chrono>
+#	include <exception>
 #	include <functional>
-#	include <future>
-#	include <memory>
 #	include <mutex>
 #	include <optional>
 #	include <stdexcept>
@@ -30,7 +28,6 @@ namespace
 	using CSX::EditorAPI::Preflight001;
 	using CSX::EditorAPI::Snapshot001;
 	using CSX::EditorAPI::Status;
-	constexpr auto kMainThreadTimeout = std::chrono::milliseconds(5000);
 	std::atomic_bool g_registered{ false };
 
 	CSX::Api::ServiceFoundation& Foundation()
@@ -55,37 +52,57 @@ namespace
 	const char* StatusName(Status a_status)
 	{
 		switch (a_status) {
-		case Status::kSuccess: return "success";
-		case Status::kInvalidArgument: return "invalid_argument";
-		case Status::kStructureTooSmall: return "structure_too_small";
-		case Status::kUnavailable: return "unavailable";
-		case Status::kWrongThread: return "wrong_thread";
-		case Status::kRevisionConflict: return "revision_conflict";
-		case Status::kPreflightRequired: return "preflight_required";
-		case Status::kPreflightExpired: return "preflight_expired";
-		case Status::kPreflightMismatch: return "preflight_mismatch";
-		case Status::kBlocked: return "blocked";
-		default: return "internal_error";
+		case Status::kSuccess:
+			return "success";
+		case Status::kInvalidArgument:
+			return "invalid_argument";
+		case Status::kStructureTooSmall:
+			return "structure_too_small";
+		case Status::kUnavailable:
+			return "unavailable";
+		case Status::kWrongThread:
+			return "wrong_thread";
+		case Status::kRevisionConflict:
+			return "revision_conflict";
+		case Status::kPreflightRequired:
+			return "preflight_required";
+		case Status::kPreflightExpired:
+			return "preflight_expired";
+		case Status::kPreflightMismatch:
+			return "preflight_mismatch";
+		case Status::kBlocked:
+			return "blocked";
+		default:
+			return "internal_error";
 		}
 	}
 
 	const char* PreviewName(CSX::EditorAPI::PreviewMode a_mode)
 	{
 		switch (a_mode) {
-		case CSX::EditorAPI::PreviewMode::kFreeCamera: return "free_camera";
-		case CSX::EditorAPI::PreviewMode::kFreeCameraLocked: return "free_camera_locked";
-		case CSX::EditorAPI::PreviewMode::kPlayMode: return "play_mode";
-		default: return "none";
+		case CSX::EditorAPI::PreviewMode::kFreeCamera:
+			return "free_camera";
+		case CSX::EditorAPI::PreviewMode::kFreeCameraLocked:
+			return "free_camera_locked";
+		case CSX::EditorAPI::PreviewMode::kPlayMode:
+			return "play_mode";
+		default:
+			return "none";
 		}
 	}
 
 	std::optional<MutationAction> ParseAction(std::string_view a_action)
 	{
-		if (a_action == "open") return MutationAction::kOpen;
-		if (a_action == "close") return MutationAction::kClose;
-		if (a_action == "toggle") return MutationAction::kToggle;
-		if (a_action == "reset_layout") return MutationAction::kResetLayout;
-		if (a_action == "exit_preview") return MutationAction::kExitPreview;
+		if (a_action == "open")
+			return MutationAction::kOpen;
+		if (a_action == "close")
+			return MutationAction::kClose;
+		if (a_action == "toggle")
+			return MutationAction::kToggle;
+		if (a_action == "reset_layout")
+			return MutationAction::kResetLayout;
+		if (a_action == "exit_preview")
+			return MutationAction::kExitPreview;
 		if (a_action == "open_light_editor")
 			return MutationAction::kOpenLightEditor;
 		if (a_action == "begin_light_pick")
@@ -95,40 +112,30 @@ namespace
 		return std::nullopt;
 	}
 
-	json RunOnMainThread(std::function<json()> a_run)
+	CSX::Api::DevBenchMainThreadResult RunOnMainThread(std::function<json()> a_run)
 	{
-		auto* tasks = SKSE::GetTaskInterface();
-		if (!tasks)
-			return { { "error", "SKSE task interface unavailable" } };
-		auto promise = std::make_shared<std::promise<json>>();
-		auto cancelled = std::make_shared<std::atomic_bool>(false);
-		auto future = promise->get_future();
-		tasks->AddTask([promise, cancelled, run = std::move(a_run)]() mutable {
-			CSX::Api::EnterRuntimeMainThreadTask();
-			if (cancelled->load(std::memory_order_acquire)) return;
-			try { promise->set_value(run()); }
-			catch (const std::exception& e) { promise->set_value(json{ { "error", "main-thread task failed" }, { "detail", e.what() } }); }
-			catch (...) { promise->set_value(json{ { "error", "main-thread task failed" } }); }
-		});
-		if (future.wait_for(kMainThreadTimeout) != std::future_status::ready) {
-			cancelled->store(true, std::memory_order_release);
-			return { { "error", "main thread did not run within 5000ms" } };
-		}
-		return future.get();
+		return CSX::Api::RunDevBenchMainThreadTask(SKSE::GetTaskInterface(), std::move(a_run));
 	}
 
 	json SnapshotJson(const Snapshot001& a_value)
 	{
 		auto value = json{
-			{ "available", a_value.available != 0 }, { "dataAvailable", a_value.dataAvailable != 0 },
-			{ "canOpen", a_value.canOpen != 0 }, { "resourcesInitialized", a_value.resourcesInitialized != 0 },
-			{ "editorOpen", a_value.editorOpen != 0 }, { "menuSessionOpen", a_value.menuSessionOpen != 0 },
-			{ "mainMenuOpen", a_value.mainMenuOpen != 0 }, { "loadingMenuOpen", a_value.loadingMenuOpen != 0 },
+			{ "available", a_value.available != 0 },
+			{ "dataAvailable", a_value.dataAvailable != 0 },
+			{ "canOpen", a_value.canOpen != 0 },
+			{ "resourcesInitialized", a_value.resourcesInitialized != 0 },
+			{ "editorOpen", a_value.editorOpen != 0 },
+			{ "menuSessionOpen", a_value.menuSessionOpen != 0 },
+			{ "mainMenuOpen", a_value.mainMenuOpen != 0 },
+			{ "loadingMenuOpen", a_value.loadingMenuOpen != 0 },
 			{ "persistentMutationBlocked", a_value.persistentMutationBlocked != 0 },
 			{ "saveLoadSafeModeActive", a_value.saveLoadSafeModeActive != 0 },
-			{ "weatherLocked", a_value.weatherLocked != 0 }, { "timePaused", a_value.timePaused != 0 },
-			{ "undoAvailable", a_value.undoAvailable != 0 }, { "previewMode", PreviewName(a_value.previewMode) },
-			{ "stateRevision", a_value.stateRevision }, { "capabilities", a_value.capabilities },
+			{ "weatherLocked", a_value.weatherLocked != 0 },
+			{ "timePaused", a_value.timePaused != 0 },
+			{ "undoAvailable", a_value.undoAvailable != 0 },
+			{ "previewMode", PreviewName(a_value.previewMode) },
+			{ "stateRevision", a_value.stateRevision },
+			{ "capabilities", a_value.capabilities },
 			{ "unavailableReason", a_value.unavailableReason ? a_value.unavailableReason : "" },
 			{ "buildId", a_value.buildId ? a_value.buildId : "" },
 		};
@@ -154,10 +161,7 @@ namespace
 		if (!mutation.contains("expectedStateRevision") || !mutation["expectedStateRevision"].is_number_unsigned())
 			throw std::runtime_error("mutation.expectedStateRevision is required and must be unsigned");
 		a_token = mutation.value("preflightToken", std::string{});
-		return { .structSize = sizeof(MutationRequest001), .action = *action,
-			.expectedStateRevision = mutation["expectedStateRevision"].get<std::uint64_t>(),
-			.flags = mutation.value("allowDisruptive", false) ? CSX::EditorAPI::kMutationAllowDisruptive : CSX::EditorAPI::kMutationNone,
-			.preflightToken = a_token.empty() ? nullptr : a_token.c_str() };
+		return { .structSize = sizeof(MutationRequest001), .action = *action, .expectedStateRevision = mutation["expectedStateRevision"].get<std::uint64_t>(), .flags = mutation.value("allowDisruptive", false) ? CSX::EditorAPI::kMutationAllowDisruptive : CSX::EditorAPI::kMutationNone, .preflightToken = a_token.empty() ? nullptr : a_token.c_str() };
 	}
 
 	json BuildResult(const json& a_args)
@@ -172,8 +176,10 @@ namespace
 				{ "major", CSX::EditorAPI::ServiceMajor },
 				{ "minor", CSX::EditorAPI::ServiceMinor },
 				{ "schemaRevision", CSX::EditorAPI::SchemaRevision },
-				{ "capabilities", CSX::EditorAPI::ServiceCapabilities }, { "mainThreadAffine", true },
-				{ "registryMainThreadAffine", false }, { "preflightTokenLifetimeMs", 30000 },
+				{ "capabilities", CSX::EditorAPI::ServiceCapabilities },
+				{ "mainThreadAffine", true },
+				{ "registryMainThreadAffine", false },
+				{ "preflightTokenLifetimeMs", 30000 },
 				{ "actions", json::array({ "registry", "snapshot", "preflight", "execute" }) },
 				{ "mutations", json::array({ "open", "close", "toggle", "reset_layout", "exit_preview",
 								   "open_light_editor", "begin_light_pick", "cancel_light_pick" }) },
@@ -182,13 +188,18 @@ namespace
 			return response;
 		}
 		if (action == "preflight" || action == "execute") {
-			try { std::string token; (void)ParseMutation(a_args, token); }
-			catch (const std::exception& e) { return Foundation().MakeError(a_args, "invalid_mutation", e.what(), "validation", false, "mutation"); }
+			try {
+				std::string token;
+				(void)ParseMutation(a_args, token);
+			} catch (const std::exception& e) {
+				return Foundation().MakeError(a_args, "invalid_mutation", e.what(), "validation", false, "mutation");
+			}
 		}
 
-		auto result = RunOnMainThread([action, a_args] {
+		auto dispatch = RunOnMainThread([action, a_args] {
 			const auto* api = CSX::Api::GetEditorService001();
-			if (!api) return json{ { "error", "editor API unavailable" } };
+			if (!api)
+				return json{ { "error", "editor API unavailable" } };
 			if (action == "snapshot") {
 				Snapshot001 value;
 				const auto status = api->GetSnapshot(api->context, &value);
@@ -212,8 +223,11 @@ namespace
 				{ "previousStateRevision", receipt.previousStateRevision }, { "stateRevision", receipt.stateRevision },
 				{ "message", receipt.message ? receipt.message : "" }, { "current", SnapshotJson(current) } };
 		});
+		if (dispatch.failure)
+			return Foundation().MakeError(a_args, "main_thread_dispatch_failed", dispatch.failure->message, dispatch.failure->phase, dispatch.failure->retryable);
+		auto result = std::move(dispatch.response);
 		if (result.contains("error"))
-			return Foundation().MakeError(a_args, "main_thread_dispatch_failed", result.value("detail", result.value("error", std::string("editor API dispatch failed"))), "dispatch", true);
+			return Foundation().MakeError(a_args, "main_thread_dispatch_failed", result.value("error", std::string("editor API unavailable")), "execution", false);
 		auto response = Foundation().MakeEnvelope(a_args, true);
 		response["result"] = std::move(result);
 		return response;
@@ -228,10 +242,17 @@ namespace
 				output = Foundation().MakeError(args, mismatch->value("code", std::string("producer_mismatch")), mismatch->value("error", std::string("loaded CSX build does not match the request")), "validation", false, "expectedBuildId");
 			else
 				output = Foundation().Dispatch(args, &BuildResult);
-		} catch (const std::exception& e) { output = Foundation().MakeError(json::object(), "invalid_request", e.what()); }
-		catch (...) { output = Foundation().MakeError(json::object(), "internal_error", "unknown editor API error", "dispatch", true); }
-		try { const auto serialized = output.dump(); a_write(a_sink, serialized.c_str()); }
-		catch (...) { a_write(a_sink, R"({"ok":false,"error":{"code":"serialization_failed"}})"); }
+		} catch (const std::exception& e) {
+			output = Foundation().MakeError(json::object(), "invalid_request", e.what());
+		} catch (...) {
+			output = Foundation().MakeError(json::object(), "internal_error", "unknown editor API error", "dispatch", true);
+		}
+		try {
+			const auto serialized = output.dump();
+			a_write(a_sink, serialized.c_str());
+		} catch (...) {
+			a_write(a_sink, R"({"ok":false,"error":{"code":"serialization_failed"}})");
+		}
 	}
 }
 
@@ -239,9 +260,13 @@ namespace CSX::Api::EditorDevBenchBridge
 {
 	void Install()
 	{
-		if (g_registered.load(std::memory_order_acquire)) return;
+		if (g_registered.load(std::memory_order_acquire))
+			return;
 		auto* devBench = DevBenchAPI::GetDevBenchInterface001();
-		if (!devBench) { logger::info("EditorDevBenchBridge: devbench host not present; editor API tool not registered"); return; }
+		if (!devBench) {
+			logger::info("EditorDevBenchBridge: devbench host not present; editor API tool not registered");
+			return;
+		}
 		const char* descriptor = R"({
 			"description":"Versioned CSX Editor state, bounded window lifecycle, and Light Editor picker control API. Mutations require preflight then execute with identical arguments and the returned token.",
 			"inputSchema":{"type":"object","required":["contractMajor","clientId","commandId","action"],"properties":{
