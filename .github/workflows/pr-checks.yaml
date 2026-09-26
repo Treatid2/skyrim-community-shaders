@@ -183,6 +183,7 @@ jobs:
             run-shader-validation: false
             run-shader-tests: false
             devbench-bridge: true
+            devbench-qualification-compatibility: true
             artifact-name: render-scale-baseline-${{ github.event.pull_request.base.sha }}
 
     render-scale-candidate-build:
@@ -200,6 +201,7 @@ jobs:
             run-shader-validation: false
             run-shader-tests: false
             devbench-bridge: true
+            devbench-qualification-compatibility: true
             artifact-name: render-scale-candidate-${{ github.event.pull_request.head.sha }}
 
     # Security: write-capable release publication is limited to branches in this

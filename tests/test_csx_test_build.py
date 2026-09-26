@@ -979,14 +979,27 @@ class WorkflowContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("devbench-bridge:", shared)
+        self.assertIn("devbench-qualification-compatibility:", shared)
         self.assertIn(
             "-DDEVBENCH_BRIDGE=${{ inputs.devbench-bridge && 'ON' || 'OFF' }}",
             shared,
         )
+        self.assertIn(
+            "-DCSX_REQUIRE_CLEAN_PROVENANCE=${{ inputs.devbench-qualification-compatibility && 'OFF' || 'ON' }}",
+            shared,
+        )
+        compatibility_step = shared.split(
+            "- name: Apply DevBench qualification compatibility", maxsplit=1
+        )[1].split("- name:", maxsplit=1)[0]
+        self.assertIn("if: inputs.devbench-qualification-compatibility", compatibility_step)
+        self.assertIn("}).response;", compatibility_step)
         self.assertIn("render_scale:", pull_request)
         self.assertIn("ref: ${{ github.event.pull_request.base.sha }}", pull_request)
         self.assertIn("ref: ${{ github.event.pull_request.head.sha }}", pull_request)
         self.assertEqual(pull_request.count("devbench-bridge: true"), 2)
+        self.assertEqual(
+            pull_request.count("devbench-qualification-compatibility: true"), 2
+        )
         self.assertIn(
             "artifact-name: render-scale-baseline-${{ github.event.pull_request.base.sha }}",
             pull_request,

@@ -19,6 +19,10 @@ on:
                 description: "Compile the developer-only DevBench bridge"
                 type: boolean
                 default: false
+            devbench-qualification-compatibility:
+                description: "Apply the bounded DevBench qualification compatibility patch"
+                type: boolean
+                default: false
             run-shader-validation:
                 description: "Run HLSL shader compilation validation"
                 type: boolean
@@ -88,6 +92,27 @@ jobs:
                   submodules: recursive
                   persist-credentials: false
 
+            # The compared revisions predate the structured main-thread result
+            # conversion in this one developer-only bridge. Keep the patch out
+            # of release artifacts and record it through dirty provenance.
+            - name: Apply DevBench qualification compatibility
+              if: inputs.devbench-qualification-compatibility
+              shell: pwsh
+              run: |
+                  $path = 'src/Features/Upscaling/FSRTemporalTuningDevBenchBridge.cpp'
+                  $text = [IO.File]::ReadAllText($path)
+                  $indent = [string][char]9 + [char]9
+                  $before = "$indent});"
+                  $after = "$indent}).response;"
+                  if ([regex]::Matches($text, [regex]::Escape($before)).Count -ne 1) {
+                      throw 'The qualification compatibility target is missing or ambiguous.'
+                  }
+                  [IO.File]::WriteAllText(
+                      $path,
+                      $text.Replace($before, $after),
+                      [Text.UTF8Encoding]::new($false))
+                  git diff --check
+
             - name: Setup Build Environment
               id: setup
               uses: ./.github/actions/setup-build-environment
@@ -104,7 +129,7 @@ jobs:
               uses: lukka/run-cmake@v10
               with:
                   configurePreset: ${{ matrix.compiler.cmake-preset }}
-                  configurePresetAdditionalArgs: "['-DBUILD_SHADER_TESTS=OFF', '-DBUILD_CONTROLLER_TESTS=ON', '-DCSX_REQUIRE_CLEAN_PROVENANCE=ON', '-DCSX_TEST_BUILD=${{ inputs.test-build-id }}', '-DZIP_TO_DIST=${{ inputs.test-build-id != '' && 'OFF' || 'ON' }}', '-DDEVBENCH_BRIDGE=${{ inputs.devbench-bridge && 'ON' || 'OFF' }}']"
+                  configurePresetAdditionalArgs: "['-DBUILD_SHADER_TESTS=OFF', '-DBUILD_CONTROLLER_TESTS=ON', '-DCSX_REQUIRE_CLEAN_PROVENANCE=${{ inputs.devbench-qualification-compatibility && 'OFF' || 'ON' }}', '-DCSX_TEST_BUILD=${{ inputs.test-build-id }}', '-DZIP_TO_DIST=${{ inputs.test-build-id != '' && 'OFF' || 'ON' }}', '-DDEVBENCH_BRIDGE=${{ inputs.devbench-bridge && 'ON' || 'OFF' }}']"
                   buildPreset: ${{ matrix.compiler.cmake-preset }}
 
             - name: Verify DLL provenance sidecar

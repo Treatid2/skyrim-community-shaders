@@ -54,6 +54,13 @@ runner can bind its telemetry to the loaded DLL's Build ID. The path-gated jobs
 do not deploy, launch, or publish either artifact, and the ordinary PR
 prerelease continues to use the separate release-equivalent DevBench-off build.
 
+The compared revisions currently need one identical qualification-only source
+adaptation in the developer-only FSR temporal-tuning bridge: unwrap the shared
+main-thread dispatch response as JSON. The hosted jobs apply that bounded patch
+after checking out each exact revision. Their provenance manifests retain the
+exact source commit and record the patch in `source.dirtyDigest`; clean
+provenance remains mandatory for ordinary PR and release artifacts.
+
 Use the artifact whose name contains the full base or head SHA. Preserve its
 `CSX.BuildManifest.json` with the DLL, and verify that manifest before deploying
 the artifact into a task-owned test mod.
