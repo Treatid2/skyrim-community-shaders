@@ -1,6 +1,8 @@
 #include "Features/Upscaling/FSRHostLifecyclePolicy.h"
 #include "Features/Upscaling/FSRRuntimeLifecyclePolicy.h"
+#include "Features/Upscaling/VRSubmitColorContract.h"
 #include "Features/Upscaling/VRSubmitInputFreshnessPolicy.h"
+#include "Features/Upscaling/VRSubmitTemporalSnapshot.h"
 #include "Features/Upscaling/VRVendorRelatchPolicy.h"
 
 #include <algorithm>
@@ -172,6 +174,7 @@ struct FidelityFX
 	uint32_t fsrContextDisplayHeight = 0;
 	bool fsrDispatchCrashLogged = false;
 	bool hostSupported = false;
+	bool sharedGuidesQuarantined = false;
 	bool hostDispatchReady = true;
 	bool hostDispatchFault = false;
 	RuntimeDispatchPlan plan{
@@ -191,6 +194,7 @@ struct FidelityFX
 	uint32_t fsr4Failures = 0;
 	uint32_t deviceProbes = 0;
 	bool lastHostReset = false;
+	FfxFsr3DispatchUpscaleDescription lastHostParameters{};
 	RuntimeUpscalerFramePath lastFramePath = RuntimeUpscalerFramePath::kInactive;
 
 	RuntimeDispatchPlan ResolveRuntimeDispatchPlan() const { return plan; }
@@ -238,11 +242,13 @@ struct FidelityFX
 		++hostCalls;
 		hostEyeMask |= 1u << a_eye;
 		lastHostReset = a_params.reset;
+		lastHostParameters = a_params;
 		a_crashed = hostDispatchFault;
 		return hostDispatchReady && !hostDispatchFault;
 	}
 	void ArmRuntimeHostFallback(uint32_t);
 	bool CanDispatchHostFallbackForRegions(std::span<const UpscaleRegionParameters>, const RuntimeDispatchPlan&) const;
+	bool HasQuarantinedRuntimeSharedGuides(const UpscaleRegionParameters&) const { return sharedGuidesQuarantined; }
 	UpscaleResult UpscaleRegion(uint32_t, ID3D11Resource*, ID3D11Resource*, ID3D11Resource*,
 		ID3D11Resource*, ID3D11Resource*, ID3D11Resource*, uint32_t, uint32_t,
 		uint32_t, uint32_t, float, float, float, bool* = nullptr);
@@ -256,6 +262,11 @@ struct Upscaling
 	FidelityFX fidelityFX;
 	Streamline streamline;
 	Float2 jitter;
+	VRSubmitTemporalSnapshot::Snapshot<int> temporalSnapshot;
+	VRSubmitColorContract::Contract colorContract;
+	bool hasSubmitColorContract = false;
+	const auto* GetSubmitTemporalSnapshotForDispatch() const { return temporalSnapshot.valid ? &temporalSnapshot : nullptr; }
+	const VRSubmitColorContract::Contract* GetSubmitColorContractForDispatch() const { return hasSubmitColorContract ? &colorContract : nullptr; }
 	struct Settings
 	{
 		float sharpnessFSR = 0;
@@ -339,6 +350,30 @@ namespace
 		a_provider.fsrContextMaxRenderHeight = 1680;
 		a_provider.fsrContextDisplayWidth = 1512;
 		a_provider.fsrContextDisplayHeight = 1680;
+	}
+
+	void SubmitContractsReachHostDispatch()
+	{
+		auto& upscaling = Reset();
+		auto& provider = upscaling.fidelityFX;
+		upscaling.hasSubmitColorContract = true;
+		upscaling.colorContract = { VRSubmitColorContract::Transfer::Linear, VRSubmitColorContract::DynamicRange::LDR };
+		EnableHost(provider);
+		Require(upscaling.DispatchVendorEyeRegion(UpscaleMethod::kFSR, Region(0, 1284)) == Result::Failed &&
+					provider.hostCalls == 0 && provider.runtimeCalls == 0,
+			"Linear submit input reached a vendor dispatch");
+		upscaling.colorContract.transfer = VRSubmitColorContract::Transfer::Gamma;
+		provider.plan.runtimeRequested = false;
+		upscaling.temporalSnapshot.valid = true;
+		upscaling.temporalSnapshot.scalars = { 0.25f, -0.5f, 2.0f, 20000.0f, 1.25f, 8.0f, false };
+		upscaling.historyResetRequested = true;
+		Require(upscaling.DispatchVendorEyeRegion(UpscaleMethod::kFSR, Region(1, 1284)) == Result::Ready,
+			"Gamma submit input could not use the host provider");
+		const auto& parameters = provider.lastHostParameters;
+		Require(parameters.jitterOffset.x == -0.25f && parameters.jitterOffset.y == 0.5f &&
+					parameters.cameraNear == 2.0f && parameters.cameraFar == 20000.0f &&
+					parameters.cameraFovAngleVertical == 1.25f && parameters.frameTimeDelta == 8.0f && parameters.reset,
+			"Host dispatch did not retain captured scalars and a late history reset");
 	}
 
 	void RequireDeferredUntouched(const Upscaling& a_upscaling)
@@ -733,6 +768,8 @@ namespace
 		uint64_t submitStageVendorAdmissionCycle = a_compositorCycleToken;
 		uint32_t submitStageVendorAdmissionGeneration = activeContractGeneration;
 		uint32_t submitStageVendorAdmissionMethod = static_cast<uint32_t>(upscaleMethod);
+		VRSubmitColorContract::Contract sourceColorContract{ VRSubmitColorContract::Transfer::Gamma, VRSubmitColorContract::DynamicRange::LDR };
+		VRSubmitColorContract::Contract submitStageVendorAdmissionColorContract = sourceColorContract;
 		uint32_t submitStageVendorAdmissionFrame = currentFrame;
 		uint32_t submitStageVendorAdmissionEyeMask = 1;
 		bool submitStageVendorAdmissionPresentationOnly = false;
@@ -768,6 +805,7 @@ namespace
 			DeferredPresentation presentation;
 			if (admissionWasCleared) {
 				presentation.submitStageVendorAdmissionCycle = 0;
+				presentation.submitStageVendorAdmissionColorContract = {};
 				presentation.submitStageVendorAdmissionGeneration = 0;
 				presentation.submitStageVendorAdmissionMethod = 0;
 				presentation.submitStageVendorAdmissionFrame = 0;
@@ -779,6 +817,7 @@ namespace
 						presentation.submitStageVendorAdmissionGeneration == presentation.activeContractGeneration &&
 						presentation.submitStageVendorAdmissionMethod == static_cast<uint32_t>(presentation.upscaleMethod) &&
 						presentation.submitStageVendorAdmissionFrame == presentation.currentFrame &&
+						presentation.submitStageVendorAdmissionColorContract == presentation.sourceColorContract &&
 						!presentation.submitStageVendorAdmissionExactProviderReady &&
 						!presentation.submitStageVendorAdmissionAuthoritativeDLSSProfile &&
 						presentation.submitStageVendorAdmissionDLSSQualityMode == 0 &&
@@ -788,7 +827,7 @@ namespace
 				Require(presentation.submitStageVendorAdmissionEyeMask == 0,
 					"Restoring cleared admission retained an old eye claim");
 		}
-		for (uint32_t mismatch = 0; mismatch < 3; ++mismatch) {
+		for (uint32_t mismatch = 0; mismatch < 4; ++mismatch) {
 			DeferredPresentation presentation;
 			if (mismatch == 0)
 				++presentation.submitStageVendorAdmissionCycle;
@@ -796,6 +835,8 @@ namespace
 				++presentation.submitStageVendorAdmissionGeneration;
 			if (mismatch == 2)
 				++presentation.submitStageVendorAdmissionMethod;
+			if (mismatch == 3)
+				presentation.submitStageVendorAdmissionColorContract.transfer = VRSubmitColorContract::Transfer::Linear;
 			Require(!presentation.Present() && presentation.stretches == 0 &&
 						!presentation.submitStageVendorAdmissionPresentationOnly,
 				"Deferred presentation overwrote another stereo cycle or contract");
@@ -821,8 +862,25 @@ namespace
 	}
 }
 
+void QuarantinedSharedGuidesRequireReplacement()
+{
+	auto& upscaling = Reset();
+	auto& provider = upscaling.fidelityFX;
+	EnableHost(provider);
+	provider.plan.selected = false;
+	provider.sharedGuidesQuarantined = true;
+	Require(upscaling.DispatchVendorEyeRegion(UpscaleMethod::kFSR, Region(0, 1284)) == Result::Failed,
+		"Host fallback reused a quarantined direct guide");
+	Require(provider.hostCalls == 0, "Quarantined guide reached host dispatch");
+	provider.sharedGuidesQuarantined = false;
+	Require(upscaling.DispatchVendorEyeRegion(UpscaleMethod::kFSR, Region(0, 1284)) == Result::Ready,
+		"Replacement guides did not restore compatible host fallback");
+}
+
 int main()
 {
+	SubmitContractsReachHostDispatch();
+	QuarantinedSharedGuidesRequireReplacement();
 	ColdRuntimeWithoutPeerProof();
 	DeferredAdmissionAndHostFallback();
 	GenuineFailuresRemainFailures();
