@@ -68,6 +68,7 @@ namespace CSX::RenderMap
 			"resource-version-observed",
 			"eye-submitted",
 		};
+		static_assert(names.size() == static_cast<std::size_t>(EventKind::kCount));
 		const auto index = static_cast<std::size_t>(a_kind);
 		return index < names.size() ? names[index] : "gap";
 	}

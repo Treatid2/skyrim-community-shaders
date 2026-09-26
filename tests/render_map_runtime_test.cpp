@@ -1825,12 +1825,15 @@ namespace
 			WaitForDeferredPublicationPause(runtime, staleWorker);
 
 			auto first = runtime.StopCapture();
-			Check(first.has_value() && runtime.StartCapture(config) == StartResult::kStarted,
-				"immediate publication capture turnover failed");
-			runtime.RegisterDeferredContext(deferredContext, 0);
-			runtime.BindStage(deferredContext, ShaderStage::kVertex, unrelatedShader);
+			const auto successorStarted = runtime.StartCapture(config) == StartResult::kStarted;
+			if (successorStarted) {
+				runtime.RegisterDeferredContext(deferredContext, 0);
+				runtime.BindStage(deferredContext, ShaderStage::kVertex, unrelatedShader);
+			}
 			runtime.ResumeDeferredPublicationForTesting();
 			staleWorker.join();
+			Check(first.has_value() && successorStarted,
+				"immediate publication capture turnover failed");
 			runtime.RecordDraw(immediateContext, DrawOperation::kDraw, successorDrawArgument);
 
 			auto second = runtime.StopCapture();
@@ -2169,16 +2172,19 @@ namespace
 					WaitForDeferredPublicationPause(runtime, staleWorker);
 
 					auto first = runtime.StopCapture();
-					Check(first.has_value() && runtime.StartCapture(config) == StartResult::kStarted,
-						"finish turnover capture transition failed");
-					if (successorIndex == 2)
-						runtime.RegisterDeferredContext(0xD600, 0);
+					const auto successorStarted = runtime.StartCapture(config) == StartResult::kStarted;
 					const auto successorContext = successorContexts[successorIndex];
-					runtime.RegisterDeferredContext(successorContext, 0);
-					runtime.BindStage(successorContext, ShaderStage::kVertex, successorShader);
-					runtime.BindStage(successorContext, ShaderStage::kCompute, successorShader + 1);
+					if (successorStarted) {
+						if (successorIndex == 2)
+							runtime.RegisterDeferredContext(0xD600, 0);
+						runtime.RegisterDeferredContext(successorContext, 0);
+						runtime.BindStage(successorContext, ShaderStage::kVertex, successorShader);
+						runtime.BindStage(successorContext, ShaderStage::kCompute, successorShader + 1);
+					}
 					runtime.ResumeDeferredPublicationForTesting();
 					staleWorker.join();
+					Check(first.has_value() && successorStarted,
+						"finish turnover capture transition failed");
 					runtime.RecordDraw(successorContext, DrawOperation::kDraw, 2);
 					runtime.RecordDispatch(successorContext, DispatchOperation::kDispatch, 1, 1, 1);
 
@@ -2252,17 +2258,20 @@ namespace
 			WaitForDeferredPublicationPause(runtime, staleWorker);
 
 			auto first = runtime.StopCapture();
-			Check(first.has_value() && std::any_of(first->events.begin(), first->events.end(),
-										   [](const EventRecord& event) {
-											   return event.kind == EventKind::kFinishCommandList;
-										   }),
-				"finish did not publish before the cleanup turnover barrier");
-			Check(runtime.StartCapture(config) == StartResult::kStarted,
-				"finish cleanup-turnover successor capture did not start");
-			runtime.RegisterDeferredContext(oldContext, 0);
-			runtime.BindStage(oldContext, ShaderStage::kVertex, successorShader);
+			const auto finishPublished = first.has_value() &&
+			                             std::any_of(first->events.begin(), first->events.end(),
+											 [](const EventRecord& event) {
+												 return event.kind == EventKind::kFinishCommandList;
+											 });
+			const auto successorStarted = runtime.StartCapture(config) == StartResult::kStarted;
+			if (successorStarted) {
+				runtime.RegisterDeferredContext(oldContext, 0);
+				runtime.BindStage(oldContext, ShaderStage::kVertex, successorShader);
+			}
 			runtime.ResumeDeferredPublicationForTesting();
 			staleWorker.join();
+			Check(finishPublished, "finish did not publish before the cleanup turnover barrier");
+			Check(successorStarted, "finish cleanup-turnover successor capture did not start");
 			runtime.RecordDraw(oldContext, DrawOperation::kDraw, 4);
 
 			auto second = runtime.StopCapture();
@@ -2293,15 +2302,18 @@ namespace
 			WaitForDeferredPublicationPause(runtime, staleWorker);
 
 			auto first = runtime.StopCapture();
-			Check(first.has_value() && runtime.StartCapture(config) == StartResult::kStarted,
-				"stage turnover capture transition failed");
-			if (successorIndex == 2)
-				runtime.RegisterDeferredContext(0xD600, 0);
+			const auto successorStarted = runtime.StartCapture(config) == StartResult::kStarted;
 			const auto successorContext = successorContexts[successorIndex];
-			runtime.RegisterDeferredContext(successorContext, 0);
-			runtime.BindStage(successorContext, ShaderStage::kVertex, successorShader);
+			if (successorStarted) {
+				if (successorIndex == 2)
+					runtime.RegisterDeferredContext(0xD600, 0);
+				runtime.RegisterDeferredContext(successorContext, 0);
+				runtime.BindStage(successorContext, ShaderStage::kVertex, successorShader);
+			}
 			runtime.ResumeDeferredPublicationForTesting();
 			staleWorker.join();
+			Check(first.has_value() && successorStarted,
+				"stage turnover capture transition failed");
 			runtime.RecordDraw(successorContext, DrawOperation::kDraw, 3);
 
 			auto second = runtime.StopCapture();
