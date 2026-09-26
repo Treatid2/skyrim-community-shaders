@@ -106,7 +106,7 @@ if(NOT _performance_resolution EQUAL 128 OR NOT _quality_resolution EQUAL 256)
 endif()
 
 foreach(_required_behavior IN ITEMS
-    "return CSX::Api::RunDevBenchMainThreadTask(SKSE::GetTaskInterface(), std::move(a_run));"
+    "return CSX::Api::RunDevBenchMainThreadTask(SKSE::GetTaskInterface(), std::move(a_run)).response;"
     "if (action == \"prepare_coc\")"
     "if (action == \"prepare_tuning\")"
     "PrepareRuntimePreflight(MenuDevBenchPreflightPolicy::Preparation::Coc)"

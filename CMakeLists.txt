@@ -2639,6 +2639,7 @@ if(BUILD_CONTROLLER_TESTS)
             vr_render_scale_mode_policy_test
             upscaling_measurement_restore_test
             upscaling_provider_selection_policy_test
+            encode_textures_host_policy_test
             vr_render_scale_qualification_policy_test
             vr_render_scale_replacement_telemetry_policy_test
             vr_render_scale_retry_telemetry_test
