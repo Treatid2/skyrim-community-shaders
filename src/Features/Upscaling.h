@@ -315,8 +315,13 @@ public:
 		bool frameGenerationAllowInMenus = false;
 		uint streamlineLogLevel = 0;  // 0=Off, 1=Default, 2=Verbose
 		float sharpnessFSR = 0.9f;
+		FSRTemporalTuningPolicy::Settings fsrTemporalTuning{};
 		float sharpnessDLSS = 0.9f;
 		uint dlssSharpener = static_cast<uint>(DLSSSharpenerMode::RCAS);
+		bool motionAdaptiveRCAS = false;
+		float motionSharpnessAdjustment = -0.5f;
+		float motionSharpnessThreshold = 2.0f;
+		float motionSharpnessCap = 1.0f;
 		bool fsr4RuntimeEnable = true;
 		uint fsr4RuntimeSelectionSchemaVersion = kFsr4RuntimeSelectionSchemaVersion;
 		bool pipelineDiagnostics = false;
@@ -1767,6 +1772,10 @@ public:
 		FSRActiveInputCopyCalls,
 		FSRActiveInputPixels,
 		FSRAvoidedInputPixels,
+		FSRDirectGuideInputs,
+		FSRDirectGuidePixels,
+		FSRGuideCopyFallbacks,
+		FSRGuideImportFailures,
 		RuntimeFSRStereoBatchAttempts,
 		RuntimeFSRStereoBatchReuses,
 		RuntimeFSRStereoBatchSuccesses,
@@ -2238,6 +2247,8 @@ public:
 #endif
 	/** @brief Resolve material mip bias from the active resolution owner or OpenComposite Unleashed. */
 	float ResolveRuntimeMipBias(bool a_temporal);
+	/** Validates and queues an optional FSR reconstruction profile without changing resolution. */
+	bool SetFSRTemporalTuningSettings(const FSRTemporalTuningPolicy::Settings& a_settings);
 	// Refresh both the cached plan and restart-required state from the current VR render-scale settings.
 	void RefreshRuntimeResolutionState();
 	// Read-side helper: avoid rebuilding the cached plan multiple times in one frame.
@@ -2537,12 +2548,14 @@ public:
 
 	// Helper: Create a Texture2D matching source format at a given size
 	static eastl::unique_ptr<Texture2D> CreateTextureFromSource(ID3D11Resource* src, uint32_t width, uint32_t height,
-		bool copyBindFlags = false, bool createSRV = false, bool createUAV = false, const char* name = nullptr, bool createRTV = false);
+		bool copyBindFlags = false, bool createSRV = false, bool createUAV = false, const char* name = nullptr, bool createRTV = false, bool shareWithRuntime = false);
 
 	// Shared Pipeline Steps
 	bool PreparePerEyeInputs(ID3D11Resource* colorSrc, ID3D11Resource* depthSrc, ID3D11Resource* mvecSrc,
 		ID3D11Resource* reactiveSrc, ID3D11Resource* transparencySrc, bool copyAuxiliaryInputs = true, bool copyDepthInput = true);
 	bool AreVRPerEyeUpscalingResourcesReady(bool requireDepth, bool requireLinearDepth) const;
+	/** Rejects any guide retained by an unsafe optional-provider ownership domain. */
+	bool HasQuarantinedVRGuideInputs() const;
 	bool AreVRIntermediateTexturesCompatibleForFSR(uint32_t a_displayEyeWidth, uint32_t a_displayEyeHeight) const;
 	bool AreActiveVRIntermediateTexturesCompatible(
 		UpscaleMethod a_upscaleMethod,
@@ -2573,7 +2586,8 @@ public:
 		bool a_compositeCommittedMenuLayer = false);
 	void PresentVRMenuDesktopMirror(IDXGISwapChain* a_swapChain);
 	bool EnsureSubmitStageDLSSSharpenerTexture(uint32_t eyeIndex, const Texture2D& colorOutput);
-	bool ApplySubmitStageDLSSSharpening(uint32_t eyeIndex, const Texture2D& sharpenInput);
+	bool ApplySubmitStageDLSSSharpening(uint32_t eyeIndex, const Texture2D& sharpenInput,
+		ID3D11ShaderResourceView* motionVectors, const MotionSharpening::Region& motionRegion);
 
 	void ConfigureTAA();
 	void ConfigureUpscaling(RE::BSGraphics::State* a_state);
