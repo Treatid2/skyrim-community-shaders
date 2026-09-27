@@ -236,9 +236,13 @@ advertise `deferredContexts: true` and `commandLists: true`.
 
 ## Static qualification and next live gate
 
-The implementation passes the focused runtime, collector, graph-builder, and
-schema-contract tests and a release plugin build. The registry intentionally
-continues to report `deferredContexts: false` and `commandLists: false`.
+The offline schema and graph contracts pass through the deterministic Python
+forwarding wrapper, and the scoped formatting and target-relative diff checks
+pass. The registered release build rejected this candidate before compilation
+because the target-relative change includes build-control files, so it produced
+no artifact or build receipt. The C++ runtime and controller tests have not been
+rebuilt or executed for this head. The registry intentionally continues to
+report `deferredContexts: false` and `commandLists: false`.
 
 The next qualification needs an MO2 lease and a loaded scene with Unified Water
 active. A bounded capture must prove that the deferred context's vtable routes

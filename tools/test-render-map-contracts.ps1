@@ -43,8 +43,8 @@ function Resolve-Python3 {
         if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
             continue
         }
-        $probe = & $candidate -c 'import sys; print("CSX_PY3" if sys.version_info.major == 3 else "")' 2>$null
-        if ($LASTEXITCODE -eq 0 -and ($probe | Select-Object -Last 1) -eq 'CSX_PY3') {
+        & $candidate -c 'import sys;raise SystemExit(sys.version_info.major!=3)' 2>$null
+        if ($LASTEXITCODE -eq 0) {
             return (Resolve-Path -LiteralPath $candidate).Path
         }
     }
