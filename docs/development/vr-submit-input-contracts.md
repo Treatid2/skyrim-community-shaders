@@ -107,7 +107,9 @@ contexts incompatible, so their existing render-thread lifecycle recreates
 them at the next safe frame boundary. A request made between stereo eyes keeps
 the current context through that frame. Status reports requested and effective
 flags, context generations, dimensions, and the latest successful dispatch
-serial.
+serial as one coherent snapshot. Runtime context validity is published only
+after provider and temporal-tuning admission succeed, and quarantine clears
+validity while indeterminate ownership is retained.
 The production default remains both flags enabled. The tool does not mutate the
 source-color contract above, persist settings, select a provider, change
 resolution, or touch DLSS/DLAA behavior.

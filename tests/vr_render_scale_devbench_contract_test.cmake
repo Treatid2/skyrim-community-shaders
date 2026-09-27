@@ -39,6 +39,10 @@ file(READ
     _fidelityfx_source
 )
 file(READ
+    "${PROJECT_ROOT}/src/Features/Upscaling/FidelityFX.h"
+    _fidelityfx_header
+)
+file(READ
     "${PROJECT_ROOT}/src/Features/Upscaling/FSRColorContractDevBenchBridge.cpp"
     _fsr_color_contract_bridge
 )
@@ -273,8 +277,7 @@ foreach(_fsr_color_contract IN ITEMS
     "autoExposure"
     "sourceColorContractChanged"
     "SetDevBenchFsrColorContract("
-    "GetDevBenchFsrColorContractSnapshot()"
-    "GetRuntimeUpscalerDispatchSnapshotForRenderThread()"
+    "GetDevBenchFsrColorContractStatusSnapshot()"
     "FSRColorContractPolicy::PlanUpdate("
     "FSRColorContractPolicy::ContextMatches("
     "FSRColorContractDevBenchBridge::Install()"
@@ -290,6 +293,84 @@ foreach(_fsr_color_contract IN ITEMS
         )
     endif()
 endforeach()
+
+string(REGEX MATCHALL
+    "const std::lock_guard lock\\(devBenchFsrColorContractMutex\\);"
+    _fsr_color_contract_locks
+    "${_fidelityfx_source}"
+)
+list(LENGTH _fsr_color_contract_locks _fsr_color_contract_lock_count)
+if(_fsr_color_contract_lock_count LESS 7)
+    message(FATAL_ERROR
+        "FSR colour-contract request, context, and dispatch evidence is not serialized"
+    )
+endif()
+
+string(FIND "${_fsr_color_contract_bridge}"
+    "GetRuntimeUpscalerDispatchSnapshotForRenderThread()"
+    _split_fsr_status_position)
+if(NOT _split_fsr_status_position EQUAL -1)
+    message(FATAL_ERROR
+        "FSR colour-contract status still reads dispatch evidence separately"
+    )
+endif()
+
+foreach(_coherent_fsr_evidence IN ITEMS
+    "FsrColorContractStatusSnapshot"
+    "devBenchFsrColorContractMutex"
+    "PublishDevBenchFsrColorContext(false, colorContractFlags)"
+    "PublishDevBenchFsrColorContext(true, colorContractFlags)"
+    "ClearDevBenchFsrColorContext(false)"
+    "ClearDevBenchFsrColorContext(true)"
+)
+    string(FIND
+        "${_fidelityfx_header}\n${_fidelityfx_source}"
+        "${_coherent_fsr_evidence}"
+        _coherent_fsr_evidence_position
+    )
+    if(_coherent_fsr_evidence_position EQUAL -1)
+        message(FATAL_ERROR
+            "FSR colour-contract coherent evidence is missing: ${_coherent_fsr_evidence}"
+        )
+    endif()
+endforeach()
+
+string(FIND "${_fidelityfx_source}"
+    "FidelityFX::LifecycleResult FidelityFX::EnsureRuntimeUpscalerContexts"
+    _fsr_runtime_context_function_start)
+string(FIND "${_fidelityfx_source}"
+    "FidelityFX::LifecycleResult FidelityFX::EnsureRuntimeUpscalerSharedResources"
+    _fsr_runtime_context_function_end)
+if(_fsr_runtime_context_function_start EQUAL -1 OR
+    _fsr_runtime_context_function_end EQUAL -1 OR
+    _fsr_runtime_context_function_end LESS_EQUAL _fsr_runtime_context_function_start)
+    message(FATAL_ERROR "Runtime FSR context function boundaries were not found")
+endif()
+math(EXPR _fsr_runtime_context_function_length
+    "${_fsr_runtime_context_function_end} - ${_fsr_runtime_context_function_start}")
+string(SUBSTRING "${_fidelityfx_source}"
+    ${_fsr_runtime_context_function_start}
+    ${_fsr_runtime_context_function_length}
+    _fsr_runtime_context_function)
+
+string(FIND "${_fsr_runtime_context_function}"
+    "const auto providerResult = RecordRuntimeProviderResult(true)"
+    _fsr_provider_admission_position)
+string(FIND "${_fsr_runtime_context_function}"
+    "const auto tuningResult = ConfigureTemporalTuningContexts"
+    _fsr_tuning_admission_position)
+string(FIND "${_fsr_runtime_context_function}"
+    "PublishDevBenchFsrColorContext(true, colorContractFlags)"
+    _fsr_runtime_publish_position)
+if(_fsr_provider_admission_position EQUAL -1 OR
+    _fsr_tuning_admission_position EQUAL -1 OR
+    _fsr_runtime_publish_position EQUAL -1 OR
+    _fsr_runtime_publish_position LESS _fsr_provider_admission_position OR
+    _fsr_runtime_publish_position LESS _fsr_tuning_admission_position)
+    message(FATAL_ERROR
+        "Runtime FSR validity is published before provider and tuning admission"
+    )
+endif()
 
 foreach(_forbidden_fsr_color_contract IN ITEMS
     "\"persist\""

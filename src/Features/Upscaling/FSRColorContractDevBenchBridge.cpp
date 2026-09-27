@@ -22,8 +22,9 @@ namespace
 
 	json SnapshotJson()
 	{
-		const auto contract = Upscaling::fidelityFX.GetDevBenchFsrColorContractSnapshot();
-		const auto dispatch = Upscaling::fidelityFX.GetRuntimeUpscalerDispatchSnapshotForRenderThread();
+		const auto status = Upscaling::fidelityFX.GetDevBenchFsrColorContractStatusSnapshot();
+		const auto& contract = status.contract;
+		const auto& dispatch = status.dispatch;
 		return {
 			{ "requested", {
 							   { "revision", contract.revision },

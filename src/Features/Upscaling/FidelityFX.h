@@ -129,6 +129,12 @@ public:
 		bool exposureResourceBound = false;
 		float preExposure = 1.0f;
 	};
+
+	struct FsrColorContractStatusSnapshot
+	{
+		FsrColorContractSnapshot contract{};
+		RuntimeUpscalerDispatchSnapshot dispatch{};
+	};
 #endif
 
 	static constexpr const wchar_t* PluginDir = L"Data\\Shaders\\Upscaling\\FidelityFX";
@@ -251,8 +257,8 @@ public:
 	std::string GetRuntimeUpscalerProviderName() const;
 	std::string GetRuntimeUpscalerRequestedVersionString() const;
 #ifdef DEVBENCH_BRIDGE_ENABLED
-	/** @brief Returns the requested and created FSR processing contract for DevBench evidence. */
-	FsrColorContractSnapshot GetDevBenchFsrColorContractSnapshot() const noexcept;
+	/** @brief Returns one coherent FSR request, context, and dispatch evidence snapshot. */
+	FsrColorContractStatusSnapshot GetDevBenchFsrColorContractStatusSnapshot() const noexcept;
 	/** @brief Atomically changes the DevBench-only FSR processing contract. */
 	bool SetDevBenchFsrColorContract(
 		uint64_t a_expectedRevision,
@@ -438,6 +444,8 @@ private:
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	[[nodiscard]] uint64_t GetDevBenchFsrColorContractState() const noexcept;
 	[[nodiscard]] uint64_t GetDevBenchFsrColorContractFlags() const noexcept;
+	void PublishDevBenchFsrColorContext(bool a_runtime, uint64_t a_flags) noexcept;
+	void ClearDevBenchFsrColorContext(bool a_runtime) noexcept;
 	void RecordDevBenchSuccessfulDispatch(
 		RuntimeUpscalerFramePath a_path,
 		uint32_t a_contextIndex,
@@ -452,7 +460,7 @@ private:
 	std::atomic<uint64_t> devBenchRuntimeContextGeneration{ 0 };
 	std::atomic<uint32_t> devBenchHostContextLastDispatchFrame{ 0 };
 	std::atomic<uint32_t> devBenchRuntimeContextLastDispatchFrame{ 0 };
-	mutable std::mutex devBenchSuccessfulDispatchMutex;
+	mutable std::mutex devBenchFsrColorContractMutex;
 	RuntimeUpscalerDispatchSnapshot devBenchSuccessfulDispatch{};
 	uint64_t devBenchSuccessfulDispatchSerial = 0;
 #endif
