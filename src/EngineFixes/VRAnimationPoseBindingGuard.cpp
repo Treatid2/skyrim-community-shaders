@@ -9,10 +9,13 @@
 
 namespace
 {
-	constexpr std::uintptr_t kApplyPoseCallsiteRVA = 0xAEC1AD;
+	constexpr std::uintptr_t kApplyPoseCallsiteRVA = 0xB26DAD;
 	constexpr std::uintptr_t kApplyPoseTargetRVA = 0xB3C260;
 	constexpr std::uintptr_t kBoneNodesOffset = 0x160;
 	constexpr std::array<std::uint8_t, 5> kExpectedCall{ 0xE8, 0xAE, 0x54, 0x01, 0x00 };
+	constexpr auto kExpectedCallDisplacement = std::bit_cast<std::int32_t>(
+		std::array<std::uint8_t, 4>{ kExpectedCall[1], kExpectedCall[2], kExpectedCall[3], kExpectedCall[4] });
+	static_assert(kApplyPoseCallsiteRVA + kExpectedCall.size() + kExpectedCallDisplacement == kApplyPoseTargetRVA);
 	constexpr std::size_t kMaximumSceneObjects = 65536;
 	constexpr std::uint64_t kDetailedEventLimit = 64;
 

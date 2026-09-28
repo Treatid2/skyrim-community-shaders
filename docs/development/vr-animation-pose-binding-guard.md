@@ -26,7 +26,7 @@ uses the native storage bound rather than imposing that narrower count.
 
 ## Guard
 
-On Skyrim VR 1.4.15, CSX verifies and hooks the call at RVA `0xAEC1AD` to the
+On Skyrim VR 1.4.15, CSX verifies and hooks the call at RVA `0xB26DAD` to the
 native helper at RVA `0xB3C260`. For each invocation it derives the owning
 animation graph, walks the graph's current scene tree and validates every
 direct binding against that live object set. Entries with a non-negative
@@ -54,3 +54,30 @@ This is containment and causal telemetry for `ISSUE-CSX-LIGHT-VALIDATION`.
 It is not evidence that CSX caused the stale binding, and it is not a repair
 for the unidentified producer. The final engine-level patch belongs in Engine
 Fixes VR; any identified producer should also be corrected at source.
+
+## Producer investigation and qualification limits
+
+The native binding builder at VR RVA `0xB3BF90` resolves skeleton bone names
+through `0xCAFC40`, `0xCB0680` and `0xCB0910`, then copies each 16-byte result
+into the graph table. The matcher can return either a named scene object or
+the node pointer stored in a flattened-tree entry. This path does not use the
+separate `BOM` cache used by the generic bone-name lookup helper.
+
+In the September 14 03:28 dump, flattened-tree entry 382 (`SHIELD`) names a
+live `BSFadeNode` at `0x2B1D4653880` under the graph root. Graph binding 42
+instead names the shader-property victim at `0x2B3111BFE80`. This is concrete
+evidence of inconsistent lookup structures, consistent with node replacement
+without rebinding. It does not record the historical free or pointer write.
+
+A bounded code audit also found pose-copy callers at RVAs `0xB269D7` and
+`0xB2769F`. The present draft only hooks `0xB26DAD`; coverage of these other
+paths remains a qualification requirement before claiming general containment.
+The September 28 Papyrus dump establishes a matching transform-shaped
+overwrite, but has not yet linked its victim to a specific surviving graph
+binding. Its producer attribution therefore remains weaker than the older
+Shield captures.
+
+Addresses embedded in reconstructed symbol names are not necessarily VR
+RVAs. Module-base subtraction and the decoded relative call independently
+verify `0xB26DAD + 5 + 0x154AE == 0xB3C260`. The call bytes were checked in
+both full dumps; a compile-time check keeps these constants consistent.
