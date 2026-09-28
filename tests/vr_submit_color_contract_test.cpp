@@ -53,15 +53,54 @@ namespace
 			return false;
 		}
 
-		const auto changed = PlanUpdate(kDefaultState, 1, false, true);
+		const auto changed = PlanUpdate(kDefaultState, 1, false, false);
 		const auto decoded = Decode(changed.desiredState);
 		if (!changed.revisionMatched || !changed.changed ||
-			decoded.revision != 2 || decoded.highDynamicRangeInput || !decoded.autoExposure) {
+			decoded.revision != 2 || decoded.highDynamicRangeInput || decoded.autoExposure) {
+			return false;
+		}
+		const auto autoExposureOnly = PlanUpdate(changed.desiredState, 2, false, true);
+		const auto autoExposureDecoded = Decode(autoExposureOnly.desiredState);
+		if (!autoExposureOnly.revisionMatched || !autoExposureOnly.changed ||
+			autoExposureDecoded.revision != 3 || autoExposureDecoded.highDynamicRangeInput ||
+			!autoExposureDecoded.autoExposure) {
+			return false;
+		}
+		constexpr std::uint32_t currentFrame = 17;
+		if (GetReplacementState(
+				ContextState(kDefaultState),
+				0,
+				0,
+				0,
+				kDefaultState,
+				currentFrame) != ReplacementState::None ||
+			GetReplacementState(
+				ContextState(kDefaultState),
+				currentFrame,
+				0,
+				0,
+				changed.desiredState,
+				currentFrame) != ReplacementState::Deferred ||
+			GetReplacementState(
+				ContextState(kDefaultState),
+				currentFrame - 1,
+				0,
+				0,
+				changed.desiredState,
+				currentFrame) != ReplacementState::Ready ||
+			GetReplacementState(
+				ContextState(kDefaultState),
+				currentFrame - 1,
+				ContextState(kDefaultState),
+				currentFrame,
+				changed.desiredState,
+				currentFrame) != ReplacementState::Deferred) {
 			return false;
 		}
 		return !CanReuseContext(ContextState(kDefaultState), changed.desiredState, false) &&
 		       CanReuseContext(ContextState(kDefaultState), changed.desiredState, true) &&
-		       CanReuseContext(ContextState(changed.desiredState), changed.desiredState, false);
+		       CanReuseContext(ContextState(changed.desiredState), changed.desiredState, false) &&
+		       !CanReuseContext(ContextState(changed.desiredState), autoExposureOnly.desiredState, false);
 	}
 
 	static_assert(CoversPresentationAndVendorAdmission());

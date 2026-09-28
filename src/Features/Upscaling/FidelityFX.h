@@ -265,6 +265,8 @@ public:
 		bool a_highDynamicRangeInput,
 		bool a_autoExposure,
 		uint64_t& a_resultingRevision) noexcept;
+	/** @brief Returns the coherent render-thread disposition for a changed FSR processing contract. */
+	[[nodiscard]] FSRColorContractPolicy::ReplacementState GetDevBenchFsrColorContractReplacementState() const noexcept;
 	/** @brief Thread-safe copy of the latest successful FSR dispatch evidence. */
 	RuntimeUpscalerDispatchSnapshot GetRuntimeUpscalerDispatchSnapshotForRenderThread() const;
 #endif

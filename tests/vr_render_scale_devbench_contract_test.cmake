@@ -320,8 +320,8 @@ foreach(_coherent_fsr_evidence IN ITEMS
     "devBenchFsrColorContractMutex"
     "PublishDevBenchFsrColorContext(false, colorContractFlags)"
     "PublishDevBenchFsrColorContext(true, colorContractFlags)"
-    "ClearDevBenchFsrColorContext(false)"
-    "ClearDevBenchFsrColorContext(true)"
+    "GetDevBenchFsrColorContractReplacementState()"
+    "FSRColorContractPolicy::GetReplacementState("
 )
     string(FIND
         "${_fidelityfx_header}\n${_fidelityfx_source}"
@@ -331,6 +331,64 @@ foreach(_coherent_fsr_evidence IN ITEMS
     if(_coherent_fsr_evidence_position EQUAL -1)
         message(FATAL_ERROR
             "FSR colour-contract coherent evidence is missing: ${_coherent_fsr_evidence}"
+        )
+    endif()
+endforeach()
+
+foreach(_fsr_quarantine_case IN ITEMS "Host" "Runtime")
+    if(_fsr_quarantine_case STREQUAL "Host")
+        set(_fsr_quarantine_start "void FidelityFX::QuarantineHostFSRState")
+        set(_fsr_quarantine_end "void FidelityFX::QuarantineHostFSRContext")
+        set(_fsr_quarantine_clear "ClearDevBenchFsrColorContext(false)")
+        set(_fsr_quarantine_guard "if (fsrHostStateQuarantined)")
+    else()
+        set(_fsr_quarantine_start "void FidelityFX::QuarantineRuntimeUpscalerForSession")
+        set(_fsr_quarantine_end "FidelityFX::RuntimeUpscalerFramePath FidelityFX::GetRuntimeUpscalerProviderFramePath")
+        set(_fsr_quarantine_clear "ClearDevBenchFsrColorContext(true)")
+        set(_fsr_quarantine_guard "if (runtimeUpscalerSessionQuarantined)")
+    endif()
+
+    string(FIND "${_fidelityfx_source}" "${_fsr_quarantine_start}"
+        _fsr_quarantine_function_start)
+    string(FIND "${_fidelityfx_source}" "${_fsr_quarantine_end}"
+        _fsr_quarantine_function_end)
+    if(_fsr_quarantine_function_start EQUAL -1 OR
+        _fsr_quarantine_function_end EQUAL -1 OR
+        _fsr_quarantine_function_end LESS_EQUAL _fsr_quarantine_function_start)
+        message(FATAL_ERROR
+            "${_fsr_quarantine_case} FSR quarantine function boundaries were not found"
+        )
+    endif()
+    math(EXPR _fsr_quarantine_function_length
+        "${_fsr_quarantine_function_end} - ${_fsr_quarantine_function_start}")
+    string(SUBSTRING "${_fidelityfx_source}"
+        ${_fsr_quarantine_function_start}
+        ${_fsr_quarantine_function_length}
+        _fsr_quarantine_function)
+    string(FIND "${_fsr_quarantine_function}" "${_fsr_quarantine_clear}"
+        _fsr_quarantine_clear_position)
+    string(FIND "${_fsr_quarantine_function}" "${_fsr_quarantine_guard}"
+        _fsr_quarantine_guard_position)
+    if(_fsr_quarantine_clear_position EQUAL -1 OR
+        _fsr_quarantine_guard_position EQUAL -1 OR
+        _fsr_quarantine_clear_position GREATER _fsr_quarantine_guard_position)
+        message(FATAL_ERROR
+            "${_fsr_quarantine_case} FSR quarantine does not clear validity before its early return"
+        )
+    endif()
+endforeach()
+
+foreach(_fsr_color_lifecycle_contract IN ITEMS
+    "pendingFsrColorContractReplacement"
+    "fsrColorContractReplacementReady"
+    "colour-contract FSR resource teardown"
+    "colour-contract FSR resource creation"
+)
+    string(FIND "${_upscaling_source}" "${_fsr_color_lifecycle_contract}"
+        _fsr_color_lifecycle_contract_position)
+    if(_fsr_color_lifecycle_contract_position EQUAL -1)
+        message(FATAL_ERROR
+            "FSR colour-contract lifecycle trigger is missing: ${_fsr_color_lifecycle_contract}"
         )
     endif()
 endforeach()

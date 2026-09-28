@@ -30,6 +30,13 @@ namespace FSRColorContractPolicy
 		std::uint64_t resultingRevision = 0;
 	};
 
+	enum class ReplacementState : std::uint8_t
+	{
+		None,
+		Deferred,
+		Ready,
+	};
+
 	[[nodiscard]] constexpr std::uint64_t Flags(
 		bool a_highDynamicRangeInput,
 		bool a_autoExposure) noexcept
@@ -102,5 +109,29 @@ namespace FSRColorContractPolicy
 		bool a_dispatchedThisFrame) noexcept
 	{
 		return ContextMatches(a_contextState, a_requestedState) || a_dispatchedThisFrame;
+	}
+
+	[[nodiscard]] constexpr ReplacementState GetReplacementState(
+		std::uint64_t a_hostContextState,
+		std::uint32_t a_hostLastDispatchFrame,
+		std::uint64_t a_runtimeContextState,
+		std::uint32_t a_runtimeLastDispatchFrame,
+		std::uint64_t a_requestedState,
+		std::uint32_t a_currentFrame) noexcept
+	{
+		const bool hostMismatch =
+			(a_hostContextState & kContextValidBit) != 0 &&
+			!ContextMatches(a_hostContextState, a_requestedState);
+		const bool runtimeMismatch =
+			(a_runtimeContextState & kContextValidBit) != 0 &&
+			!ContextMatches(a_runtimeContextState, a_requestedState);
+		if (!hostMismatch && !runtimeMismatch)
+			return ReplacementState::None;
+
+		const bool dispatchedThisFrame =
+			a_currentFrame != 0 &&
+			((hostMismatch && a_hostLastDispatchFrame == a_currentFrame) ||
+				(runtimeMismatch && a_runtimeLastDispatchFrame == a_currentFrame));
+		return dispatchedThisFrame ? ReplacementState::Deferred : ReplacementState::Ready;
 	}
 }

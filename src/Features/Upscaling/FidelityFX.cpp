@@ -1283,6 +1283,23 @@ bool FidelityFX::SetDevBenchFsrColorContract(
 	return true;
 }
 
+FSRColorContractPolicy::ReplacementState FidelityFX::GetDevBenchFsrColorContractReplacementState() const noexcept
+{
+	const std::lock_guard lock(devBenchFsrColorContractMutex);
+	const uint64_t requested = GetDevBenchFsrColorContractState();
+	const uint64_t host = devBenchHostContextColorContract.load(std::memory_order_acquire);
+	const uint64_t runtime = devBenchRuntimeContextColorContract.load(std::memory_order_acquire);
+	const uint32_t currentFrame =
+		globals::state ? std::max(globals::state->frameCount, 1u) : 0u;
+	return FSRColorContractPolicy::GetReplacementState(
+		host,
+		devBenchHostContextLastDispatchFrame.load(std::memory_order_acquire),
+		runtime,
+		devBenchRuntimeContextLastDispatchFrame.load(std::memory_order_acquire),
+		requested,
+		currentFrame);
+}
+
 void FidelityFX::PublishDevBenchFsrColorContext(bool a_runtime, uint64_t a_flags) noexcept
 {
 	const std::lock_guard lock(devBenchFsrColorContractMutex);
