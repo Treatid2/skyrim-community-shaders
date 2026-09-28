@@ -993,7 +993,11 @@ class WorkflowContractTests(unittest.TestCase):
         )[1].split("- name:", maxsplit=1)[0]
         self.assertIn("if: inputs.devbench-qualification-compatibility", compatibility_step)
         self.assertIn("}).response;", compatibility_step)
-        self.assertIn("render_scale:", pull_request)
+        render_scale_filter = pull_request.split("render_scale:", maxsplit=1)[1].split(
+            "base_sha:", maxsplit=1
+        )[0]
+        self.assertIn("- 'src/Features/Upscaling.cpp'", render_scale_filter)
+        self.assertIn("- 'src/Features/Upscaling.h'", render_scale_filter)
         self.assertIn("ref: ${{ github.event.pull_request.base.sha }}", pull_request)
         self.assertIn("ref: ${{ github.event.pull_request.head.sha }}", pull_request)
         self.assertEqual(pull_request.count("devbench-bridge: true"), 2)

@@ -98,6 +98,8 @@ jobs:
                       render_scale:
                         - 'features/Upscaling/**'
                         - 'package/Shaders/Upscaling/**'
+                        - 'src/Features/Upscaling.cpp'
+                        - 'src/Features/Upscaling.h'
                         - 'src/Features/Upscaling/**'
                         - 'src/Features/VR/**'
                         - 'tests/render_scale_*'
