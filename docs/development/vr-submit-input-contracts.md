@@ -110,6 +110,8 @@ flags, context generations, dimensions, and the latest successful dispatch
 serial as one coherent snapshot. Runtime context validity is published only
 after provider and temporal-tuning admission succeed, and quarantine clears
 validity while indeterminate ownership is retained.
+Each `set` response binds its compare-and-set outcome and complete status to
+one mutex-coherent operation receipt, including rejected stale revisions.
 The production default remains both flags enabled. The tool does not mutate the
 source-color contract above, persist settings, select a provider, change
 resolution, or touch DLSS/DLAA behavior.

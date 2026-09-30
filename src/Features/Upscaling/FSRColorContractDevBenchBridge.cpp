@@ -20,11 +20,10 @@ namespace
 	using json = nlohmann::json;
 	std::atomic_bool installAttempted{ false };
 
-	json SnapshotJson()
+	json SnapshotJson(const FidelityFX::FsrColorContractStatusSnapshot& a_status)
 	{
-		const auto status = Upscaling::fidelityFX.GetDevBenchFsrColorContractStatusSnapshot();
-		const auto& contract = status.contract;
-		const auto& dispatch = status.dispatch;
+		const auto& contract = a_status.contract;
+		const auto& dispatch = a_status.dispatch;
 		return {
 			{ "requested", {
 							   { "revision", contract.revision },
@@ -63,6 +62,12 @@ namespace
 		};
 	}
 
+	json SnapshotJson()
+	{
+		return SnapshotJson(
+			Upscaling::fidelityFX.GetDevBenchFsrColorContractStatusSnapshot());
+	}
+
 	json BuildResult(const json& a_args)
 	{
 		for (const auto& [key, value] : a_args.items()) {
@@ -96,16 +101,14 @@ namespace
 			return { { "error", "set requires boolean highDynamicRangeInput and autoExposure" } };
 		}
 
-		std::uint64_t resultingRevision = 0;
-		const bool accepted = Upscaling::fidelityFX.SetDevBenchFsrColorContract(
+		const auto setResult = Upscaling::fidelityFX.SetDevBenchFsrColorContract(
 			a_args.at("expectedRevision").get<std::uint64_t>(),
 			a_args.at("highDynamicRangeInput").get<bool>(),
-			a_args.at("autoExposure").get<bool>(),
-			resultingRevision);
-		auto result = SnapshotJson();
-		result["accepted"] = accepted;
-		result["resultingRevision"] = resultingRevision;
-		if (!accepted)
+			a_args.at("autoExposure").get<bool>());
+		auto result = SnapshotJson(setResult.status);
+		result["accepted"] = setResult.accepted;
+		result["resultingRevision"] = setResult.resultingRevision;
+		if (!setResult.accepted)
 			result["error"] = "expectedRevision did not match the current request";
 		return result;
 	}

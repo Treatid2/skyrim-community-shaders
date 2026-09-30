@@ -1237,6 +1237,11 @@ uint64_t FidelityFX::GetDevBenchFsrColorContractFlags() const noexcept
 FidelityFX::FsrColorContractStatusSnapshot FidelityFX::GetDevBenchFsrColorContractStatusSnapshot() const noexcept
 {
 	const std::lock_guard lock(devBenchFsrColorContractMutex);
+	return GetDevBenchFsrColorContractStatusSnapshotLocked();
+}
+
+FidelityFX::FsrColorContractStatusSnapshot FidelityFX::GetDevBenchFsrColorContractStatusSnapshotLocked() const noexcept
+{
 	const uint64_t requested = GetDevBenchFsrColorContractState();
 	const auto requestedContract = FSRColorContractPolicy::Decode(requested);
 	const uint64_t host = devBenchHostContextColorContract.load(std::memory_order_acquire);
@@ -1259,28 +1264,19 @@ FidelityFX::FsrColorContractStatusSnapshot FidelityFX::GetDevBenchFsrColorContra
 	};
 }
 
-bool FidelityFX::SetDevBenchFsrColorContract(
+FidelityFX::FsrColorContractSetResult FidelityFX::SetDevBenchFsrColorContract(
 	uint64_t a_expectedRevision,
 	bool a_highDynamicRangeInput,
-	bool a_autoExposure,
-	uint64_t& a_resultingRevision) noexcept
+	bool a_autoExposure) noexcept
 {
-	const std::lock_guard lock(devBenchFsrColorContractMutex);
-	const auto update = FSRColorContractPolicy::PlanUpdate(
-		GetDevBenchFsrColorContractState(),
+	return FSRColorContractReceiptPolicy::ApplySet<FsrColorContractStatusSnapshot>(
+		devBenchFsrColorContractMutex,
+		devBenchFsrColorContractState,
 		a_expectedRevision,
 		a_highDynamicRangeInput,
-		a_autoExposure);
-	a_resultingRevision = update.resultingRevision;
-	if (!update.revisionMatched)
-		return false;
-	if (!update.changed)
-		return true;
-
-	// The request and dispatch evidence change as one observable transaction.
-	devBenchSuccessfulDispatch = {};
-	devBenchFsrColorContractState.store(update.desiredState, std::memory_order_release);
-	return true;
+		a_autoExposure,
+		[this]() { devBenchSuccessfulDispatch = {}; },
+		[this]() { return GetDevBenchFsrColorContractStatusSnapshotLocked(); });
 }
 
 FSRColorContractPolicy::ReplacementState FidelityFX::GetDevBenchFsrColorContractReplacementState() const noexcept

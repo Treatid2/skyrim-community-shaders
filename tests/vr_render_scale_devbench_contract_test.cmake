@@ -51,6 +51,10 @@ file(READ
     _fsr_color_contract_policy
 )
 file(READ
+    "${PROJECT_ROOT}/src/Features/Upscaling/FSRColorContractReceiptPolicy.h"
+    _fsr_color_contract_receipt_policy
+)
+file(READ
     "${PROJECT_ROOT}/docs/development/vr-render-scale-replacement-telemetry.md"
     _replacement_telemetry_documentation
 )
@@ -283,7 +287,7 @@ foreach(_fsr_color_contract IN ITEMS
     "FSRColorContractDevBenchBridge::Install()"
 )
     string(FIND
-        "${_fsr_color_contract_bridge}\n${_fsr_color_contract_policy}\n${_fidelityfx_source}\n${_upscaling_source}"
+        "${_fsr_color_contract_bridge}\n${_fsr_color_contract_policy}\n${_fsr_color_contract_receipt_policy}\n${_fidelityfx_source}\n${_upscaling_source}"
         "${_fsr_color_contract}"
         _fsr_color_contract_position
     )
@@ -297,10 +301,10 @@ endforeach()
 string(REGEX MATCHALL
     "const std::lock_guard lock\\(devBenchFsrColorContractMutex\\);"
     _fsr_color_contract_locks
-    "${_fidelityfx_source}"
+    "${_fidelityfx_source}\n${_fsr_color_contract_receipt_policy}"
 )
 list(LENGTH _fsr_color_contract_locks _fsr_color_contract_lock_count)
-if(_fsr_color_contract_lock_count LESS 7)
+if(_fsr_color_contract_lock_count LESS 6)
     message(FATAL_ERROR
         "FSR colour-contract request, context, and dispatch evidence is not serialized"
     )
@@ -317,6 +321,7 @@ endif()
 
 foreach(_coherent_fsr_evidence IN ITEMS
     "FsrColorContractStatusSnapshot"
+    "FsrColorContractSetResult"
     "devBenchFsrColorContractMutex"
     "PublishDevBenchFsrColorContext(false, colorContractFlags)"
     "PublishDevBenchFsrColorContext(true, colorContractFlags)"
@@ -331,6 +336,26 @@ foreach(_coherent_fsr_evidence IN ITEMS
     if(_coherent_fsr_evidence_position EQUAL -1)
         message(FATAL_ERROR
             "FSR colour-contract coherent evidence is missing: ${_coherent_fsr_evidence}"
+        )
+    endif()
+endforeach()
+
+foreach(_fsr_set_receipt_contract IN ITEMS
+    "const std::lock_guard lock(a_mutex);"
+    "FSRColorContractReceiptPolicy::ApplySet<FsrColorContractStatusSnapshot>("
+    "GetDevBenchFsrColorContractStatusSnapshotLocked()"
+    "SnapshotJson(setResult.status)"
+    "result[\"accepted\"] = setResult.accepted"
+    "result[\"resultingRevision\"] = setResult.resultingRevision"
+)
+    string(FIND
+        "${_fidelityfx_source}\n${_fidelityfx_header}\n${_fsr_color_contract_bridge}\n${_fsr_color_contract_receipt_policy}"
+        "${_fsr_set_receipt_contract}"
+        _fsr_set_receipt_contract_position
+    )
+    if(_fsr_set_receipt_contract_position EQUAL -1)
+        message(FATAL_ERROR
+            "FSR set response is not one mutex-coherent receipt: ${_fsr_set_receipt_contract}"
         )
     endif()
 endforeach()

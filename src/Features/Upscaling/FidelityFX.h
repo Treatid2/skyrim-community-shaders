@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "FSRColorContractPolicy.h"
+#include "FSRColorContractReceiptPolicy.h"
 #include "FSRSharedGuidePolicy.h"
 
 #include <FidelityFX/host/backends/dx11/ffx_dx11.h>
@@ -135,6 +136,9 @@ public:
 		FsrColorContractSnapshot contract{};
 		RuntimeUpscalerDispatchSnapshot dispatch{};
 	};
+
+	using FsrColorContractSetResult =
+		FSRColorContractReceiptPolicy::SetReceipt<FsrColorContractStatusSnapshot>;
 #endif
 
 	static constexpr const wchar_t* PluginDir = L"Data\\Shaders\\Upscaling\\FidelityFX";
@@ -259,12 +263,11 @@ public:
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	/** @brief Returns one coherent FSR request, context, and dispatch evidence snapshot. */
 	FsrColorContractStatusSnapshot GetDevBenchFsrColorContractStatusSnapshot() const noexcept;
-	/** @brief Atomically changes the DevBench-only FSR processing contract. */
-	bool SetDevBenchFsrColorContract(
+	/** @brief Atomically changes the request and captures its complete operation receipt. */
+	FsrColorContractSetResult SetDevBenchFsrColorContract(
 		uint64_t a_expectedRevision,
 		bool a_highDynamicRangeInput,
-		bool a_autoExposure,
-		uint64_t& a_resultingRevision) noexcept;
+		bool a_autoExposure) noexcept;
 	/** @brief Returns the coherent render-thread disposition for a changed FSR processing contract. */
 	[[nodiscard]] FSRColorContractPolicy::ReplacementState GetDevBenchFsrColorContractReplacementState() const noexcept;
 	/** @brief Thread-safe copy of the latest successful FSR dispatch evidence. */
@@ -446,6 +449,7 @@ private:
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	[[nodiscard]] uint64_t GetDevBenchFsrColorContractState() const noexcept;
 	[[nodiscard]] uint64_t GetDevBenchFsrColorContractFlags() const noexcept;
+	[[nodiscard]] FsrColorContractStatusSnapshot GetDevBenchFsrColorContractStatusSnapshotLocked() const noexcept;
 	void PublishDevBenchFsrColorContext(bool a_runtime, uint64_t a_flags) noexcept;
 	void ClearDevBenchFsrColorContext(bool a_runtime) noexcept;
 	void RecordDevBenchSuccessfulDispatch(
