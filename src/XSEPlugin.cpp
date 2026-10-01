@@ -37,8 +37,6 @@
 
 #include <atomic>
 
-#define DLLEXPORT __declspec(dllexport)
-
 std::list<std::string> errors;
 
 bool Load();
@@ -122,7 +120,7 @@ void InitializeLog([[maybe_unused]] spdlog::level::level_enum a_level = spdlog::
 	spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [%t] [%s:%#] %v");
 }
 
-extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_skse)
+SKSE_PLUGIN_LOAD(const SKSE::LoadInterface* a_skse)
 {
 #ifndef NDEBUG
 	while (!REX::W32::IsDebuggerPresent()) {};
@@ -135,7 +133,7 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	return Load();
 }
 
-extern "C" DLLEXPORT constinit auto SKSEPlugin_Version = []() noexcept {
+SKSE_EXPORT constinit auto SKSEPlugin_Version = []() noexcept {
 	SKSE::PluginVersionData v;
 	v.PluginName(Plugin::NAME.data());
 	v.PluginVersion(Plugin::VERSION);
@@ -144,7 +142,7 @@ extern "C" DLLEXPORT constinit auto SKSEPlugin_Version = []() noexcept {
 	return v;
 }();
 
-extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Query(const SKSE::QueryInterface*, SKSE::PluginInfo* pluginInfo)
+SKSE_PLUGIN_QUERY(const SKSE::QueryInterface*, SKSE::PluginInfo* pluginInfo)
 {
 	pluginInfo->name = SKSEPlugin_Version.pluginName;
 	pluginInfo->infoVersion = SKSE::PluginInfo::kVersion;
