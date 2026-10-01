@@ -4566,9 +4566,9 @@ void VR::UpdateDepthBufferCulling()
 		// Do not refresh after the effective location policy has switched culling off.
 		depthCullingCacheRefreshPending.store(false, std::memory_order_release);
 	} else if (ShouldRequest(
-			desired,
-			depthCullingCacheRefreshCompleted.load(std::memory_order_acquire),
-			depthCullingCacheRefreshPending.load(std::memory_order_acquire))) {
+				   desired,
+				   depthCullingCacheRefreshCompleted.load(std::memory_order_acquire),
+				   depthCullingCacheRefreshPending.load(std::memory_order_acquire))) {
 		depthCullingCacheRefreshPending.store(true, std::memory_order_release);
 	}
 
