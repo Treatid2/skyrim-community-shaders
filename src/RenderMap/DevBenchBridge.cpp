@@ -659,12 +659,4 @@ namespace CSX::RenderMap::DevBenchBridge
 	}
 }
 
-#else
-
-namespace CSX::RenderMap::DevBenchBridge
-{
-	void Install() {}
-	bool IsRegistered() { return false; }
-}
-
 #endif
