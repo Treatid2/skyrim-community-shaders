@@ -22,6 +22,7 @@
 #include "State.h"
 #include "Upscaling/DX12SwapChain.h"
 #include "Upscaling/EncodeTexturesHostPolicy.h"
+#include "Upscaling/FSRColorContractDevBenchBridge.h"
 #include "Upscaling/FSRHostLifecyclePolicy.h"
 #include "Upscaling/FSRTemporalTuningDevBenchBridge.h"
 #include "Upscaling/FSRTemporalTuningSerialization.h"
@@ -18329,6 +18330,7 @@ struct BSOpenVR_GetRenderTargetSize
 void Upscaling::DataLoaded()
 {
 	VRRenderScaleDevBenchBridge::Install();
+	FSRColorContractDevBenchBridge::Install();
 	FSRTemporalTuningDevBenchBridge::Install();
 	ApplyOpenCompositeUpscalingBlocker(true);
 	const auto blocker = GetOpenCompositeUpscalingBlocker();
@@ -38199,6 +38201,14 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 		a_upscalemethod == UpscaleMethod::kFSR &&
 		fsrRuntimePathCurrent &&
 		foveatedDispatchChanged;
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	const bool fsrColorContractReplacementReady =
+		a_upscalemethod == UpscaleMethod::kFSR &&
+		fidelityFX.GetDevBenchFsrColorContractReplacementState() ==
+			FSRColorContractPolicy::ReplacementState::Ready;
+#else
+	constexpr bool fsrColorContractReplacementReady = false;
+#endif
 	const auto canPreserveFSRResourcesForCurrentVRPlan = [&]() {
 		if (!globals::game::isVR ||
 			runtimeResolutionPlan.finalOutputSize.x <= 0.0f ||
@@ -38257,6 +38267,7 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 		fsrRuntimePathChanged ||
 		fsrRuntimeFsr4ConfiguredChanged ||
 		fsrRuntimeVersionChanged ||
+		fsrColorContractReplacementReady ||
 		qualityModeChanged ||
 		dlssPresetResourceChanged ||
 		renderScaleModeChanged ||
@@ -38326,6 +38337,7 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 			fsrRuntimePathChanged ||
 			fsrRuntimeFsr4ConfiguredChanged ||
 			(fsrRuntimeVersionChanged && !fidelityFX.IsRuntimeFsr4FailureLatched()) ||
+			fsrColorContractReplacementReady ||
 			dlssResourceSettingsChanged ||
 			fsrQualityModeChanged;
 		if (requiresFullPipelineUnbind)
@@ -38563,7 +38575,28 @@ bool Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 		// Host FSR 3.1.5 and runtime upscaler providers keep separate temporal state.
 		// Ordinary path changes rebuild; provider quarantine may retain a compatible
 		// host context and reset its history while the runtime path falls back.
-		if (!upscaleModeChanged && fsrRuntimePathChanged && a_upscalemethod == UpscaleMethod::kFSR && !fsrResourcesRecreatedForQuality) {
+		if (!upscaleModeChanged && fsrColorContractReplacementReady && !fsrResourcesRecreatedForQuality) {
+			const uint32_t destroyGeneration =
+				GetVRVendorEvaluationContractGeneration(UpscaleMethod::kFSR);
+			const auto destroyResult = fidelityFX.DestroyFSRResources();
+			if (!acceptFSRResourceLifecycleResult(
+					destroyResult,
+					destroyGeneration,
+					"colour-contract FSR resource teardown")) {
+				return false;
+			}
+			const uint32_t createGeneration =
+				GetVRVendorEvaluationContractGeneration(UpscaleMethod::kFSR);
+			const auto createResult = createFSRResourcesWhenSafe();
+			if (!acceptFSRResourceLifecycleResult(
+					createResult,
+					createGeneration,
+					"colour-contract FSR resource creation")) {
+				return false;
+			}
+			fsrResourcesRecreatedForQuality = true;
+			RequestHistoryReset();
+		} else if (!upscaleModeChanged && fsrRuntimePathChanged && a_upscalemethod == UpscaleMethod::kFSR && !fsrResourcesRecreatedForQuality) {
 			if (!runtimeFailureFallbackCanPreserveHostFSR) {
 				const uint32_t destroyGeneration =
 					GetVRVendorEvaluationContractGeneration(UpscaleMethod::kFSR);
@@ -38767,10 +38800,24 @@ bool Upscaling::EnsureResourcesCurrent(UpscaleMethod a_upscalemethod)
 
 	const uint32_t currentFrame = GetFrameScopedUpscalingWorkFrame();
 	const uint64_t currentGateState = GetVRVendorEffectiveWorkGateState();
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	const auto fsrColorContractReplacementState =
+		a_upscalemethod == UpscaleMethod::kFSR ?
+			fidelityFX.GetDevBenchFsrColorContractReplacementState() :
+			FSRColorContractPolicy::ReplacementState::None;
+	const bool pendingFsrColorContractReplacement =
+		fsrColorContractReplacementState != FSRColorContractPolicy::ReplacementState::None;
+	const bool fsrColorContractReplacementReady =
+		fsrColorContractReplacementState == FSRColorContractPolicy::ReplacementState::Ready;
+#else
+	constexpr bool pendingFsrColorContractReplacement = false;
+	constexpr bool fsrColorContractReplacementReady = false;
+#endif
 	if (currentFrame != std::numeric_limits<uint32_t>::max() &&
 		resourceCheckLastCompletedFrame == currentFrame &&
 		resourceCheckLastCompletedMethod == a_upscalemethod &&
-		resourceCheckLastCompletedGateState == currentGateState) {
+		resourceCheckLastCompletedGateState == currentGateState &&
+		(!pendingFsrColorContractReplacement || !fsrColorContractReplacementReady)) {
 		return true;
 	}
 
@@ -38794,6 +38841,7 @@ bool Upscaling::EnsureResourcesCurrent(UpscaleMethod a_upscalemethod)
 		!pendingDLSSResetBlocksStableCheck &&
 		!pendingFSRResetBlocksStableCheck &&
 		!fsrResourcesNeedRetirement &&
+		!pendingFsrColorContractReplacement &&
 		!pendingPerfModeRenderTargetRecreate.load(std::memory_order_acquire) &&
 		!perfModeRenderTargetRecreateInProgress.load(std::memory_order_acquire) &&
 		!vrRenderScaleResourceTrackingSyncPending.load(std::memory_order_acquire) &&
