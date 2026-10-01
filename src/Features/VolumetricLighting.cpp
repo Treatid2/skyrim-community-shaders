@@ -765,7 +765,7 @@ VolumetricLighting::VolumetricLightingDescriptor* VolumetricLighting::ApplyVolum
 	const bool needsColorTuning =
 		hasActiveProfile &&
 		(!VolumetricLightingTuning::IsNear(profile.Saturation, 1.0f) ||
-		 !VolumetricLightingTuning::IsNear(profile.CustomColorContribution, 0.0f));
+			!VolumetricLightingTuning::IsNear(profile.CustomColorContribution, 0.0f));
 	if (VolumetricLightingTuning::IsNear(intensityScale, 1.0f) && !needsColorTuning)
 		return descriptor;
 
