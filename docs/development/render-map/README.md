@@ -60,3 +60,23 @@ optional external control surface over this runtime. Shader dependency
 analysis, generated shader manifests, engine maps, Ghidra helpers, prior-art
 catalogues, and captured-analysis reports remain development tools; they do
 not enter the Community Shaders binary in either build mode.
+
+## Optional DevBench bounds contract
+
+`communityshaders.render_map` publishes registry, status, start, stop and
+completed-event paging through the shared versioned service envelope. Contract
+1.19/schema revision 20 retains field-specific `invalid_bounds` errors with
+the original value and independent minimum/maximum. Supplied bounds must be
+unsigned JSON integers and are checked before narrowing or duration conversion.
+
+The registry byte minimum describes its default catalogue profile. Each start
+request recomputes `minimumMaxBytes` using the requested catalogue sizes and
+one complete event slot. A smaller budget returns field-specific details
+containing `maxBytes`, `fixedCatalogueBytes`, `eventStorageUnitBytes` and
+`minimumMaxBytes` before capture starts. The default collector test shares the
+adapter's exact default configuration; the exact one-event minimum is admitted.
+
+Implemented command-recording and command-list event kinds are selectable for
+bounded qualification captures. The registry continues to advertise
+`deferredContexts: false` and `commandLists: false` until the documented live
+deferred-vtable gate passes; selection alone does not establish hook coverage.
