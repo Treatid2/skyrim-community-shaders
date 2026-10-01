@@ -1,3 +1,4 @@
+#include "Api/ColourPipelineProbeDevBenchBridge.h"
 #include "Api/EditorDevBenchBridge.h"
 #include "Api/EditorService.h"
 #include "Api/FeatureDevBenchBridge.h"
@@ -170,6 +171,7 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 			CSX::Api::ProfilerApiDevBenchBridge::Install();
 			ScreenshotDevBenchBridge::Install();
 			CSX::Api::UpscalingDevBenchBridge::Install();
+			CSX::Api::ColourPipelineProbeDevBenchBridge::Install();
 			CSX::Api::WeatherDevBenchBridge::Install();
 			CSX::Api::EditorDevBenchBridge::Install();
 			CSX::Api::FeatureDevBenchBridge::Install();
@@ -185,6 +187,7 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 				// CSX's listener ran first, this is the first deterministic retry after
 				// all PostLoad listeners have completed.
 				CSX::Api::UpscalingDevBenchBridge::Install();
+				CSX::Api::ColourPipelineProbeDevBenchBridge::Install();
 				CSX::Api::WeatherDevBenchBridge::Install();
 				CSX::Api::EditorDevBenchBridge::Install();
 				CSX::Api::FeatureDevBenchBridge::Install();
@@ -290,6 +293,7 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 				ScreenshotDevBenchBridge::Install();
 				CSX::Api::ProfilerApiDevBenchBridge::Install();
 				CSX::Api::UpscalingDevBenchBridge::Install();
+				CSX::Api::ColourPipelineProbeDevBenchBridge::Install();
 				CSX::Api::WeatherDevBenchBridge::Install();
 				CSX::Api::ShaderDevBenchBridge::Install();
 				globals::state->startupMenuInitializationComplete.store(true, std::memory_order_release);

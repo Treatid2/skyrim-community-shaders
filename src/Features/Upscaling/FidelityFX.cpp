@@ -3,6 +3,9 @@
 #include "FSRRuntimeLifecyclePolicy.h"
 #include "VRSubmitColorContract.h"
 #include "VRSubmitTemporalSnapshot.h"
+#ifdef DEVBENCH_BRIDGE_ENABLED
+#	include "ColourPipelineProbe.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -4631,6 +4634,34 @@ FidelityFX::UpscaleResult FidelityFX::Upscale(ID3D11Resource* a_upscalingTexture
 			};
 		}
 
+#ifdef DEVBENCH_BRIDGE_ENABLED
+		if (CSX::Diagnostics::ColourPipelineProbe::WantsVendorCapture()) {
+			const auto status = GetDevBenchFsrColorContractStatusSnapshot();
+			const auto& contract = status.contract;
+			const CSX::Diagnostics::ColourPipelineProbe::DispatchMetadata metadata{
+				.colourContractRevision = contract.revision,
+				.frame = state->frameCount,
+				.contextGeneration = contract.runtimeContextGeneration,
+				.renderWidth = eyeRenderWidth,
+				.renderHeight = eyeRenderHeight,
+				.displayWidth = eyeDisplayWidth,
+				.displayHeight = eyeDisplayHeight,
+				.requestedHighDynamicRangeInput = contract.highDynamicRangeInput,
+				.requestedAutoExposure = contract.autoExposure,
+				.effectiveHighDynamicRangeInput = contract.runtimeContextHighDynamicRangeInput,
+				.effectiveAutoExposure = contract.runtimeContextAutoExposure,
+				.path = GetRuntimeUpscalerLastFramePathLabel(),
+			};
+			for (std::uint32_t eye = 0; eye < stereoRegions.size(); ++eye) {
+				const auto* input = upscaling.vrIntermediateColorIn[eye].get();
+				CSX::Diagnostics::ColourPipelineProbe::CaptureVendorStage(
+					CSX::Diagnostics::ColourPipelineProbe::Stage::FsrInput, eye,
+					input->resource.get(), input->srv.get(), input->rtv.get(), input->uav.get(),
+					eyeRenderWidth, eyeRenderHeight, metadata, "FidelityFX::Upscale",
+					"before stereo FSR evaluation");
+			}
+		}
+#endif
 		const auto stereoResult = UpscaleStereoRegions(stereoRegions);
 		if (stereoResult == StereoUpscaleResult::Ready) {
 			usedRuntimeUpscaler = { true, true };
@@ -4682,7 +4713,55 @@ FidelityFX::UpscaleResult FidelityFX::Upscale(ID3D11Resource* a_upscalingTexture
 		}
 
 		if (allEvaluated) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
+			if (CSX::Diagnostics::ColourPipelineProbe::WantsVendorCapture()) {
+				const auto status = GetDevBenchFsrColorContractStatusSnapshot();
+				const auto& contract = status.contract;
+				const auto& dispatch = status.dispatch;
+				if (dispatch.valid && dispatch.frame == state->frameCount) {
+					const CSX::Diagnostics::ColourPipelineProbe::DispatchMetadata metadata{
+						.colourContractRevision = contract.revision,
+						.frame = dispatch.frame,
+						.dispatchSerial = dispatch.serial,
+						.contextGeneration = dispatch.contextGeneration,
+						.renderWidth = eyeRenderWidth,
+						.renderHeight = eyeRenderHeight,
+						.displayWidth = eyeDisplayWidth,
+						.displayHeight = eyeDisplayHeight,
+						.requestedHighDynamicRangeInput = contract.highDynamicRangeInput,
+						.requestedAutoExposure = contract.autoExposure,
+						.effectiveHighDynamicRangeInput = dispatch.highDynamicRangeInput,
+						.effectiveAutoExposure = dispatch.autoExposure,
+						.exposureResourceBound = dispatch.exposureResourceBound,
+						.preExposure = dispatch.preExposure,
+						.path = GetRuntimeUpscalerLastFramePathLabel(),
+					};
+					for (std::uint32_t eye = 0; eye < stereoRegions.size(); ++eye) {
+						const auto* output = upscaling.vrIntermediateColorOut[eye].get();
+						CSX::Diagnostics::ColourPipelineProbe::CaptureVendorStage(
+							CSX::Diagnostics::ColourPipelineProbe::Stage::FsrOutput, eye,
+							output->resource.get(), output->srv.get(), output->rtv.get(), output->uav.get(),
+							eyeDisplayWidth, eyeDisplayHeight, metadata, "FidelityFX::Upscale",
+							"after successful stereo FSR evaluation");
+					}
+				}
+			}
+#endif
 			upscaling.FinalizePerEyeOutputs(a_upscalingTexture);
+#ifdef DEVBENCH_BRIDGE_ENABLED
+			if (CSX::Diagnostics::ColourPipelineProbe::WantsVendorCapture()) {
+				winrt::com_ptr<ID3D11Texture2D> combined;
+				if (a_upscalingTexture && SUCCEEDED(a_upscalingTexture->QueryInterface(IID_PPV_ARGS(combined.put())))) {
+					const auto* renderer = globals::game::renderer;
+					const bool matchesMain = renderer && combined.get() == REX::W32::AsReal(
+																			   renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN].texture);
+					CSX::Diagnostics::ColourPipelineProbe::CaptureImageSpaceStage(
+						CSX::Diagnostics::ColourPipelineProbe::Stage::CombinedMain,
+						combined.get(), nullptr, nullptr, nullptr, static_cast<std::uint32_t>(RE::RENDER_TARGET::kMAIN),
+						matchesMain, "FidelityFX::Upscale", "after FSR output finalization");
+				}
+			}
+#endif
 		} else {
 			upscaling.RequestHistoryReset();
 			bool failOpenPresented = true;

@@ -35,6 +35,9 @@
 #include "Upscaling/VRRenderScaleDevBenchBridge.h"
 #include "Upscaling/VRRenderScaleModePolicy.h"
 #include "Upscaling/VRVendorRelatchPolicy.h"
+#ifdef DEVBENCH_BRIDGE_ENABLED
+#	include "Upscaling/ColourPipelineProbe.h"
+#endif
 #include "Utils/D3D.h"
 #include "Utils/FileSystem.h"
 #include "Utils/Game.h"
@@ -42152,6 +42155,12 @@ void Upscaling::FinalizePerEyeOutputs(ID3D11Resource* colorDst)
 		const auto& outputEyeRegion = outputStereoLayout.eyes[i];
 		D3D11_BOX outBox = { 0, 0, 0, outputEyeRegion.width, outputEyeRegion.height, 1 };
 		context->CopySubresourceRegion(colorDst, 0, outputEyeRegion.minX, 0, 0, vrIntermediateColorOut[i]->resource.get(), 0, &outBox);
+#ifdef DEVBENCH_BRIDGE_ENABLED
+		CSX::Diagnostics::ColourPipelineProbe::RecordFsrOutputCopyBack(
+			colorDst, vrIntermediateColorOut[i]->resource.get(), i,
+			outputEyeRegion.minX, outputEyeRegion.width, outputEyeRegion.height,
+			"Upscaling::FinalizePerEyeOutputs", "after queuing the per-eye copy");
+#endif
 	}
 }
 
@@ -58754,12 +58763,39 @@ void Upscaling::MenuManagerDrawInterfaceStartHook::thunk(int64_t a1)
 void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32_t a3, RE::RENDER_TARGET a_target, void* a_4, bool a_5)
 {
 	auto& upscaling = globals::features::upscaling;
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	CSX::Diagnostics::ColourPipelineProbe::ServiceReadbacks(
+		globals::d3d::context, globals::state ? globals::state->frameCount : 0);
+	const auto captureStage = [&](CSX::Diagnostics::ColourPipelineProbe::Stage a_stage) {
+		if (!CSX::Diagnostics::ColourPipelineProbe::WantsVendorCapture() ||
+			a_target != RE::RENDER_TARGET::kMAIN || upscaling.GetRuntimeUpscaleMethod() != UpscaleMethod::kFSR)
+			return;
+		auto* renderer = globals::game::renderer;
+		if (!renderer)
+			return;
+		const auto& target = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN];
+		CSX::Diagnostics::ColourPipelineProbe::CaptureImageSpaceStage(a_stage,
+			REX::W32::AsReal(target.texture), REX::W32::AsReal(target.SRV),
+			REX::W32::AsReal(target.RTV), REX::W32::AsReal(target.UAV),
+			static_cast<std::uint32_t>(a_target), true,
+			"Upscaling::Main_PostProcessing::thunk", "at the original ImageSpace call boundary");
+	};
+#endif
+	const auto runOriginal = [&] {
+#ifdef DEVBENCH_BRIDGE_ENABLED
+		captureStage(CSX::Diagnostics::ColourPipelineProbe::Stage::ImageSpaceInput);
+#endif
+		func(a_this, a3, a_target, a_4, a_5);
+#ifdef DEVBENCH_BRIDGE_ENABLED
+		captureStage(CSX::Diagnostics::ColourPipelineProbe::Stage::ImageSpaceOutput);
+#endif
+	};
 	if (globals::game::isVR)
 		upscaling.ReleaseVRGameEntryVendorWorkGatesIfConverged();
 	auto upscaleMethod = upscaling.GetRuntimeUpscaleMethod();
 
 	if (!upscaling.ApplyPendingPostLoadRuntimeReset(upscaleMethod)) {
-		func(a_this, a3, a_target, a_4, a_5);
+		runOriginal();
 		return;
 	}
 
@@ -58796,7 +58832,7 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 		// validation before their native physical contract can become stable.
 		if (upscaling.GetVRNativeRestorePresentationGuardActiveEpoch() != 0 &&
 			!globals::features::vr.InstallSubmitHook()) {
-			func(a_this, a3, a_target, a_4, a_5);
+			runOriginal();
 			return;
 		}
 
@@ -58814,7 +58850,7 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 			// A fixed DLAA/FSR-AA frame without a ready provider must retain
 			// Skyrim's temporal fallback. Disabling it here exposes the raw frame
 			// that users report as persistent shimmer/flicker during gated loads.
-			func(a_this, a3, a_target, a_4, a_5);
+			runOriginal();
 			return;
 		}
 
@@ -58825,7 +58861,7 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 		GET_INSTANCE_MEMBER(BSImagespaceShaderISTemporalAA, imageSpaceManager);
 
 		BSImagespaceShaderISTemporalAA->taaEnabled = false;
-		func(a_this, a3, a_target, a_4, a_5);
+		runOriginal();
 		BSImagespaceShaderISTemporalAA->taaEnabled = false;
 		return;
 	}
@@ -58847,7 +58883,7 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 
 		upscaling.PrepareFullResolutionPostProcessing();
 		BSImagespaceShaderISTemporalAA->taaEnabled = false;
-		func(a_this, a3, a_target, a_4, a_5);
+		runOriginal();
 		BSImagespaceShaderISTemporalAA->taaEnabled = false;
 		upscaling.PrepareFullResolutionPostProcessing();
 		return;
@@ -58883,7 +58919,7 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 		}
 
 		BSImagespaceShaderISTemporalAA->taaEnabled = false;
-		func(a_this, a3, a_target, a_4, a_5);
+		runOriginal();
 		BSImagespaceShaderISTemporalAA->taaEnabled = false;
 
 		upscaling.ApplyDynamicResolutionState(globals::game::graphicsState);
@@ -58907,7 +58943,7 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 			auto imageSpaceManager = RE::ImageSpaceManager::GetSingleton();
 			GET_INSTANCE_MEMBER(BSImagespaceShaderISTemporalAA, imageSpaceManager);
 			BSImagespaceShaderISTemporalAA->taaEnabled = true;
-			func(a_this, a3, a_target, a_4, a_5);
+			runOriginal();
 			BSImagespaceShaderISTemporalAA->taaEnabled = false;
 			return;
 		}
@@ -58923,7 +58959,7 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 
 	if (upscaleMethod == UpscaleMethod::kNONE) {
 		// Keep vanilla TAA/water stabilization state untouched when no upscaler is active.
-		func(a_this, a3, a_target, a_4, a_5);
+		runOriginal();
 		return;
 	}
 
@@ -58932,7 +58968,7 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 		upscaling.PrepareFullResolutionPostProcessing();
 
 	BSImagespaceShaderISTemporalAA->taaEnabled = upscaleMethod == UpscaleMethod::kTAA;
-	func(a_this, a3, a_target, a_4, a_5);
+	runOriginal();
 
 	BSImagespaceShaderISTemporalAA->taaEnabled = false;
 
