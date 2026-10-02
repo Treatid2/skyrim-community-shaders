@@ -25,6 +25,7 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 		std::uint32_t frame = 0;
 		std::uint64_t dispatchSerial = 0;
 		std::uint64_t contextGeneration = 0;
+		std::uint32_t contextIndex = 0;
 		std::uint32_t renderWidth = 0;
 		std::uint32_t renderHeight = 0;
 		std::uint32_t displayWidth = 0;
@@ -35,6 +36,10 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 		bool effectiveAutoExposure = false;
 		bool exposureResourceBound = false;
 		float preExposure = 1.0f;
+		float configuredSharpness = 0.0f;
+		float effectiveSharpness = 0.0f;
+		bool sharpeningEnabled = false;
+		std::uint64_t dispatchQpc = 0;
 		std::string path;
 	};
 

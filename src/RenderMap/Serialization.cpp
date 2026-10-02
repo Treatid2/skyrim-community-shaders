@@ -1068,6 +1068,20 @@ namespace CSX::RenderMap
 				}
 			case PayloadSchema::kResourceViewStateObserved:
 				return json::array();
+			case PayloadSchema::kPostProcessingBoundary:
+				{
+					json refs = json::array();
+					for (const auto [word, roleName] : std::array{
+							 std::pair{ std::size_t{ 1 }, "main-resource-candidate" }, std::pair{ std::size_t{ 2 }, "destination-before" } })
+						if (a_event.payload.words[word])
+							refs.push_back({ { "id", ResourceObservationId(a_event.payload.words[word], a_event.sessionGeneration) },
+								{ "kind", "resource" }, { "role", roleName }, { "pointerEvidence", nullptr } });
+					return refs;
+				}
+			case PayloadSchema::kTransferResourceAccess:
+			case PayloadSchema::kEyePublication:
+				return json::array({ { { "id", ResourceObservationId(a_event.payload.words[0], a_event.sessionGeneration) },
+					{ "kind", "resource" }, { "role", "observed-transfer-resource" }, { "pointerEvidence", nullptr } } });
 			case PayloadSchema::kResourceFlow:
 				{
 					json refs = json::array();
@@ -1185,6 +1199,106 @@ namespace CSX::RenderMap
 			std::uint64_t a_preparedGeometrySetupObservationId)
 		{
 			switch (static_cast<PayloadSchema>(a_payload.schema)) {
+			case PayloadSchema::kPostProcessingBoundary:
+				return {
+					{ "schema", "post-processing-boundary-v1" },
+					{ "symbol", "Upscaling::Main_PostProcessing::original" },
+					{ "boundaryObservationId", a_payload.words[0] },
+					{ "mainResourceCandidateObservationId", ResourceObservationId(a_payload.words[1], a_generation) },
+					{ "destinationBeforeResourceObservationId", ResourceObservationId(a_payload.words[2], a_generation) },
+					{ "engineTarget", a_payload.words[3] },
+					{ "renderTargetPublicationGeneration", a_payload.words[4] ? json(a_payload.words[4]) : json(nullptr) },
+					{ "actualSourceEstablishedByBoundary", false },
+				};
+			case PayloadSchema::kTransferOperation:
+				return {
+					{ "schema", "post-processing-operation-v1" },
+					{ "operationObservationId", a_payload.words[0] },
+					{ "family", (a_payload.words[1] & 0xFFFFFFFFu) >= 0x100u ? "resource-flow" : (a_payload.words[1] >> 32u) ? "dispatch" :
+																															   "draw" },
+					{ "operationValue", a_payload.words[1] & 0xFFFFFFFFu },
+					{ "nativeShaderBindings", {
+												  { "vertex", PointerEvidence(a_payload.words[2]) },
+												  { "hull", PointerEvidence(a_payload.words[3]) },
+												  { "domain", PointerEvidence(a_payload.words[4]) },
+												  { "geometry", PointerEvidence(a_payload.words[5]) },
+												  { "pixel", PointerEvidence(a_payload.words[6]) },
+												  { "compute", PointerEvidence(a_payload.words[7]) },
+											  } },
+					{ "nativeLifetimeJoinVerified", false },
+				};
+			case PayloadSchema::kRasterState:
+				return {
+					{ "schema", "raster-state-observation-v1" },
+					{ "operationObservationId", a_payload.words[7] >> 1u },
+					{ "slot", a_payload.words[0] },
+					{ "viewportCount", static_cast<std::uint32_t>(a_payload.words[6]) },
+					{ "scissorCount", a_payload.words[6] >> 32u },
+					{ "viewport", a_payload.words[0] < static_cast<std::uint32_t>(a_payload.words[6]) ? json({
+																											{ "x", UnpackFloat(a_payload.words[1], false) },
+																											{ "y", UnpackFloat(a_payload.words[1], true) },
+																											{ "width", UnpackFloat(a_payload.words[2], false) },
+																											{ "height", UnpackFloat(a_payload.words[2], true) },
+																											{ "minDepth", UnpackFloat(a_payload.words[3], false) },
+																											{ "maxDepth", UnpackFloat(a_payload.words[3], true) },
+																										}) :
+																										json(nullptr) },
+					{ "scissorEnabled", (a_payload.words[7] & 1u) != 0 },
+					{ "scissor", a_payload.words[0] < (a_payload.words[6] >> 32u) ? json({
+																						{ "left", static_cast<std::int32_t>(a_payload.words[4]) },
+																						{ "top", static_cast<std::int32_t>(a_payload.words[4] >> 32u) },
+																						{ "right", static_cast<std::int32_t>(a_payload.words[5]) },
+																						{ "bottom", static_cast<std::int32_t>(a_payload.words[5] >> 32u) },
+																					}) :
+																					json(nullptr) },
+				};
+			case PayloadSchema::kTransferResourceAccess:
+				return {
+					{ "schema", "post-processing-resource-access-v1" },
+					{ "resourceObservationId", ResourceObservationId(a_payload.words[0], a_generation) },
+					{ "viewObservationId", TargetViewObservationId(static_cast<TargetViewKind>((a_payload.words[6] >> 8u) & 0xFFu), a_payload.words[1], a_generation) },
+					{ "commandVersionObservationId", a_payload.words[2] ? json(a_payload.words[2]) : json(nullptr) },
+					{ "commandEpoch", a_payload.words[3] ? json(a_payload.words[3]) : json(nullptr) },
+					{ "resourceStage", ResourceStageName(static_cast<ResourceStage>(a_payload.words[4])) },
+					{ "slotOrSubresource", a_payload.words[5] },
+					{ "role", (a_payload.words[6] & 1u) ? "observed-write-candidate" : "observed-read-candidate" },
+					{ "versionCatalogueAdmissionAvailable", (a_payload.words[6] & 2u) != 0 },
+					{ "versionUnavailableReason", a_payload.words[2] ? json(nullptr) : json((a_payload.words[6] & 2u) ? "no-retained-same-frame-command-or-uncovered-execution" : "capacity-frame-or-event-admission-unavailable") },
+					{ "operationObservationId", a_payload.words[7] },
+					{ "pixelReadOrWriteEstablished", false },
+					{ "nativeLifetimeJoinVerified", false },
+				};
+			case PayloadSchema::kEyePublication:
+				return {
+					{ "schema", "accepted-eye-publication-v1" },
+					{ "resourceObservationId", ResourceObservationId(a_payload.words[0], a_generation) },
+					{ "commandVersionObservationId", a_payload.words[1] ? json(a_payload.words[1]) : json(nullptr) },
+					{ "commandEpoch", a_payload.words[2] ? json(a_payload.words[2]) : json(nullptr) },
+					{ "renderTargetPublicationGeneration", a_payload.words[3] ? json(a_payload.words[3]) : json(nullptr) },
+					{ "compositorCycle", a_payload.words[4] },
+					{ "eye", EyeName(static_cast<Eye>(a_payload.words[5])) },
+					{ "eyeMask", a_payload.words[6] },
+					{ "acceptedWithCurrentPublicationLease", a_payload.words[3] != 0 },
+					{ "causalPixelTransferEstablished", false },
+				};
+			case PayloadSchema::kTransferCopyRegion:
+				return {
+					{ "schema", "post-processing-copy-region-v1" },
+					{ "operationObservationId", a_payload.words[0] },
+					{ "sourceSubresource", static_cast<std::uint32_t>(a_payload.words[1]) },
+					{ "destinationSubresource", a_payload.words[1] >> 32u },
+					{ "destinationOrigin", { static_cast<std::uint32_t>(a_payload.words[2]), a_payload.words[2] >> 32u, a_payload.words[3] } },
+					{ "sourceBox", a_payload.words[7] ? json({
+															{ "left", static_cast<std::uint32_t>(a_payload.words[4]) },
+															{ "top", a_payload.words[4] >> 32u },
+															{ "front", static_cast<std::uint32_t>(a_payload.words[5]) },
+															{ "right", a_payload.words[5] >> 32u },
+															{ "bottom", static_cast<std::uint32_t>(a_payload.words[6]) },
+															{ "back", a_payload.words[6] >> 32u },
+														}) :
+														json(nullptr) },
+					{ "nullBoxMeansEntireSourceSubresource", a_payload.words[7] == 0 },
+				};
 			case PayloadSchema::kRenderPassBoundary:
 				return {
 					{ "schema", "render-pass-boundary-v1" },
@@ -1715,6 +1829,10 @@ namespace CSX::RenderMap
 	nlohmann::json SerializeCaptureSummary(const CompletedCapture& a_capture)
 	{
 		const auto& snapshot = a_capture.snapshot;
+		const auto transferCapacityFailures = std::count_if(snapshot.events.begin(), snapshot.events.end(), [](const EventRecord& event) {
+			return event.payload.schema == static_cast<std::uint16_t>(PayloadSchema::kTransferResourceAccess) &&
+			       (event.payload.words[6] & 2u) == 0;
+		});
 		const auto dropped = snapshot.statistics.droppedStopped +
 		                     snapshot.statistics.droppedEventLimit + snapshot.statistics.droppedByteLimit;
 		const auto structurallyTruncated = snapshot.statistics.droppedShaderObservations != 0 ||
@@ -1724,7 +1842,7 @@ namespace CSX::RenderMap
 		                                   snapshot.statistics.droppedTargetBindingObservations != 0 ||
 		                                   snapshot.statistics.droppedSceneObjectObservations != 0 ||
 		                                   snapshot.statistics.droppedGeometryObservations != 0 ||
-		                                   snapshot.statistics.droppedMaterialStateObservations != 0;
+		                                   snapshot.statistics.droppedMaterialStateObservations != 0 || transferCapacityFailures != 0;
 		return {
 			{ "captureId", a_capture.descriptor.captureId },
 			{ "numericId", a_capture.descriptor.numericId },
@@ -1746,6 +1864,8 @@ namespace CSX::RenderMap
 								{ "stopRaceRejectionCount", snapshot.statistics.droppedStopped },
 								{ "scopeOverflowCount", snapshot.statistics.scopeOverflow },
 								{ "scopeMismatchCount", snapshot.statistics.scopeMismatch },
+								{ "maximumTransferVersionResources", TransferVersions::kCapacity },
+								{ "observedTransferVersionAdmissionFailures", transferCapacityFailures },
 								{ "shaderObservationCount", snapshot.shaderObservations.size() },
 								{ "droppedShaderObservationCount", snapshot.statistics.droppedShaderObservations },
 								{ "stageShaderObservationCount", snapshot.stageShaderObservations.size() },

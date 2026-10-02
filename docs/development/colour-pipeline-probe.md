@@ -53,9 +53,15 @@ Numeric samples represent storage values without gamma conversion. Typeless
 textures require compatible typed view evidence; ambiguous/unsupported
 numeric interpretation yields null decoded values while retaining raw bytes.
 CPU frame and immediate-context order correlate the seams. Scene/submission
-epochs remain unknown. The successful dispatch snapshot describes the latest
-observed dispatch after stereo evaluation; individual eye dispatch identity
-and headset submission lineage are not established by this capture.
+epochs remain unknown. Schema 3 retains each eye's successful dispatch
+serial, selected host/runtime/fallback path, context generation, configured
+and effective sharpness, sharpening enablement and dispatch QPC. Input bytes
+are sampled before path selection; their effective metadata stays null until
+the same frame, revision and eye dispatch succeeds. Finalization preserves
+the original sample timestamp. The ImageSpace input is destination-before
+evidence, not an established shader source. Headset pixel lineage remains
+unverified; the separate Render Map records accepted eye publication and
+nullable observed command epochs.
 
 Requests are limited to 64 KiB and responses to 128 KiB; reads return one
 stage/eye page. Native policy tests cover rectangle overflow, dimensions,

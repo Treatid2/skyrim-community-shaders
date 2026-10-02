@@ -35,6 +35,15 @@ std::vector<std::pair<std::string, std::string>> FidelityFX::dllVersions = {};
 
 namespace
 {
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	uint64_t DispatchQpc() noexcept
+	{
+		LARGE_INTEGER value{};
+		return QueryPerformanceCounter(&value) && value.QuadPart > 0 ?
+		           static_cast<uint64_t>(value.QuadPart) :
+		           0;
+	}
+#endif
 	constexpr wchar_t kFrameGenerationDllName[] = L"amd_fidelityfx_framegeneration_dx12.dll";
 	constexpr wchar_t kLoaderDllName[] = L"amd_fidelityfx_loader_dx12.dll";
 	constexpr uint32_t kAmdVendorId = 0x1002u;
@@ -1167,7 +1176,12 @@ const std::string& FidelityFX::GetRuntimeUpscalerLastFramePathLabel() const
 	if (!runtimeUpscalerLastFramePathValid)
 		return PendingFsrDispatchLabel();
 
-	switch (runtimeUpscalerLastFramePath) {
+	return GetRuntimeUpscalerFramePathLabel(runtimeUpscalerLastFramePath);
+}
+
+const std::string& FidelityFX::GetRuntimeUpscalerFramePathLabel(RuntimeUpscalerFramePath a_path) const
+{
+	switch (a_path) {
 	case RuntimeUpscalerFramePath::kHostFsr31:
 		return GetHostFsrSdkLabel();
 	case RuntimeUpscalerFramePath::kRuntimeFsr31:
@@ -1264,6 +1278,7 @@ FidelityFX::FsrColorContractStatusSnapshot FidelityFX::GetDevBenchFsrColorContra
 			devBenchRuntimeContextGeneration.load(std::memory_order_acquire),
 		},
 		devBenchSuccessfulDispatch,
+		devBenchSuccessfulEyeDispatches,
 	};
 }
 
@@ -1278,7 +1293,10 @@ FidelityFX::FsrColorContractSetResult FidelityFX::SetDevBenchFsrColorContract(
 		a_expectedRevision,
 		a_highDynamicRangeInput,
 		a_autoExposure,
-		[this]() { devBenchSuccessfulDispatch = {}; },
+		[this]() {
+			devBenchSuccessfulDispatch = {};
+			devBenchSuccessfulEyeDispatches = {};
+		},
 		[this]() { return GetDevBenchFsrColorContractStatusSnapshotLocked(); });
 }
 
@@ -1324,6 +1342,7 @@ void FidelityFX::ClearDevBenchFsrColorContext(bool a_runtime) noexcept
 	context.store(0, std::memory_order_release);
 	lastDispatchFrame.store(0, std::memory_order_release);
 	devBenchSuccessfulDispatch = {};
+	devBenchSuccessfulEyeDispatches = {};
 }
 
 FidelityFX::RuntimeUpscalerDispatchSnapshot FidelityFX::GetRuntimeUpscalerDispatchSnapshotForRenderThread() const
@@ -1350,6 +1369,7 @@ void FidelityFX::ResetRuntimeUpscalerTracking(bool a_invalidateProviderCache)
 	{
 		const std::lock_guard lock(devBenchFsrColorContractMutex);
 		devBenchSuccessfulDispatch = {};
+		devBenchSuccessfulEyeDispatches = {};
 	}
 #endif
 	if (!a_invalidateProviderCache)
@@ -1431,7 +1451,9 @@ void FidelityFX::RecordDevBenchSuccessfulDispatch(
 	uint32_t a_renderWidth,
 	uint32_t a_renderHeight,
 	uint32_t a_displayWidth,
-	uint32_t a_displayHeight)
+	uint32_t a_displayHeight,
+	float a_configuredSharpness, float a_effectiveSharpness,
+	bool a_sharpeningEnabled, uint64_t a_dispatchQpc)
 {
 	const std::lock_guard lock(devBenchFsrColorContractMutex);
 	const bool runtimePath = a_path == RuntimeUpscalerFramePath::kRuntimeFsr31 ||
@@ -1447,6 +1469,7 @@ void FidelityFX::RecordDevBenchSuccessfulDispatch(
 			contextState,
 			GetDevBenchFsrColorContractState())) {
 		devBenchSuccessfulDispatch = {};
+		devBenchSuccessfulEyeDispatches = {};
 		return;
 	}
 	uint64_t serial = ++devBenchSuccessfulDispatchSerial;
@@ -1468,7 +1491,13 @@ void FidelityFX::RecordDevBenchSuccessfulDispatch(
 		(contextState & FSRColorContractPolicy::kAutoExposureBit) != 0,
 		false,
 		1.0f,
+		a_configuredSharpness,
+		a_effectiveSharpness,
+		a_sharpeningEnabled,
+		a_dispatchQpc,
 	};
+	if (a_contextIndex < devBenchSuccessfulEyeDispatches.size())
+		devBenchSuccessfulEyeDispatches[a_contextIndex] = devBenchSuccessfulDispatch;
 }
 #endif
 
@@ -3787,21 +3816,10 @@ FidelityFX::LifecycleResult FidelityFX::ExecuteRuntimeUpscalerBatch(
 				return contextResult;
 		}
 
-		const auto dispatchResult = DispatchRuntimeUpscalerBatch(a_regions);
-		if (dispatchResult == LifecycleResult::Ready) {
-			const auto dispatchPath = GetRuntimeUpscalerProviderFramePath(a_plan.requestedVersion);
+		const auto dispatchPath = GetRuntimeUpscalerProviderFramePath(a_plan.requestedVersion);
+		const auto dispatchResult = DispatchRuntimeUpscalerBatch(a_regions, dispatchPath);
+		if (dispatchResult == LifecycleResult::Ready)
 			RecordRuntimeUpscalerFramePath(dispatchPath);
-#ifdef DEVBENCH_BRIDGE_ENABLED
-			const auto& evidenceRegion = a_regions.front();
-			RecordDevBenchSuccessfulDispatch(
-				dispatchPath,
-				evidenceRegion.contextIndex,
-				evidenceRegion.renderWidth,
-				evidenceRegion.renderHeight,
-				evidenceRegion.displayWidth,
-				evidenceRegion.displayHeight);
-#endif
-		}
 		return dispatchResult;
 	} catch (const std::exception& e) {
 		logger::error(
@@ -3942,13 +3960,18 @@ bool FidelityFX::CanDispatchHostFallbackForRegions(
 	return true;
 }
 
-FidelityFX::LifecycleResult FidelityFX::DispatchRuntimeUpscalerBatch(std::span<const UpscaleRegionParameters> a_regions)
+FidelityFX::LifecycleResult FidelityFX::DispatchRuntimeUpscalerBatch(std::span<const UpscaleRegionParameters> a_regions, RuntimeUpscalerFramePath a_path)
 {
 	if (!HasSupportedSubmitColorContract())
 		return LifecycleResult::Failed;
 	if (a_regions.empty() || a_regions.size() > std::size(runtimeUpscalerContexts))
 		return LifecycleResult::Failed;
 
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	std::array<RuntimeUpscalerDispatchSnapshot, 2> observedDispatches{};
+#else
+	(void)a_path;
+#endif
 	std::array<RuntimeRegionDescriptions, 2> descriptions{};
 	std::array<bool, 2> seenContext{};
 	for (size_t regionIndex = 0; regionIndex < a_regions.size(); ++regionIndex) {
@@ -4185,6 +4208,12 @@ FidelityFX::LifecycleResult FidelityFX::DispatchRuntimeUpscalerBatch(std::span<c
 			dispatchParameters.viewSpaceToMetersFactor = 0.01428222656f;
 			dispatchParameters.flags = 0;
 
+#ifdef DEVBENCH_BRIDGE_ENABLED
+			observedDispatches[contextIndex].configuredSharpness = region.sharpness;
+			observedDispatches[contextIndex].effectiveSharpness = dispatchParameters.sharpness;
+			observedDispatches[contextIndex].sharpeningEnabled = dispatchParameters.enableSharpening;
+			observedDispatches[contextIndex].dispatchQpc = DispatchQpc();
+#endif
 			bool dispatchCrashed = false;
 			const auto dispatchResult = DispatchRuntimeUpscalerProtected(
 				&runtimeUpscalerContexts[contextIndex],
@@ -4256,8 +4285,18 @@ FidelityFX::LifecycleResult FidelityFX::DispatchRuntimeUpscalerBatch(std::span<c
 	if (!dispatchOk)
 		recoverCommandContext();
 
-	if (dispatchOk)
+	if (dispatchOk) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
+		for (const auto& region : a_regions) {
+			const auto& observed = observedDispatches[region.contextIndex];
+			RecordDevBenchSuccessfulDispatch(a_path, region.contextIndex,
+				region.renderWidth, region.renderHeight, region.displayWidth, region.displayHeight,
+				observed.configuredSharpness, observed.effectiveSharpness,
+				observed.sharpeningEnabled, observed.dispatchQpc);
+		}
+#endif
 		return LifecycleResult::Ready;
+	}
 	if (std::ranges::any_of(a_regions, [&](const auto& a_region) {
 			return runtimeUpscalerContextIndeterminate[a_region.contextIndex];
 		})) {
@@ -4443,6 +4482,9 @@ FidelityFX::UpscaleResult FidelityFX::UpscaleRegion(uint32_t a_contextIndex, ID3
 	dispatchParameters.preExposure = 1.0f;
 	dispatchParameters.flags = 0;
 
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	const auto dispatchQpc = DispatchQpc();
+#endif
 	bool hostDispatchCrashed = false;
 	const bool dispatchOK = DispatchHostFsr3UpscaleProtected(fsrContext[a_contextIndex], dispatchParameters, hostDispatchCrashed);
 #ifdef DEVBENCH_BRIDGE_ENABLED
@@ -4453,7 +4495,9 @@ FidelityFX::UpscaleResult FidelityFX::UpscaleRegion(uint32_t a_contextIndex, ID3
 			a_renderWidth,
 			a_renderHeight,
 			a_displayWidth,
-			a_displayHeight);
+			a_displayHeight,
+			a_sharpness, dispatchParameters.sharpness,
+			dispatchParameters.enableSharpening, dispatchQpc);
 #endif
 	if (!dispatchOK && !hostDispatchCrashed) {
 		logger::critical("[FidelityFX] Failed to dispatch region upscaling for eye {}!", a_contextIndex);
@@ -4641,16 +4685,13 @@ FidelityFX::UpscaleResult FidelityFX::Upscale(ID3D11Resource* a_upscalingTexture
 			const CSX::Diagnostics::ColourPipelineProbe::DispatchMetadata metadata{
 				.colourContractRevision = contract.revision,
 				.frame = state->frameCount,
-				.contextGeneration = contract.runtimeContextGeneration,
 				.renderWidth = eyeRenderWidth,
 				.renderHeight = eyeRenderHeight,
 				.displayWidth = eyeDisplayWidth,
 				.displayHeight = eyeDisplayHeight,
 				.requestedHighDynamicRangeInput = contract.highDynamicRangeInput,
 				.requestedAutoExposure = contract.autoExposure,
-				.effectiveHighDynamicRangeInput = contract.runtimeContextHighDynamicRangeInput,
-				.effectiveAutoExposure = contract.runtimeContextAutoExposure,
-				.path = GetRuntimeUpscalerLastFramePathLabel(),
+				.configuredSharpness = a_sharpness,
 			};
 			for (std::uint32_t eye = 0; eye < stereoRegions.size(); ++eye) {
 				const auto* input = upscaling.vrIntermediateColorIn[eye].get();
@@ -4717,13 +4758,16 @@ FidelityFX::UpscaleResult FidelityFX::Upscale(ID3D11Resource* a_upscalingTexture
 			if (CSX::Diagnostics::ColourPipelineProbe::WantsVendorCapture()) {
 				const auto status = GetDevBenchFsrColorContractStatusSnapshot();
 				const auto& contract = status.contract;
-				const auto& dispatch = status.dispatch;
-				if (dispatch.valid && dispatch.frame == state->frameCount) {
+				for (std::uint32_t eye = 0; eye < stereoRegions.size(); ++eye) {
+					const auto& dispatch = status.eyeDispatches[eye];
+					if (!dispatch.valid || dispatch.frame != state->frameCount)
+						continue;
 					const CSX::Diagnostics::ColourPipelineProbe::DispatchMetadata metadata{
 						.colourContractRevision = contract.revision,
 						.frame = dispatch.frame,
 						.dispatchSerial = dispatch.serial,
 						.contextGeneration = dispatch.contextGeneration,
+						.contextIndex = dispatch.contextIndex,
 						.renderWidth = eyeRenderWidth,
 						.renderHeight = eyeRenderHeight,
 						.displayWidth = eyeDisplayWidth,
@@ -4734,16 +4778,18 @@ FidelityFX::UpscaleResult FidelityFX::Upscale(ID3D11Resource* a_upscalingTexture
 						.effectiveAutoExposure = dispatch.autoExposure,
 						.exposureResourceBound = dispatch.exposureResourceBound,
 						.preExposure = dispatch.preExposure,
-						.path = GetRuntimeUpscalerLastFramePathLabel(),
+						.configuredSharpness = dispatch.configuredSharpness,
+						.effectiveSharpness = dispatch.effectiveSharpness,
+						.sharpeningEnabled = dispatch.sharpeningEnabled,
+						.dispatchQpc = dispatch.dispatchQpc,
+						.path = GetRuntimeUpscalerFramePathLabel(dispatch.path),
 					};
-					for (std::uint32_t eye = 0; eye < stereoRegions.size(); ++eye) {
-						const auto* output = upscaling.vrIntermediateColorOut[eye].get();
-						CSX::Diagnostics::ColourPipelineProbe::CaptureVendorStage(
-							CSX::Diagnostics::ColourPipelineProbe::Stage::FsrOutput, eye,
-							output->resource.get(), output->srv.get(), output->rtv.get(), output->uav.get(),
-							eyeDisplayWidth, eyeDisplayHeight, metadata, "FidelityFX::Upscale",
-							"after successful stereo FSR evaluation");
-					}
+					const auto* output = upscaling.vrIntermediateColorOut[eye].get();
+					CSX::Diagnostics::ColourPipelineProbe::CaptureVendorStage(
+						CSX::Diagnostics::ColourPipelineProbe::Stage::FsrOutput, eye,
+						output->resource.get(), output->srv.get(), output->rtv.get(), output->uav.get(),
+						eyeDisplayWidth, eyeDisplayHeight, metadata, "FidelityFX::Upscale",
+						"after successful stereo FSR evaluation");
 				}
 			}
 #endif

@@ -29,7 +29,7 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 	namespace
 	{
 		using json = nlohmann::json;
-		constexpr std::uint32_t kSchemaVersion = 2;
+		constexpr std::uint32_t kSchemaVersion = 3;
 		constexpr std::uint32_t kGridSize = 17;
 		constexpr std::uint32_t kEyeCount = 2;
 		constexpr std::uint32_t kStageCount = 5;
@@ -69,6 +69,7 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 			std::string resourceVersionObservationId;
 			std::string stagingResourceObservationId;
 			std::string sourcePointer;
+			DispatchMetadata dispatch{};
 			D3D11_TEXTURE2D_DESC sourceDesc{};
 			DXGI_FORMAT srvFormat = DXGI_FORMAT_UNKNOWN;
 			DXGI_FORMAT rtvFormat = DXGI_FORMAT_UNKNOWN;
@@ -684,18 +685,24 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 				{ "colourContractRevision", a_dispatch.colourContractRevision },
 				{ "frame", a_dispatch.frame },
 				{ "dispatchSerial", a_dispatch.dispatchSerial },
-				{ "contextGeneration", a_dispatch.contextGeneration },
-				{ "path", a_dispatch.path },
+				{ "contextGeneration", a_dispatch.dispatchSerial ? json(a_dispatch.contextGeneration) : json(nullptr) },
+				{ "contextIndex", a_dispatch.dispatchSerial ? json(a_dispatch.contextIndex) : json(nullptr) },
+				{ "path", a_dispatch.dispatchSerial ? json(a_dispatch.path) : json(nullptr) },
 				{ "renderWidth", a_dispatch.renderWidth },
 				{ "renderHeight", a_dispatch.renderHeight },
 				{ "displayWidth", a_dispatch.displayWidth },
 				{ "displayHeight", a_dispatch.displayHeight },
 				{ "requestedHighDynamicRangeInput", a_dispatch.requestedHighDynamicRangeInput },
 				{ "requestedAutoExposure", a_dispatch.requestedAutoExposure },
-				{ "effectiveHighDynamicRangeInput", a_dispatch.effectiveHighDynamicRangeInput },
-				{ "effectiveAutoExposure", a_dispatch.effectiveAutoExposure },
-				{ "exposureResourceBound", a_dispatch.exposureResourceBound },
-				{ "preExposure", a_dispatch.preExposure },
+				{ "effectiveHighDynamicRangeInput", a_dispatch.dispatchSerial ? json(a_dispatch.effectiveHighDynamicRangeInput) : json(nullptr) },
+				{ "effectiveAutoExposure", a_dispatch.dispatchSerial ? json(a_dispatch.effectiveAutoExposure) : json(nullptr) },
+				{ "exposureResourceBound", a_dispatch.dispatchSerial ? json(a_dispatch.exposureResourceBound) : json(nullptr) },
+				{ "preExposure", a_dispatch.dispatchSerial ? json(a_dispatch.preExposure) : json(nullptr) },
+				{ "configuredSharpnessAtDispatch", a_dispatch.dispatchSerial && std::isfinite(a_dispatch.configuredSharpness) ? json(a_dispatch.configuredSharpness) : json(nullptr) },
+				{ "effectiveSharpness", a_dispatch.dispatchSerial ? json(a_dispatch.effectiveSharpness) : json(nullptr) },
+				{ "sharpeningEnabled", a_dispatch.dispatchSerial ? json(a_dispatch.sharpeningEnabled) : json(nullptr) },
+				{ "dispatchQpc", a_dispatch.dispatchQpc ? json(a_dispatch.dispatchQpc) : json(nullptr) },
+				{ "attribution", a_dispatch.dispatchSerial ? "observed-successful-dispatch" : "pending-successful-dispatch" },
 			};
 		}
 
@@ -720,6 +727,8 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 				{ "viewFormats", { { "srv", Format(a_slot.srvFormat) }, { "rtv", Format(a_slot.rtvFormat) }, { "uav", Format(a_slot.uavFormat) } } },
 			});
 			result.update({
+				{ "sampleRole", a_slot.stage == Stage::ImageSpaceInput ? "destination-before" : "observed-stage-resource" },
+				{ "dispatch", Dispatch(a_slot.dispatch) },
 				{ "producerConsumer", { { "symbol", a_slot.symbol }, { "callsite", a_slot.callsite } } },
 				{ "engineTarget", a_slot.hasEngineTarget ? json({ { "value", a_slot.engineTarget }, { "matchesKMain", a_slot.matchesMainTarget } }) : json(nullptr) },
 				{ "frame", { { "cpuFrame", g_state.cpuFrame }, { "sceneEpoch", nullptr }, { "submissionEpoch", nullptr }, { "eye", a_slot.eye == 0 ? "left" : "right" }, { "eyeMask", 1u << a_slot.eye } } },
@@ -878,8 +887,17 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 			}
 			if (g_state.slots[SlotIndex(a_stage, a_eye)].queued)
 				return;
+			if (a_stage == Stage::FsrOutput) {
+				auto& input = g_state.slots[SlotIndex(Stage::FsrInput, a_eye)];
+				if (!input.queued || !Policy::BindInputDispatch(input.dispatch, a_dispatch,
+										 frame, g_state.expectedColourContractRevision, a_eye)) {
+					FailLocked("the retained input did not match the current eye dispatch");
+					return;
+				}
+			}
 			g_state.dispatch = a_dispatch;
 			QueueSlotLocked(a_stage, a_eye, globals::d3d::context, a_texture, a_srv, a_rtv, a_uav, 0, 0, 0, a_activeWidth, a_activeHeight, a_symbol, a_callsite);
+			g_state.slots[SlotIndex(a_stage, a_eye)].dispatch = a_dispatch;
 		} catch (const std::exception& e) {
 			std::lock_guard lock(g_state.mutex);
 			FailLocked(e.what());
@@ -934,6 +952,7 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 				slot.hasEngineTarget = true;
 				slot.engineTarget = a_engineTarget;
 				slot.matchesMainTarget = a_matchesMainTarget;
+				slot.dispatch = g_state.slots[SlotIndex(Stage::FsrOutput, eye)].dispatch;
 			}
 			QueueCompletionIfReadyLocked(globals::d3d::context);
 		} catch (const std::exception& e) {
@@ -1101,7 +1120,7 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 			static_cast<std::uint32_t>(a_stage) >= kStageCount || a_eye >= kEyeCount)
 			return { { "error", "capture identity, generation or page did not match" } };
 		return {
-			{ "schema", "csx-colour-pipeline-probe-v2" },
+			{ "schema", "csx-colour-pipeline-probe-v3" },
 			{ "captureId", g_state.captureId },
 			{ "generation", g_state.generation },
 			{ "state", StateName(g_state.state) },
@@ -1110,8 +1129,8 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 						   json(g_state.error) },
 			{ "frame", { { "cpuFrame", g_state.cpuFrame ? json(g_state.cpuFrame) : json(nullptr) }, { "sceneEpoch", nullptr }, { "submissionEpoch", nullptr }, { "eye", "both" }, { "eyeMask", 3 } } },
 			{ "immediateContext", { { "observationId", "obs-device-context-1-g1" }, { "pointer", Pointer(g_state.context) }, { "kind", "immediate" } } },
-			{ "dispatch", Dispatch(g_state.dispatch) },
-			{ "dispatchEvidence", "latest successful FSR dispatch after the captured stereo evaluation; individual eye dispatch identity is not established" },
+			{ "dispatch", Dispatch(g_state.slots[SlotIndex(a_stage, a_eye)].dispatch) },
+			{ "dispatchEvidence", "input attribution is finalized from the actual successful dispatch for its eye; queuedQpc remains the sample time" },
 			{ "metadata", g_state.metadata },
 			{ "samplingContract", { { "gridSize", kGridSize }, { "rawBytesRetainedPerSample", true }, { "fullResourceReadbackRetained", false }, { "implicitTransferConversion", false } } },
 			{ "resourceFlows", g_state.flows },

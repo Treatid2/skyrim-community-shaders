@@ -140,6 +140,16 @@ foreach ($case in $fixtureEdgeCases.invalid) {
     $edgeCaseSequence++
 }
 
+$postProcessingCases = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'post-processing-edge-cases.json') | ConvertFrom-Json -Depth 100
+foreach ($case in $postProcessingCases.valid) {
+    $eventValid = Test-Json -Json ($case.event | ConvertTo-Json -Depth 100 -Compress) -SchemaFile $eventSchemaPath -ErrorAction Stop
+    Assert-True $eventValid "Valid post-processing case '$($case.name)' does not conform to the render-event schema"
+}
+foreach ($case in $postProcessingCases.invalid) {
+    $eventValid = Test-Json -Json ($case.event | ConvertTo-Json -Depth 100 -Compress) -SchemaFile $eventSchemaPath -ErrorAction SilentlyContinue
+    Assert-True (-not $eventValid) "Invalid post-processing case '$($case.name)' unexpectedly conforms to the render-event schema"
+}
+
 $hooksSource = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src/Hooks.cpp')
 $contextHooksSource = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src/RenderMap/D3DContextHooks.cpp')
 Assert-True ($hooksSource.Contains('stl::detour_vfunc<27, ID3D11Device_CreateDeferredContext>')) 'CreateDeferredContext is not hooked at D3D11 device slot 27'
@@ -185,4 +195,4 @@ try {
     }
 }
 
-Write-Output "Render-map contracts passed: 2 schemas, $($fixtureEvents.Count) baseline deferred-command fixtures, $($validEdgeCaseEvents.Count) valid edge cases, $($fixtureEdgeCases.invalid.Count) rejected edge cases, 13 cross-identity cases, 5 hook contracts, and the offline graph suite."
+Write-Output "Render-map contracts passed: 2 schemas, $($fixtureEvents.Count) baseline deferred-command fixtures, $($validEdgeCaseEvents.Count) valid edge cases, $($fixtureEdgeCases.invalid.Count) rejected edge cases, 13 cross-identity cases, 6 valid and 6 rejected post-processing cases, 5 hook contracts, and the offline graph suite."

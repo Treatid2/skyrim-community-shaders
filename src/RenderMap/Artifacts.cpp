@@ -170,7 +170,7 @@ namespace CSX::RenderMap
 				{ "schema", {
 								{ "name", "csx.render-event" },
 								{ "major", 1 },
-								{ "minor", 17 },
+								{ "minor", 18 },
 								{ "producerVersion", "collector-v1" },
 							} },
 				{ "captureId", a_capture.descriptor.captureId },
@@ -253,6 +253,8 @@ namespace CSX::RenderMap
 			if (!WriteTextFileAtomicNoReplace(eventsPath, eventsJsonl, bundle.error))
 				return bundle;
 			const auto& snapshot = a_capture.snapshot;
+			const auto summary = SerializeCaptureSummary(a_capture);
+			const auto transferAdmissionFailures = summary["completion"]["observedTransferVersionAdmissionFailures"].get<std::uint64_t>();
 			const auto serializedEventCount = snapshot.events.size() + (lostEvents == 0 ? 0 : 1);
 			const bool truncated = lostEvents != 0;
 			const bool structurallyIncomplete = snapshot.statistics.scopeOverflow != 0 ||
@@ -263,7 +265,7 @@ namespace CSX::RenderMap
 			                                    snapshot.statistics.droppedTargetBindingObservations != 0 ||
 			                                    snapshot.statistics.droppedSceneObjectObservations != 0 ||
 			                                    snapshot.statistics.droppedGeometryObservations != 0 ||
-			                                    snapshot.statistics.droppedMaterialStateObservations != 0;
+			                                    snapshot.statistics.droppedMaterialStateObservations != 0 || transferAdmissionFailures != 0;
 			const bool terminalFailure = snapshot.stopReason == StopReason::kShutdown ||
 			                             snapshot.stopReason == StopReason::kFailure;
 			const bool incomplete = truncated || structurallyIncomplete || terminalFailure;
@@ -293,7 +295,8 @@ namespace CSX::RenderMap
 				completionErrors.push_back("material state observation capacity was exceeded during capture");
 			if (terminalFailure)
 				completionErrors.push_back("capture ended during shutdown or failure handling");
-			const auto summary = SerializeCaptureSummary(a_capture);
+			if (transferAdmissionFailures != 0)
+				completionErrors.push_back("post-processing command-version admission was unavailable during capture");
 			json extensions = a_context.extensions.is_object() ?
 			                      a_context.extensions :
 			                      json::object();
@@ -320,6 +323,8 @@ namespace CSX::RenderMap
 				{ "csx.droppedSceneObjectObservationCount", snapshot.statistics.droppedSceneObjectObservations },
 				{ "csx.geometryObservationCount", snapshot.geometryObservations.size() },
 				{ "csx.droppedGeometryObservationCount", snapshot.statistics.droppedGeometryObservations },
+				{ "csx.maximumTransferVersionResources", TransferVersions::kCapacity },
+				{ "csx.observedTransferVersionAdmissionFailures", transferAdmissionFailures },
 				{ "csx.materialStateObservationCount", snapshot.materialStateObservations.size() },
 				{ "csx.droppedMaterialStateObservationCount", snapshot.statistics.droppedMaterialStateObservations },
 			});
@@ -328,7 +333,7 @@ namespace CSX::RenderMap
 				{ "schema", {
 								{ "name", "csx.render-capture-manifest" },
 								{ "major", 1 },
-								{ "minor", 7 },
+								{ "minor", 8 },
 								{ "producerVersion", "collector-v1" },
 							} },
 				{ "captureId", a_capture.descriptor.captureId },
@@ -355,6 +360,7 @@ namespace CSX::RenderMap
 								{ "maxTargetBindingObservations", snapshot.config.maxTargetBindingObservations },
 								{ "maxSceneObjectObservations", snapshot.config.maxSceneObjectObservations },
 								{ "maxGeometryObservations", snapshot.config.maxGeometryObservations },
+								{ "maxTransferVersionResources", TransferVersions::kCapacity },
 								{ "maxMaterialStateObservations", snapshot.config.maxMaterialStateObservations },
 								{ "geometryShaderTypes", SerializeGeometryShaderTypeMask(snapshot.config.geometryShaderTypeMask) },
 								{ "executionWithinSelectedGeometry", snapshot.config.executionWithinSelectedGeometry },

@@ -11,6 +11,19 @@ namespace CSX::Diagnostics::ColourPipelineProbe::Policy
 	inline constexpr std::uint32_t kMaximumMetadataBytes = 16 * 1024;
 	inline constexpr std::uint32_t kTimeoutSeconds = 15;
 
+	/** Attribute retained input bytes only to the successful dispatch for that eye. */
+	template <class Dispatch>
+	bool BindInputDispatch(Dispatch& a_input, const Dispatch& a_dispatch,
+		std::uint32_t a_frame, std::uint64_t a_revision, std::uint32_t a_eye)
+	{
+		if (!a_dispatch.dispatchSerial || a_dispatch.frame != a_frame ||
+			a_dispatch.colourContractRevision != a_revision ||
+			a_dispatch.contextIndex != a_eye || a_dispatch.path.empty())
+			return false;
+		a_input = a_dispatch;
+		return true;
+	}
+
 	/** Check source bounds before addition or staging allocation. */
 	inline constexpr bool ValidRectangle(
 		std::uint32_t a_sourceWidth, std::uint32_t a_sourceHeight,

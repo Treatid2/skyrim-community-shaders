@@ -1172,8 +1172,10 @@ namespace
 		Check((resolved & eyeOnly) != 0, "requested eye event was not retained");
 		Check((resolved & EventKindBit(EventKind::kResourceObserved)) != 0,
 			"eye submission did not resolve its resource identity dependency");
-		Check((resolved & EventKindBit(EventKind::kDraw)) == 0,
-			"eye submission unexpectedly enabled draw capture");
+		Check((resolved & EventKindBit(EventKind::kDraw)) != 0 &&
+				  (resolved & EventKindBit(EventKind::kTransferResourceAccess)) != 0 &&
+				  (resolved & EventKindBit(EventKind::kRasterStateObserved)) != 0,
+			"eye selection omitted the post-processing transfer dependencies");
 
 		const auto techniquePair = ResolveEventKindDependencies(EventKindBit(EventKind::kTechniqueBegin));
 		Check((techniquePair & EventKindBit(EventKind::kTechniqueEnd)) != 0 &&
@@ -1980,7 +1982,7 @@ namespace
 		constexpr std::uintptr_t sourceShader = 0xC081;
 		constexpr std::uintptr_t replacementShader = 0xC082;
 		auto filteredConfig = Config();
-		filteredConfig.requestedEventKindMask = EventKindBit(EventKind::kEyeSubmitted);
+		filteredConfig.requestedEventKindMask = EventKindBit(EventKind::kCaptureMarker);
 		filteredConfig.maxBytes = Collector::RequiredStorageBytes(filteredConfig);
 		auto executionConfig = Config();
 		executionConfig.maxEvents = 64;
@@ -2333,11 +2335,104 @@ namespace
 				"stale stage publication replaced the successor binding");
 		}
 	}
+
+	void TestTransferVersionAdmissionAndTurnover()
+	{
+		TransferVersions versions;
+		Check(!versions.Write(0, { 1, 2, 3, 4 }), "zero capture admitted a command epoch");
+		for (std::uint64_t resource = 1; resource <= TransferVersions::kCapacity; ++resource)
+			Check(versions.Write(7, { resource, resource + 1000, resource + 2000, 12 }), "bounded version admission failed");
+		Check(!versions.CanWrite(7, 257) && !versions.Write(7, { 257, 2000, 3000, 12 }), "version capacity silently grew");
+		Check(versions.Write(7, { 1, 4000, 5000, 12 }) && versions.Read(7, 1, 12).observation == 4000,
+			"full catalogue could not replace an admitted resource epoch");
+		Check(!versions.Read(8, 1, 12).observation && !versions.Read(7, 1, 13).observation &&
+				  !versions.Read(7, 1, kUnknownFrame).observation,
+			"epoch crossed capture or frame bounds");
+		versions.Invalidate();
+		Check(!versions.Read(7, 1, 12).observation, "uncovered work retained an epoch");
+		Check(versions.Write(8, { 257, 6000, 7000, 12 }) && !versions.Read(8, 1, 12).observation,
+			"new capture inherited old catalogue entries");
+
+		Runtime runtime;
+		runtime.SetImmediateContext(0xA000);
+		auto config = Config();
+		config.maxEvents = 128;
+		config.maxBytes = Collector::RequiredStorageBytes(config);
+		const ResourceObservationInput resource{ .d3dObject = 0xA100, .dimension = ResourceDimension::kTexture2D, .widthOrBytes = 64, .height = 32, .depthOrArraySize = 1, .mipLevels = 1 };
+		Check(runtime.StartCapture(config) == StartResult::kStarted, "transfer capture did not start");
+		runtime.SetCpuFrame(12);
+		{
+			auto scope = runtime.EnterPostProcessing(resource, resource, 9, 77);
+			Check(runtime.IsInsidePostProcessing(), "original post-processing scope did not activate");
+			runtime.BeginTransferOperation(0xA000, false, 0, { 1, 2, 3, 4, 5, 6 });
+			runtime.RecordRasterState(0xA000, 0, { 2, 3, 64, 32, 0, 1 }, { -1, 0, 64, 32 }, 1, 1, true);
+			runtime.RecordTransferResourceAccess(0xA000, { .resource = resource }, ResourceStage::kOutputMerger, 0, true);
+			runtime.BeginTransferOperation(0xA000, true, 0, { 1, 2, 3, 4, 5, 7 });
+			runtime.RecordTransferResourceAccess(0xA000, { .resource = resource }, ResourceStage::kCompute, 2, false);
+		}
+		Check(!runtime.IsInsidePostProcessing(), "post-processing scope leaked");
+		runtime.RecordEyeSubmission(resource, Eye::kLeft, 1, 0, 0, 0.5f, 1, 0, 90, 77);
+		runtime.SetCpuFrame(13);
+		runtime.RecordEyeSubmission(resource, Eye::kRight, 2, 0.5f, 0, 1, 1, 0, 91, 78);
+		const auto capture = runtime.StopCapture();
+		Check(capture.has_value(), "transfer capture did not stop");
+		std::uint64_t writeVersion = 0;
+		std::uint64_t operation = 0;
+		std::size_t publications = 0;
+		for (const auto& event : capture->events) {
+			const auto schema = static_cast<PayloadSchema>(event.payload.schema);
+			if (schema == PayloadSchema::kTransferOperation)
+				operation = event.payload.words[0];
+			if (schema == PayloadSchema::kTransferResourceAccess) {
+				Check(operation && event.payload.words[7] == operation, "resource access borrowed another operation");
+				if (event.payload.words[6] & 1u) {
+					writeVersion = event.payload.words[2];
+					Check(writeVersion && event.payload.words[3], "recorded write omitted its command epoch");
+				} else
+					Check(writeVersion && event.payload.words[2] == writeVersion, "same-frame read lost its recorded write epoch");
+			}
+			if (schema == PayloadSchema::kEyePublication) {
+				if (publications++ == 0)
+					Check(event.payload.words[1] == writeVersion && event.payload.words[3] == 77 &&
+							  event.frame.eye == Eye::kLeft,
+						"accepted left eye lost its same-frame epoch or lease");
+				else
+					Check(!event.payload.words[1] && event.payload.words[3] == 78 && event.frame.eye == Eye::kRight,
+						"successor frame inherited the left-eye epoch");
+			}
+		}
+		Check(writeVersion && publications == 2, "transfer fixture did not retain both publication records");
+
+		Check(runtime.StartCapture(config) == StartResult::kStarted, "turnover source capture did not start");
+		runtime.SetCpuFrame(12);
+		{
+			auto stale = runtime.EnterPostProcessing(resource, resource, 9, 77);
+			Check(runtime.IsInsidePostProcessing(), "turnover source scope did not enter");
+			Check(runtime.StopCapture().has_value(), "turnover source capture did not stop");
+			Check(runtime.StartCapture(config) == StartResult::kStarted, "turnover successor did not start");
+			runtime.SetCpuFrame(12);
+			Check(!runtime.IsInsidePostProcessing(), "old scope became active in successor capture");
+			runtime.RecordTransferResourceAccess(0xA000, { .resource = resource }, ResourceStage::kOutputMerger, 0, true);
+		}
+		runtime.RecordEyeSubmission(resource, Eye::kLeft, 1, 0, 0, 0.5f, 1, 0, 92, 79);
+		const auto successor = runtime.StopCapture();
+		Check(successor.has_value(), "turnover successor did not stop");
+		Check(std::none_of(successor->events.begin(), successor->events.end(), [](const EventRecord& event) {
+			return event.payload.schema == static_cast<std::uint16_t>(PayloadSchema::kTransferResourceAccess);
+		}),
+			"old scope recorded a write in the successor capture");
+		const auto publication = std::find_if(successor->events.begin(), successor->events.end(), [](const EventRecord& event) {
+			return event.payload.schema == static_cast<std::uint16_t>(PayloadSchema::kEyePublication);
+		});
+		Check(publication != successor->events.end() && !publication->payload.words[1], "old capture epoch crossed turnover");
+	}
+
 }
 
 int main()
 {
 	try {
+		TestTransferVersionAdmissionAndTurnover();
 		TestInactiveRuntime();
 		TestNestedBoundaries();
 		TestShaderIdentityGenerations();

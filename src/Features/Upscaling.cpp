@@ -37,6 +37,8 @@
 #include "Upscaling/VRVendorRelatchPolicy.h"
 #ifdef DEVBENCH_BRIDGE_ENABLED
 #	include "Upscaling/ColourPipelineProbe.h"
+#	include "RenderMap/Runtime.h"
+#	include "RenderMap/D3DContextHooks.h"
 #endif
 #include "Utils/D3D.h"
 #include "Utils/FileSystem.h"
@@ -58785,7 +58787,25 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 #ifdef DEVBENCH_BRIDGE_ENABLED
 		captureStage(CSX::Diagnostics::ColourPipelineProbe::Stage::ImageSpaceInput);
 #endif
+#ifdef DEVBENCH_BRIDGE_ENABLED
+		{
+			auto& runtime = CSX::RenderMap::GetRuntime();
+			auto* renderer = globals::game::renderer;
+			const auto source = renderer && runtime.IsCapturing() ? CSX::RenderMap::DescribeResource(
+																		REX::W32::AsReal(renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN].texture)) :
+			                                                        CSX::RenderMap::ResourceObservationInput{};
+			const auto destination = renderer && runtime.IsCapturing() &&
+			                                 static_cast<std::uint32_t>(a_target) < std::size(renderer->GetRuntimeData().renderTargets) ?
+			                             CSX::RenderMap::DescribeResource(
+											 REX::W32::AsReal(renderer->GetRuntimeData().renderTargets[a_target].texture)) :
+			                             CSX::RenderMap::ResourceObservationInput{};
+			const auto transferScope = runtime.EnterPostProcessing(source, destination,
+				static_cast<std::uint32_t>(a_target), globals::state ? globals::state->GetRenderTargetResourcePublicationGeneration() : 0);
+			func(a_this, a3, a_target, a_4, a_5);
+		}
+#else
 		func(a_this, a3, a_target, a_4, a_5);
+#endif
 #ifdef DEVBENCH_BRIDGE_ENABLED
 		captureStage(CSX::Diagnostics::ColourPipelineProbe::Stage::ImageSpaceOutput);
 #endif

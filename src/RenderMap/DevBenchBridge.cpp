@@ -33,8 +33,8 @@ namespace
 	using json = nlohmann::json;
 	using CSX::RenderMap::ControlStatus;
 	constexpr std::uint32_t kContractMajor = 1;
-	constexpr std::uint32_t kContractMinor = 20;
-	constexpr std::uint32_t kSchemaRevision = 21;
+	constexpr std::uint32_t kContractMinor = 21;
+	constexpr std::uint32_t kSchemaRevision = 22;
 	using namespace CSX::RenderMap::DevBenchBounds;
 	constexpr auto kPlannedEventKinds =
 		CSX::RenderMap::EventKindBit(CSX::RenderMap::EventKind::kFrameBegin) |
@@ -293,7 +293,7 @@ namespace
 				{ "minor", kContractMinor },
 				{ "schemaRevision", kSchemaRevision },
 				{ "actions", json::array({ "registry", "status", "start", "stop", "capture_events" }) },
-				{ "eventSchemas", json::array({ "render-pass-boundary-v1", "technique-boundary-v2", "geometry-boundary-v1", "geometry-boundary-v2", "scene-object-observation-v1", "geometry-observation-v1", "material-state-observation-v1", "shader-observation-v2", "stage-shader-observation-v3", "technique-resolution-v1", "device-context-observation-v1", "target-view-observation-v1", "resource-observation-v1", "resource-view-binding-v1", "resource-view-binding-v2", "resource-view-state-observed-v1", "resource-flow-v1", "resource-cpu-access-v1", "resource-version-observation-v1", "visibility-candidate-v1", "visibility-result-ready-v1", "visibility-submission-v1", "cull-decision-v1", "eye-submission-v1", "render-target-binding-v1", "render-target-binding-v2", "draw-call-v2", "draw-call-v3", "dispatch-call-v1", "command-recording-observation-v1", "command-list-observation-v2", "finish-command-list-v2", "execute-command-list-v1" }) },
+				{ "eventSchemas", json::array({ "render-pass-boundary-v1", "technique-boundary-v2", "geometry-boundary-v1", "geometry-boundary-v2", "scene-object-observation-v1", "geometry-observation-v1", "material-state-observation-v1", "shader-observation-v2", "stage-shader-observation-v3", "technique-resolution-v1", "device-context-observation-v1", "target-view-observation-v1", "resource-observation-v1", "resource-view-binding-v1", "resource-view-binding-v2", "resource-view-state-observed-v1", "resource-flow-v1", "resource-cpu-access-v1", "resource-version-observation-v1", "visibility-candidate-v1", "visibility-result-ready-v1", "visibility-submission-v1", "cull-decision-v1", "eye-submission-v1", "render-target-binding-v1", "render-target-binding-v2", "draw-call-v2", "draw-call-v3", "dispatch-call-v1", "command-recording-observation-v1", "command-list-observation-v2", "finish-command-list-v2", "execute-command-list-v1", "post-processing-boundary-v1", "post-processing-operation-v1", "raster-state-observation-v1", "post-processing-resource-access-v1", "accepted-eye-publication-v1", "post-processing-copy-region-v1" }) },
 				{ "eventKinds", CSX::RenderMap::SerializeEventKindMask(kSelectableEventKinds) },
 				{ "plannedEventKinds", CSX::RenderMap::SerializeEventKindMask(kPlannedEventKinds) },
 				{ "eventSelection", {
@@ -318,7 +318,14 @@ namespace
 										   { "unorderedAccessViews", "compute-and-output-merger-requested-and-post-call-effective" },
 										   { "resourceFlow", "copy-and-resolve" },
 										   { "cpuResourceAccess", "immediate-context-map-unmap-with-qpc-duration-and-pairing" },
-										   { "vrEyeAttribution", "accepted-openvr-submit-resource-and-bounds" },
+										   { "vrEyeAttribution", "accepted-openvr-submit-resource-bounds-current-publication-and-nullable-command-epoch" },
+										   { "postProcessing", {
+																   { "boundary", "bounded-original-Main_PostProcessing" },
+																   { "observations", "native-shader-bindings-viewport-scissor-resource-view-candidates-and-copy-regions" },
+																   { "maximumVersionResources", CSX::RenderMap::TransferVersions::kCapacity },
+																   { "pixelTransferEstablished", false },
+																   { "nativeLifetimeJoinVerified", false },
+															   } },
 										   { "visibilitySubmissionJoin", "explicit-next-draw-identity" },
 										   { "preparedGeometryJoin", "same-thread-next-immediate-context-draw-after-selected-setup" },
 										   { "visibilityBindingVerification", "effective-vs-srv-slot" },
@@ -632,7 +639,7 @@ namespace CSX::RenderMap::DevBenchBridge
 			return;
 		}
 		const char* descriptor = R"({
-			"description":"Versioned, explicitly bounded CSX render-map diagnostic capture. Capture is off by default; start retains runtime provenance and its response before hook activation. Stop requires the original capture-start provenance; events are read only after stop.",
+			"description":"Versioned, explicitly bounded CSX render-map diagnostic capture. Capture is off by default; start retains runtime provenance and its response before hook activation. Stop requires the original capture-start provenance; events are read only after stop. Main_PostProcessing observations retain native bindings, raster state, candidate command epochs and accepted eye publication; these do not prove pixel transfers.",
 			"inputSchema":{"type":"object","required":["contractMajor","clientId","commandId","action"],"properties":{
 				"contractMajor":{"type":"integer","const":1},"clientId":{"type":"string","minLength":1,"maxLength":128},
 				"commandId":{"type":"string","minLength":1,"maxLength":128},"expectedBuildId":{"type":"string"},

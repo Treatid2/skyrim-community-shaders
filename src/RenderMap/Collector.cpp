@@ -67,6 +67,8 @@ namespace CSX::RenderMap
 			"resource-cpu-access",
 			"resource-version-observed",
 			"eye-submitted",
+			"raster-state-observed",
+			"transfer-resource-access",
 		};
 		static_assert(names.size() == static_cast<std::size_t>(EventKind::kCount));
 		const auto index = static_cast<std::size_t>(a_kind);
@@ -145,6 +147,23 @@ namespace CSX::RenderMap
 				add(EventKind::kDeviceContextObserved);
 			}
 
+			if (has(EventKind::kDraw) || has(EventKind::kDispatch)) {
+				add(EventKind::kRasterStateObserved);
+				add(EventKind::kTransferResourceAccess);
+			}
+			if (has(EventKind::kTransferResourceAccess) || has(EventKind::kRasterStateObserved)) {
+				add(EventKind::kRasterStateObserved);
+				add(EventKind::kDraw);
+				add(EventKind::kDispatch);
+				add(EventKind::kResourceFlow);
+				add(EventKind::kRenderPassEnter);
+				add(EventKind::kRenderPassExit);
+				add(EventKind::kTargetViewObserved);
+				add(EventKind::kResourceObserved);
+				add(EventKind::kDeviceContextObserved);
+			}
+			if (has(EventKind::kEyeSubmitted))
+				add(EventKind::kTransferResourceAccess);
 			if (has(EventKind::kDraw) || has(EventKind::kDispatch)) {
 				add(EventKind::kCommandRecordingObserved);
 				add(EventKind::kStageShaderObserved);

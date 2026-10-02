@@ -129,12 +129,17 @@ public:
 		bool autoExposure = true;
 		bool exposureResourceBound = false;
 		float preExposure = 1.0f;
+		float configuredSharpness = 0.0f;
+		float effectiveSharpness = 0.0f;
+		bool sharpeningEnabled = false;
+		uint64_t dispatchQpc = 0;
 	};
 
 	struct FsrColorContractStatusSnapshot
 	{
 		FsrColorContractSnapshot contract{};
 		RuntimeUpscalerDispatchSnapshot dispatch{};
+		std::array<RuntimeUpscalerDispatchSnapshot, 2> eyeDispatches{};
 	};
 
 	using FsrColorContractSetResult =
@@ -284,6 +289,7 @@ public:
 	StereoUpscaleResult UpscaleStereoRegions(const std::array<UpscaleRegionParameters, 2>& a_regions);
 
 private:
+	const std::string& GetRuntimeUpscalerFramePathLabel(RuntimeUpscalerFramePath a_path) const;
 	bool ConfirmFrameGenerationDisabled(uint64_t a_frameID) noexcept;
 	void QuarantineFrameGenerationForSession(const char* a_reason, bool a_disableConfirmed = false) noexcept;
 	std::atomic_bool frameGenerationSessionQuarantined{ false };
@@ -458,7 +464,9 @@ private:
 		uint32_t a_renderWidth,
 		uint32_t a_renderHeight,
 		uint32_t a_displayWidth,
-		uint32_t a_displayHeight);
+		uint32_t a_displayHeight,
+		float a_configuredSharpness, float a_effectiveSharpness,
+		bool a_sharpeningEnabled, uint64_t a_dispatchQpc);
 	std::atomic<uint64_t> devBenchFsrColorContractState{ FSRColorContractPolicy::kDefaultState };
 	std::atomic<uint64_t> devBenchHostContextColorContract{ 0 };
 	std::atomic<uint64_t> devBenchRuntimeContextColorContract{ 0 };
@@ -468,6 +476,7 @@ private:
 	std::atomic<uint32_t> devBenchRuntimeContextLastDispatchFrame{ 0 };
 	mutable std::mutex devBenchFsrColorContractMutex;
 	RuntimeUpscalerDispatchSnapshot devBenchSuccessfulDispatch{};
+	std::array<RuntimeUpscalerDispatchSnapshot, 2> devBenchSuccessfulEyeDispatches{};
 	uint64_t devBenchSuccessfulDispatchSerial = 0;
 #endif
 	LifecycleResult EnsureRuntimeUpscalerInterop();
@@ -497,7 +506,7 @@ private:
 		ID3D11Resource* a_source, const D3D11_TEXTURE2D_DESC& a_desc);
 	[[nodiscard]] bool HasQuarantinedRuntimeSharedGuides(const UpscaleRegionParameters& a_region) const noexcept;
 	[[nodiscard]] bool CanDispatchHostFallbackForRegions(std::span<const UpscaleRegionParameters> a_regions, const RuntimeDispatchPlan& a_plan) const;
-	LifecycleResult DispatchRuntimeUpscalerBatch(std::span<const UpscaleRegionParameters> a_regions);
+	LifecycleResult DispatchRuntimeUpscalerBatch(std::span<const UpscaleRegionParameters> a_regions, RuntimeUpscalerFramePath a_path);
 	LifecycleResult DestroyRuntimeUpscalerContexts(bool a_waitForIdle = true);
 	LifecycleResult DestroyRuntimeUpscalerResources(bool a_waitForIdle = true);
 	LifecycleResult RetireQuarantinedRuntimeUpscalerResources();

@@ -65,7 +65,7 @@ not enter the Community Shaders binary in either build mode.
 
 `communityshaders.render_map` publishes registry, status, start, stop and
 completed-event paging through the shared versioned service envelope. Contract
-1.20/schema revision 21 retains field-specific `invalid_bounds` errors with
+1.21/schema revision 22 retains field-specific `invalid_bounds` errors with
 the original value and independent minimum/maximum. Supplied bounds must be
 unsigned JSON integers and are checked before narrowing or duration conversion.
 
@@ -93,3 +93,31 @@ Implemented command-recording and command-list event kinds are selectable for
 bounded qualification captures. The registry continues to advertise
 `deferredContexts: false` and `commandLists: false` until the documented live
 deferred-vtable gate passes; selection alone does not establish hook coverage.
+
+## Original post-processing observations
+
+Render-event 1.18 adds scoped original `Main_PostProcessing` boundaries,
+native shader bindings, raster viewport/scissor slots, resource/view access
+candidates, copy regions and accepted OpenVR publication records. Selecting
+eye-submit or transfer events expands the draw/dispatch/flow and declaration
+dependencies. The boundary names the main resource as a candidate and the
+existing destination as destination-before; neither establishes an actual
+shader source. Draw/dispatch reads are queried before the native command and
+write-capable bindings after it. Copy/resolve observations follow their
+native calls. Command-stream order and operation IDs correlate these records.
+
+The version ledger holds at most 256 resource command epochs per capture.
+Epochs are admitted only after their defining event is recorded and are
+withheld across frames, captures, unobserved execution and failed admission.
+Accepted per-eye publication records carry the actual current render-target
+lease generation and nullable same-frame command epoch alongside the existing
+OpenVR bounds. These are observed bindings and queued commands: they do not
+establish shader pixel reads/writes, GPU completion, native object lifetime,
+subresource versions or a causal pixel transfer to the headset.
+
+Capture summary and manifest 1.8 retain the version-resource capacity and
+observed admission failures. Those failures mark the artifact incomplete;
+ordinary event/catalogue losses retain their existing separate counters.
+No new capture setter, D3D state mutation or renderer selection is introduced.
+Instrumentation is opt-in and may add frame cost. Native fixture execution
+and live SE/AE/VR qualification are separate from source checks.
