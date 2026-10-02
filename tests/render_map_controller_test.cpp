@@ -1,4 +1,5 @@
 #include "RenderMap/Artifacts.h"
+#include "RenderMap/CaptureStart.h"
 #include "RenderMap/Controller.h"
 #include "RenderMap/Serialization.h"
 
@@ -8,9 +9,11 @@
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace
@@ -60,7 +63,7 @@ namespace
 				{ "csxBuildManifest", unavailable },
 			},
 			.environment = {
-				{ "skyrim", { { "name", "SkyrimVR.exe" }, { "version", "1.4.15" }, { "sha256", nullptr } } },
+				{ "skyrim", BuildSkyrimModuleIdentity(true, "1.4.15.0", true) },
 				{ "csx", { { "name", "CommunityShaders.dll" }, { "version", "test" }, { "sha256", nullptr } } },
 				{ "runtimeRoute", "unknown" },
 				{ "modEnvironment", {
@@ -152,6 +155,100 @@ namespace
 		Check(a_controller.Stop(descriptor.captureId, replay) == ControlStatus::kSuccess && replay == completed,
 			"completed stop was not idempotent");
 		return completed;
+	}
+
+	void TestRuntimeArtifactIdentity()
+	{
+		const auto vr = BuildSkyrimModuleIdentity(true, "1.4.15.0", true);
+		Check(vr["name"] == "SkyrimVR.exe" && vr["version"] == "1.4.15.0", "VR identity was not retained");
+		for (const auto version : { "1.5.97.0", "1.6.629.0" }) {
+			const auto flat = BuildSkyrimModuleIdentity(false, version, false);
+			Check(flat["name"] == "SkyrimSE.exe" && flat["version"] == version, "SE/AE identity was mislabeled");
+			Check(flat["sha256"].is_null(), "unobserved executable hash was invented");
+		}
+		Check(BuildSkyrimModuleIdentity(false, "")["version"].is_null(), "missing runtime version was substituted");
+		for (const auto vrRuntime : { false, true }) {
+			bool rejected = false;
+			try {
+				BuildSkyrimModuleIdentity(vrRuntime, "observed-version", !vrRuntime);
+			} catch (const std::invalid_argument&) {
+				rejected = true;
+			}
+			Check(rejected, "contradictory observed shader/runtime identity was accepted");
+		}
+	}
+
+	void TestPreparedStartFailures()
+	{
+		for (const auto failure : { CaptureStartPhase::kContext, CaptureStartPhase::kResponse }) {
+			CaptureController controller;
+			CaptureDescriptor descriptor;
+			CaptureStartPhase phase = CaptureStartPhase::kContext;
+			std::unordered_map<std::string, CaptureArtifactContext> contexts;
+			const auto root = std::filesystem::temp_directory_path() /
+			                  std::format("csx-render-map-start-failure-{}", std::chrono::steady_clock::now().time_since_epoch().count());
+			nlohmann::json response;
+			const auto status = StartPreparedCapture(controller, Config(), descriptor, phase, [&](const auto& a_capture) {
+					Check(!GetRuntime().IsCapturing(), "hooks activated before context retention");
+					if (failure == CaptureStartPhase::kContext)
+						throw std::bad_alloc();
+					contexts.emplace(a_capture.captureId, ArtifactContext(root)); }, [&](const auto& a_capture) {
+					Check(!GetRuntime().IsCapturing(), "hooks activated before response construction");
+					Check(contexts.contains(a_capture.captureId), "response preceded context retention");
+					response["captureId"] = a_capture.captureId;
+					throw std::bad_alloc(); }, [&](const std::string& a_captureId) noexcept { contexts.erase(a_captureId); });
+			Check(status == ControlStatus::kAllocationFailed && phase == failure, "injected start failure was misclassified");
+			Check(!descriptor.captureId.empty(), "failure did not exercise a reserved capture identity");
+			Check(contexts.empty(), "failed start retained artifact context");
+			const auto state = controller.GetStatus();
+			Check(!state.active && !state.accepting && state.completedCaptureIds.empty(), "failed start published a capture");
+			Check(!controller.GetCompleted(descriptor.captureId), "failed start permits event paging");
+			std::shared_ptr<const CompletedCapture> stopped;
+			Check(controller.Stop(descriptor.captureId, stopped) == ControlStatus::kNotCapturing && !stopped,
+				"failed start permits completed stop or artifact serialization");
+			Check(!GetRuntime().IsCapturing() && !GetRuntime().IsCaptureDraining(), "failed start left hooks active or draining");
+			Check(!std::filesystem::exists(root), "failed start created an artifact directory");
+			CaptureDescriptor next;
+			Check(controller.Start(Config(), next) == ControlStatus::kSuccess, "failed preparation prevented a later capture");
+			Check(controller.Stop(next.captureId, stopped) == ControlStatus::kSuccess, "later capture could not complete");
+		}
+	}
+
+	void TestPreparedStartSuccess()
+	{
+		CaptureController controller;
+		CaptureDescriptor descriptor;
+		CaptureStartPhase phase = CaptureStartPhase::kContext;
+		std::unordered_map<std::string, std::string> contexts;
+		nlohmann::json response;
+		const auto status = StartPreparedCapture(controller, Config(), descriptor, phase, [&](const auto& a_capture) {
+				Check(!GetRuntime().IsCapturing(), "successful start activated before provenance");
+				contexts.emplace(a_capture.captureId, "capture-start"); }, [&](const auto& a_capture) {
+				Check(!GetRuntime().IsCapturing(), "successful start activated before response");
+				response["captureId"] = a_capture.captureId; }, [&](const std::string& a_captureId) noexcept { contexts.erase(a_captureId); });
+		Check(status == ControlStatus::kSuccess && phase == CaptureStartPhase::kRuntime, "prepared start failed");
+		Check(GetRuntime().IsCapturing(), "prepared start did not activate capture");
+		Check(response["captureId"] == descriptor.captureId && contexts.at(descriptor.captureId) == "capture-start",
+			"prepared response/context identity changed at activation");
+		std::shared_ptr<const CompletedCapture> capture;
+		Check(controller.Stop(descriptor.captureId, capture) == ControlStatus::kSuccess, "prepared capture could not stop");
+		Check(controller.GetCompleted(descriptor.captureId) == capture, "successful prepared capture was not retained");
+	}
+
+	void TestPreparedRuntimeFailure()
+	{
+		CaptureController controller;
+		CaptureDescriptor descriptor;
+		CaptureStartPhase phase = CaptureStartPhase::kContext;
+		std::unordered_map<std::string, std::string> contexts;
+		auto invalid = Config();
+		invalid.maxEvents = 0;
+		const auto status = StartPreparedCapture(controller, invalid, descriptor, phase, [&](const auto& a_capture) { contexts.emplace(a_capture.captureId, "capture-start"); }, [](const auto&) {}, [&](const std::string& a_captureId) noexcept { contexts.erase(a_captureId); });
+		Check(status == ControlStatus::kInvalidBounds && phase == CaptureStartPhase::kRuntime,
+			"runtime admission failure was not preserved");
+		Check(contexts.empty() && !controller.GetStatus().active && controller.GetStatus().completedCaptureIds.empty(),
+			"runtime admission failure retained prepared capture state");
+		Check(!GetRuntime().IsCapturing(), "invalid runtime admission activated hooks");
 	}
 
 	void TestControllerAndSerialization()
@@ -662,6 +759,10 @@ namespace
 int main()
 {
 	try {
+		TestRuntimeArtifactIdentity();
+		TestPreparedStartFailures();
+		TestPreparedStartSuccess();
+		TestPreparedRuntimeFailure();
 		TestControllerAndSerialization();
 		TestStopActiveWithoutCaptureId();
 		TestCompletedHistoryBound();

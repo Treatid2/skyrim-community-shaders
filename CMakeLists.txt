@@ -2169,6 +2169,10 @@ if(BUILD_CONTROLLER_TESTS)
         src/RenderMap/Collector.cpp
     )
     target_compile_features(render_map_collector_test PRIVATE cxx_std_23)
+    target_link_libraries(
+        render_map_collector_test
+        PRIVATE nlohmann_json::nlohmann_json
+    )
     target_include_directories(
         render_map_collector_test
         PRIVATE "${PROJECT_SOURCE_DIR}/src"
