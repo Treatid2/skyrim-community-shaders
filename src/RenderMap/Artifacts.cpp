@@ -13,9 +13,22 @@
 #include <iomanip>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 
 namespace CSX::RenderMap
 {
+	nlohmann::json BuildSkyrimModuleIdentity(bool a_virtualReality, std::string_view a_version,
+		std::optional<bool> a_shaderVirtualReality)
+	{
+		if (a_shaderVirtualReality && *a_shaderVirtualReality != a_virtualReality)
+			throw std::invalid_argument("shader compile context contradicts the loaded Skyrim runtime");
+		return {
+			{ "name", a_virtualReality ? "SkyrimVR.exe" : "SkyrimSE.exe" },
+			{ "version", a_version.empty() ? nlohmann::json(nullptr) : nlohmann::json(a_version) },
+			{ "sha256", nullptr },
+		};
+	}
+
 	namespace
 	{
 		using json = nlohmann::json;

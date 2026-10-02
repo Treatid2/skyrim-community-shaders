@@ -65,7 +65,7 @@ not enter the Community Shaders binary in either build mode.
 
 `communityshaders.render_map` publishes registry, status, start, stop and
 completed-event paging through the shared versioned service envelope. Contract
-1.19/schema revision 20 retains field-specific `invalid_bounds` errors with
+1.20/schema revision 21 retains field-specific `invalid_bounds` errors with
 the original value and independent minimum/maximum. Supplied bounds must be
 unsigned JSON integers and are checked before narrowing or duration conversion.
 
@@ -75,6 +75,19 @@ one complete event slot. A smaller budget returns field-specific details
 containing `maxBytes`, `fixedCatalogueBytes`, `eventStorageUnitBytes` and
 `minimumMaxBytes` before capture starts. The default collector test shares the
 adapter's exact default configuration; the exact one-event minimum is admitted.
+
+Capture start prepares its retained provenance and success response before
+activating hooks, under the controller's start transaction. A failure in either
+preparation leaves no active or completed capture, event page, or artifact.
+Normal stop retains completed captures; it is not used for failed-start cleanup.
+Stop requires the original capture-start context and returns
+`capture_provenance_unavailable` if that context is absent, without rebuilding
+provenance at stop time.
+
+Artifact runtime identity uses the loaded SE/AE or VR executable family and
+CommonLib's observed runtime version. Missing exact version evidence is null.
+Observed shader compilation identity must agree with the loaded runtime family;
+a contradiction returns `capture_provenance_unavailable` before activation.
 
 Implemented command-recording and command-list event kinds are selectable for
 bounded qualification captures. The registry continues to advertise

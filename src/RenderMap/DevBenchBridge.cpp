@@ -6,6 +6,7 @@
 #	include "BuildProvenance.h"
 #	include "Globals.h"
 #	include "RenderMap/Artifacts.h"
+#	include "RenderMap/CaptureStart.h"
 #	include "RenderMap/Controller.h"
 #	include "RenderMap/DevBenchCaptureBounds.h"
 #	include "RenderMap/Serialization.h"
@@ -21,6 +22,8 @@
 #	include <limits>
 #	include <iterator>
 #	include <mutex>
+#	include <optional>
+#	include <stdexcept>
 #	include <string>
 #	include <unordered_map>
 #	include <unordered_set>
@@ -30,8 +33,8 @@ namespace
 	using json = nlohmann::json;
 	using CSX::RenderMap::ControlStatus;
 	constexpr std::uint32_t kContractMajor = 1;
-	constexpr std::uint32_t kContractMinor = 19;
-	constexpr std::uint32_t kSchemaRevision = 20;
+	constexpr std::uint32_t kContractMinor = 20;
+	constexpr std::uint32_t kSchemaRevision = 21;
 	using namespace CSX::RenderMap::DevBenchBounds;
 	constexpr auto kPlannedEventKinds =
 		CSX::RenderMap::EventKindBit(CSX::RenderMap::EventKind::kFrameBegin) |
@@ -136,6 +139,12 @@ namespace
 		const auto build = BuildProvenance::GetProducer();
 		const auto sourceCommit = build.value("sourceCommit", std::string{});
 		auto logDirectory = logger::log_directory();
+		auto shaderCompilation = BuildShaderCompilationProvenance();
+		const auto shaderVR = shaderCompilation.value("availability", std::string{}) == "observed" ?
+		                          std::optional<bool>{ shaderCompilation.at("virtualReality").get<bool>() } :
+		                          std::nullopt;
+		auto skyrimIdentity = CSX::RenderMap::BuildSkyrimModuleIdentity(
+			REL::Module::IsVR(), REL::Module::get().version().string("."), shaderVR);
 		return {
 			.outputRoot = logDirectory ? *logDirectory / "CSX" / "RenderMapCaptures" : std::filesystem::path{},
 			.createdAtUtc = CSX::Api::ServiceFoundation::TimestampUtc(),
@@ -167,7 +176,7 @@ namespace
 				{ "csxBuildManifest", UnavailableInput() },
 			},
 			.environment = {
-				{ "skyrim", { { "name", "SkyrimVR.exe" }, { "version", "1.4.15" }, { "sha256", nullptr } } },
+				{ "skyrim", std::move(skyrimIdentity) },
 				{ "csx", { { "name", "CommunityShaders.dll" }, { "version", build.value("buildIdShort", std::string("unavailable")) }, { "sha256", nullptr } } },
 				{ "runtimeRoute", "unknown" },
 				{ "modEnvironment", {
@@ -198,7 +207,7 @@ namespace
 				{ "notes", "No scenario metadata was supplied to the v1.0 live controller." },
 			},
 			.extensions = {
-				{ "csx.shaderCompilation", BuildShaderCompilationProvenance() },
+				{ "csx.shaderCompilation", std::move(shaderCompilation) },
 			},
 		};
 	}
@@ -325,7 +334,9 @@ namespace
 										  { "events", "events.jsonl" },
 										  { "manifest", "capture-manifest.json" },
 										  { "overwrite", "never" },
+										  { "captureStartProvenanceRequired", true },
 									  } },
+				{ "startAdmission", "provenance-and-response-before-hook-activation" },
 				{ "limits", {
 								{ "maximumFrames", kMaximumFrames },
 								{ "maximumDurationMs", kMaximumDurationMs },
@@ -480,48 +491,42 @@ namespace
 			CSX::RenderMap::CaptureArtifactContext artifactContext;
 			try {
 				artifactContext = BuildArtifactContext();
+			} catch (const std::invalid_argument& e) {
+				return Foundation().MakeError(a_args, "capture_provenance_unavailable", e.what(), "execution", true);
 			} catch (const std::exception& e) {
 				return Foundation().MakeError(a_args, "allocation_failed", e.what(), "execution", true);
 			}
 			CSX::RenderMap::CaptureDescriptor descriptor;
-			const auto status = CSX::RenderMap::GetCaptureController().Start(config, descriptor);
+			CSX::RenderMap::CaptureStartPhase phase = CSX::RenderMap::CaptureStartPhase::kContext;
+			json response;
+			ControlStatus status;
+			{
+				std::lock_guard lock(g_artifactMutex);
+				status = CSX::RenderMap::StartPreparedCapture(
+					CSX::RenderMap::GetCaptureController(), config, descriptor, phase,
+					[&](const auto& a_capture) {
+						g_artifactContexts.insert_or_assign(a_capture.captureId, std::move(artifactContext));
+					},
+					[&](const auto& a_capture) {
+						response = Foundation().MakeEnvelope(a_args, true);
+						response["result"] = {
+							{ "captureId", a_capture.captureId },
+							{ "numericId", a_capture.numericId },
+							{ "state", "capturing" },
+							{ "bounds", CSX::RenderMap::SerializeBounds(a_capture.config) },
+						};
+					},
+					[&](const std::string& a_captureId) noexcept { g_artifactContexts.erase(a_captureId); });
+			}
+			if (status == ControlStatus::kAllocationFailed && phase != CSX::RenderMap::CaptureStartPhase::kRuntime)
+				return Foundation().MakeError(a_args, "allocation_failed",
+					phase == CSX::RenderMap::CaptureStartPhase::kContext ?
+						"capture provenance could not be retained; capture was not activated" :
+						"capture response could not be materialized; capture was not activated",
+					"execution", true);
 			if (status != ControlStatus::kSuccess)
 				return ControlFailure(a_args, status);
-			try {
-				std::lock_guard lock(g_artifactMutex);
-				g_artifactContexts.insert_or_assign(descriptor.captureId, std::move(artifactContext));
-			} catch (...) {
-				std::shared_ptr<const CSX::RenderMap::CompletedCapture> discarded;
-				const auto rollback = CSX::RenderMap::GetCaptureController().Stop(descriptor.captureId, discarded);
-				if (rollback == ControlStatus::kSuccess)
-					return Foundation().MakeError(a_args, "allocation_failed", "capture provenance could not be retained; capture was rolled back", "execution", true);
-				auto error = ControlFailure(a_args, rollback);
-				error["error"]["captureId"] = descriptor.captureId;
-				return error;
-			}
-
-			try {
-				auto response = Foundation().MakeEnvelope(a_args, true);
-				response["result"] = {
-					{ "captureId", descriptor.captureId },
-					{ "numericId", descriptor.numericId },
-					{ "state", "capturing" },
-					{ "bounds", CSX::RenderMap::SerializeBounds(descriptor.config) },
-				};
-				return response;
-			} catch (...) {
-				{
-					std::lock_guard lock(g_artifactMutex);
-					g_artifactContexts.erase(descriptor.captureId);
-				}
-				std::shared_ptr<const CSX::RenderMap::CompletedCapture> discarded;
-				const auto rollback = CSX::RenderMap::GetCaptureController().Stop(descriptor.captureId, discarded);
-				if (rollback == ControlStatus::kSuccess)
-					return Foundation().MakeError(a_args, "allocation_failed", "capture response could not be materialized; capture was rolled back", "execution", true);
-				auto error = ControlFailure(a_args, rollback);
-				error["error"]["captureId"] = descriptor.captureId;
-				return error;
-			}
+			return response;
 		}
 
 		if (action == "stop") {
@@ -543,10 +548,12 @@ namespace
 				if (const auto found = g_artifactBundles.find(captureId); found != g_artifactBundles.end()) {
 					artifacts = found->second;
 				} else {
-					const auto context = g_artifactContexts.contains(captureId) ?
-					                         g_artifactContexts.at(captureId) :
-					                         BuildArtifactContext();
-					artifacts = CSX::RenderMap::WriteCaptureArtifacts(*capture, context, GetCurrentProcessId());
+					const auto context = g_artifactContexts.find(captureId);
+					if (context == g_artifactContexts.end())
+						return Foundation().MakeError(a_args, "capture_provenance_unavailable",
+							"capture-start provenance is not retained; artifacts cannot be reconstructed",
+							"execution", false, "captureId");
+					artifacts = CSX::RenderMap::WriteCaptureArtifacts(*capture, context->second, GetCurrentProcessId());
 					g_artifactBundles.emplace(captureId, artifacts);
 					g_artifactContexts.erase(captureId);
 				}
@@ -625,11 +632,11 @@ namespace CSX::RenderMap::DevBenchBridge
 			return;
 		}
 		const char* descriptor = R"({
-			"description":"Versioned, explicitly bounded CSX render-map diagnostic capture. Capture is off by default and events are read only after stop.",
+			"description":"Versioned, explicitly bounded CSX render-map diagnostic capture. Capture is off by default; start retains runtime provenance and its response before hook activation. Stop requires the original capture-start provenance; events are read only after stop.",
 			"inputSchema":{"type":"object","required":["contractMajor","clientId","commandId","action"],"properties":{
 				"contractMajor":{"type":"integer","const":1},"clientId":{"type":"string","minLength":1,"maxLength":128},
 				"commandId":{"type":"string","minLength":1,"maxLength":128},"expectedBuildId":{"type":"string"},
-				"action":{"type":"string","enum":["registry","status","start","stop","capture_events"]},
+				"action":{"type":"string","enum":["registry","status","start","stop","capture_events"],"description":"start rejects inconsistent runtime provenance before activation; stop reports capture_provenance_unavailable when start-time context is missing."},
 				"captureId":{"type":"string","minLength":1},
 				"eventKinds":{"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"string"}},
 				"geometryShaderTypes":{"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"integer","minimum":0,"maximum":63}},
