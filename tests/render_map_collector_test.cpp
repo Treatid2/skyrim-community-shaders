@@ -1,4 +1,5 @@
 #include "RenderMap/Collector.h"
+#include "RenderMap/DevBenchCaptureBounds.h"
 
 #include <atomic>
 #include <iostream>
@@ -58,6 +59,69 @@ namespace
 		config = Config();
 		config.maxTargetBindingObservations = 0;
 		Check(collector.Start(config) == StartResult::kInvalidBounds, "zero target-binding-observation bound was accepted");
+	}
+
+	void TestDevBenchDefaultBudget()
+	{
+		auto config = CSX::RenderMap::DevBenchBounds::DefaultConfig();
+		config.captureNumericId = 42;
+		const auto maximumBytes = config.maxBytes;
+		auto catalogueConfig = config;
+		catalogueConfig.maxEvents = 0;
+		Check(Collector::RequiredStorageBytes(catalogueConfig) < maximumBytes,
+			"DevBench default catalogues consume the entire advertised byte budget");
+
+		Collector collector;
+		Check(collector.Start(config) == StartResult::kStarted,
+			"DevBench default capture profile was rejected");
+		Check(collector.Stop().has_value(), "DevBench default capture profile did not stop");
+	}
+
+	void TestDevBenchJsonBounds()
+	{
+		using nlohmann::json;
+		for (const auto& bound : DevBenchBounds::kBounds) {
+			const std::string field(bound.field);
+			for (const auto value : { std::uint64_t{ 1 }, bound.maximum })
+				Check(!DevBenchBounds::Validate(json{ { field, value } }), "valid JSON bound was rejected");
+			for (const auto value : { std::uint64_t{ 0 }, bound.maximum + 1, std::uint64_t{ 0x100000001 }, (std::numeric_limits<std::uint64_t>::max)() }) {
+				const auto error = DevBenchBounds::Validate(json{ { field, value } });
+				Check(error && !error->invalidType && error->bound.field == field,
+					"oversized JSON bound wrapped or lost its field identity");
+			}
+			for (const auto& value : { json(-1), json(1.5), json(true), json("1"), json(nullptr) }) {
+				const auto error = DevBenchBounds::Validate(json{ { field, value } });
+				Check(error && error->invalidType && error->bound.field == field,
+					"non-unsigned JSON bound was admitted");
+			}
+		}
+		Check(!DevBenchBounds::Validate(json::parse(R"({"maxFrames":1,"maxScopeDepth":32})")),
+			"positive integers from the real JSON parser were rejected");
+		Check(DevBenchBounds::Validate(json::parse(R"({"maxEvents":18446744073709551616})"))->invalidType,
+			"integer beyond uint64 range was admitted as floating point");
+		Check(!DevBenchBounds::Validate(json::object()), "omitted bounds did not retain defaults");
+	}
+
+	void TestDevBenchMinimumEventBudget()
+	{
+		auto config = DevBenchBounds::DefaultConfig();
+		auto catalogueConfig = config;
+		catalogueConfig.maxEvents = 0;
+		const auto fixedBytes = Collector::RequiredStorageBytes(catalogueConfig);
+		catalogueConfig.maxEvents = 1;
+		const auto minimumBytes = Collector::RequiredStorageBytes(catalogueConfig);
+		Collector collector;
+		config.maxBytes = fixedBytes + 1;
+		Check(collector.Start(config) == StartResult::kInvalidBounds,
+			"catalogue threshold unexpectedly admitted a partial event slot");
+		config.maxBytes = minimumBytes - 1;
+		Check(collector.Start(config) == StartResult::kInvalidBounds, "partial event slot was admitted");
+		config.maxBytes = minimumBytes;
+		Check(collector.Start(config) == StartResult::kStarted, "exact one-event byte budget was rejected");
+		Check(collector.Stop().has_value(), "minimum-budget capture did not stop");
+		config.maxResourceObservations *= 2;
+		Check(collector.Start(config) == StartResult::kInvalidBounds,
+			"changed catalogue bounds reused the default byte minimum");
 	}
 
 	void TestNestedScopes()
@@ -285,6 +349,9 @@ int main()
 {
 	try {
 		TestBoundsValidation();
+		TestDevBenchDefaultBudget();
+		TestDevBenchJsonBounds();
+		TestDevBenchMinimumEventBudget();
 		TestNestedScopes();
 		TestCapacityLimits();
 		TestFrameLimit();

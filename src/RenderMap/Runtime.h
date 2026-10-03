@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RenderMap/Collector.h"
+#include "RenderMap/TransferVersionPolicy.h"
 
 #include <bitset>
 #include <cstdint>
@@ -48,6 +49,12 @@ namespace CSX::RenderMap
 		kCommandListObservation = 28,
 		kFinishCommandList = 29,
 		kExecuteCommandList = 30,
+		kPostProcessingBoundary = 31,
+		kRasterState = 32,
+		kTransferResourceAccess = 33,
+		kEyePublication = 34,
+		kTransferOperation = 35,
+		kTransferCopyRegion = 36,
 	};
 
 	enum class DeviceContextKind : std::uint8_t
@@ -229,6 +236,43 @@ namespace CSX::RenderMap
 	class Runtime
 	{
 	public:
+		class PostProcessingScope
+		{
+		public:
+			~PostProcessingScope();
+			PostProcessingScope(const PostProcessingScope&) = delete;
+			PostProcessingScope& operator=(const PostProcessingScope&) = delete;
+
+		private:
+			friend class Runtime;
+			PostProcessingScope(Runtime& a_owner, const ResourceObservationInput& a_source,
+				const ResourceObservationInput& a_destination, std::uint32_t a_target,
+				std::uint64_t a_publicationGeneration) noexcept;
+			const Runtime* previousOwner = nullptr;
+			std::uint64_t previousGeneration = 0;
+			std::uint64_t previousOperation = 0;
+			Collector::ScopeGuard scope;
+		};
+
+		/** Bound observations to the exact original engine post-processing call. */
+		PostProcessingScope EnterPostProcessing(const ResourceObservationInput& a_source,
+			const ResourceObservationInput& a_destination, std::uint32_t a_target,
+			std::uint64_t a_publicationGeneration) noexcept;
+		bool IsInsidePostProcessing() const noexcept;
+		/** Correlate one operation with its queried native shader-stage bindings. */
+		void BeginTransferOperation(std::uintptr_t a_context, bool a_compute,
+			std::uint32_t a_operation, const std::array<std::uintptr_t, 6>& a_shaders) noexcept;
+		/** Record a queried raster slot immediately before an observed operation. */
+		void RecordRasterState(std::uintptr_t a_context, std::uint32_t a_slot,
+			const std::array<float, 6>& a_viewport, const std::array<std::int32_t, 4>& a_scissor,
+			std::uint32_t a_viewportCount, std::uint32_t a_scissorCount, bool a_scissorEnabled) noexcept;
+		/** Record bound candidates and observed command epochs, never pixel identity. */
+		void RecordTransferResourceAccess(std::uintptr_t a_context, const ResourceViewInput& a_view,
+			ResourceStage a_stage, std::uint32_t a_slot, bool a_write) noexcept;
+		void RecordTransferCopyRegion(std::uintptr_t a_context, std::uint32_t a_sourceSubresource,
+			std::uint32_t a_destinationSubresource, const std::array<std::uint32_t, 3>& a_destination,
+			const std::array<std::uint32_t, 6>& a_sourceBox, bool a_hasSourceBox) noexcept;
+
 		StartResult StartCapture(const CollectorConfig& a_config);
 		std::optional<CaptureSnapshot> StopCapture(
 			StopReason a_reason = StopReason::kRequested,
@@ -345,7 +389,7 @@ namespace CSX::RenderMap
 			float a_uMax,
 			float a_vMax,
 			std::uint32_t a_submitFlags,
-			std::uint64_t a_compositorCycle) noexcept;
+			std::uint64_t a_compositorCycle, std::uint64_t a_publicationGeneration = 0) noexcept;
 		void RecordDraw(
 			std::uintptr_t a_context,
 			DrawOperation a_operation,
@@ -530,6 +574,8 @@ namespace CSX::RenderMap
 			std::uint64_t a_commandStreamSequence) noexcept;
 
 		Collector collector;
+		std::mutex transferVersionMutex;
+		TransferVersions transferVersions;
 		// Serializes reset-before-publish capture transitions with shutdown.
 		std::mutex captureLifecycleMutex;
 		std::atomic_uintptr_t immediateContext{ 0 };

@@ -12,6 +12,10 @@ gaps are represented explicitly. Stopping a capture produces an immutable
 completed-capture snapshot which the artifact layer can serialize without
 holding render-thread state.
 
+CPU-access payloads use JSON null for unavailable visibility and publication
+boundaries. Successful readable maps establish CPU visibility; only matched
+writable unmaps establish GPU publication.
+
 The runtime, its D3D and engine hooks, and its integration call sites are
 developer instrumentation. They are compiled only when
 `DEVBENCH_BRIDGE=ON`. A normal release build with `DEVBENCH_BRIDGE=OFF`
@@ -60,3 +64,71 @@ optional external control surface over this runtime. Shader dependency
 analysis, generated shader manifests, engine maps, Ghidra helpers, prior-art
 catalogues, and captured-analysis reports remain development tools; they do
 not enter the Community Shaders binary in either build mode.
+
+## Optional DevBench bounds contract
+
+`communityshaders.render_map` publishes registry, status, start, stop and
+completed-event paging through the shared versioned service envelope. Contract
+1.21/schema revision 23 retains field-specific `invalid_bounds` errors with
+the original value and independent minimum/maximum. Supplied bounds must be
+unsigned JSON integers and are checked before narrowing or duration conversion.
+
+The registry and serializer share the current payload schema catalogue. It
+contains exactly the reachable outputs, including both geometry-boundary
+versions, `device-context-observation-v2`, `draw-call-v4` and `dispatch-call-v2`.
+Obsolete, unreachable versions are omitted. Source checks enforce both
+inventory directions; the controller fixture serializes every payload variant
+and compares the emitted set with the advertised catalogue.
+
+The registry byte minimum describes its default catalogue profile. Each start
+request recomputes `minimumMaxBytes` using the requested catalogue sizes and
+one complete event slot. A smaller budget returns field-specific details
+containing `maxBytes`, `fixedCatalogueBytes`, `eventStorageUnitBytes` and
+`minimumMaxBytes` before capture starts. The default collector test shares the
+adapter's exact default configuration; the exact one-event minimum is admitted.
+
+Capture start prepares its retained provenance and success response before
+activating hooks, under the controller's start transaction. A failure in either
+preparation leaves no active or completed capture, event page, or artifact.
+Normal stop retains completed captures; it is not used for failed-start cleanup.
+Stop requires the original capture-start context and returns
+`capture_provenance_unavailable` if that context is absent, without rebuilding
+provenance at stop time.
+
+Artifact runtime identity uses the loaded SE/AE or VR executable family and
+CommonLib's observed runtime version. Missing exact version evidence is null.
+Observed shader compilation identity must agree with the loaded runtime family;
+a contradiction returns `capture_provenance_unavailable` before activation.
+
+Implemented command-recording and command-list event kinds are selectable for
+bounded qualification captures. The registry continues to advertise
+`deferredContexts: false` and `commandLists: false` until the documented live
+deferred-vtable gate passes; selection alone does not establish hook coverage.
+
+## Original post-processing observations
+
+Render-event 1.18 adds scoped original `Main_PostProcessing` boundaries,
+native shader bindings, raster viewport/scissor slots, resource/view access
+candidates, copy regions and accepted OpenVR publication records. Selecting
+eye-submit or transfer events expands the draw/dispatch/flow and declaration
+dependencies. The boundary names the main resource as a candidate and the
+existing destination as destination-before; neither establishes an actual
+shader source. Draw/dispatch reads are queried before the native command and
+write-capable bindings after it. Copy/resolve observations follow their
+native calls. Command-stream order and operation IDs correlate these records.
+
+The version ledger holds at most 256 resource command epochs per capture.
+Epochs are admitted only after their defining event is recorded and are
+withheld across frames, captures, unobserved execution and failed admission.
+Accepted per-eye publication records carry the actual current render-target
+lease generation and nullable same-frame command epoch alongside the existing
+OpenVR bounds. These are observed bindings and queued commands: they do not
+establish shader pixel reads/writes, GPU completion, native object lifetime,
+subresource versions or a causal pixel transfer to the headset.
+
+Capture summary and manifest 1.8 retain the version-resource capacity and
+observed admission failures. Those failures mark the artifact incomplete;
+ordinary event/catalogue losses retain their existing separate counters.
+No new capture setter, D3D state mutation or renderer selection is introduced.
+Instrumentation is opt-in and may add frame cost. Native fixture execution
+and live SE/AE/VR qualification are separate from source checks.

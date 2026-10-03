@@ -703,10 +703,10 @@ void VolumetricLighting::ClearVolumetricLightingTargets()
 	auto clearRT = [&](RE::RENDER_TARGET index) {
 		auto& target = renderer->GetRuntimeData().renderTargets[index];
 		if (target.RTV) {
-			context->ClearRenderTargetView(target.RTV, clearColor);
+			context->ClearRenderTargetView(REX::W32::AsReal(target.RTV), clearColor);
 		}
 		if (target.UAV) {
-			context->ClearUnorderedAccessViewFloat(target.UAV, clearColor);
+			context->ClearUnorderedAccessViewFloat(REX::W32::AsReal(target.UAV), clearColor);
 		}
 	};
 
@@ -765,7 +765,7 @@ VolumetricLighting::VolumetricLightingDescriptor* VolumetricLighting::ApplyVolum
 	const bool needsColorTuning =
 		hasActiveProfile &&
 		(!VolumetricLightingTuning::IsNear(profile.Saturation, 1.0f) ||
-		 !VolumetricLightingTuning::IsNear(profile.CustomColorContribution, 0.0f));
+			!VolumetricLightingTuning::IsNear(profile.CustomColorContribution, 0.0f));
 	if (VolumetricLightingTuning::IsNear(intensityScale, 1.0f) && !needsColorTuning)
 		return descriptor;
 

@@ -1034,7 +1034,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 						bounds.uMax,
 						bounds.vMax,
 						static_cast<std::uint32_t>(submitPacket.flags),
-						compositorCycleToken);
+						compositorCycleToken, submitPacket.publicationLease.generation);
 				}
 #endif
 				uint64_t completionScopeEpoch =
