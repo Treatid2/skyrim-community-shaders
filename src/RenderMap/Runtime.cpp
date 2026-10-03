@@ -766,7 +766,7 @@ namespace CSX::RenderMap
 																					 static_cast<std::uint32_t>(a_scissor[0]) | (static_cast<std::uint64_t>(static_cast<std::uint32_t>(a_scissor[1])) << 32u),
 																					 static_cast<std::uint32_t>(a_scissor[2]) | (static_cast<std::uint64_t>(static_cast<std::uint32_t>(a_scissor[3])) << 32u),
 																					 a_viewportCount | (static_cast<std::uint64_t>(a_scissorCount) << 32u),
-																					 (transferOperation << 1u) | a_scissorEnabled,
+																					 (transferOperation << 1u) | static_cast<std::uint64_t>(a_scissorEnabled),
 																				 } },
 			EnsureImmediateContextObservation(), postProcessingGeneration, NextCommandStreamSequence());
 	}
@@ -809,7 +809,7 @@ namespace CSX::RenderMap
 																									version.command,
 																									static_cast<std::uint64_t>(a_stage),
 																									a_slot,
-																									a_write | (static_cast<std::uint64_t>(capacityAvailable) << 1u) | (static_cast<std::uint64_t>(a_view.view.kind) << 8u),
+																									static_cast<std::uint64_t>(a_write) | (static_cast<std::uint64_t>(capacityAvailable) << 1u) | (static_cast<std::uint64_t>(a_view.view.kind) << 8u),
 																									transferOperation,
 																								} },
 				context, generation, sequence);

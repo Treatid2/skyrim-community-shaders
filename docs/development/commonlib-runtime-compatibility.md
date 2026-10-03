@@ -19,6 +19,18 @@ the existing owners alive. Those representation bridges preserve the
 existing NVIDIA/DLSS resource lifetime and selection policy. The submit
 input freshness contract checks the corresponding native resource identity.
 
+Integrated diagnostic compositions must retain these consumer bridges when
+selecting this dependency. Its renderer slots use REX graphics pointers;
+native D3D descriptors, COM queries and dispatch arguments use the Windows
+SDK representations. Slot assignments bridge back with `AsW32`, without
+transferring ownership. Plugin exports use the dependency's current SKSE
+macros, and the material texture-set spin lock uses `textureSetLock`.
+
+Post-processing payload flags explicitly widen booleans before combining
+them with 64-bit operation identifiers. This preserves their existing wire
+bits while satisfying the production warning policy. The runtime fixture
+checks both scissor states, operation identity and resource admission bits.
+
 The dependency's `tests/RE/RuntimeWeatherSafety.test.cpp` covers all 256
 precipitation bytes, equality and adjacent transition boundaries, mixed
 and missing weather, direct normalized-byte use, and guarded mutable/const

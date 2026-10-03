@@ -2368,6 +2368,7 @@ namespace
 			runtime.RecordRasterState(0xA000, 0, { 2, 3, 64, 32, 0, 1 }, { -1, 0, 64, 32 }, 1, 1, true);
 			runtime.RecordTransferResourceAccess(0xA000, { .resource = resource }, ResourceStage::kOutputMerger, 0, true);
 			runtime.BeginTransferOperation(0xA000, true, 0, { 1, 2, 3, 4, 5, 7 });
+			runtime.RecordRasterState(0xA000, 0, { 2, 3, 64, 32, 0, 1 }, { -1, 0, 64, 32 }, 1, 1, false);
 			runtime.RecordTransferResourceAccess(0xA000, { .resource = resource }, ResourceStage::kCompute, 2, false);
 		}
 		Check(!runtime.IsInsidePostProcessing(), "post-processing scope leaked");
@@ -2379,12 +2380,20 @@ namespace
 		std::uint64_t writeVersion = 0;
 		std::uint64_t operation = 0;
 		std::size_t publications = 0;
+		std::size_t rasterStates = 0;
 		for (const auto& event : capture->events) {
 			const auto schema = static_cast<PayloadSchema>(event.payload.schema);
 			if (schema == PayloadSchema::kTransferOperation)
 				operation = event.payload.words[0];
+			if (schema == PayloadSchema::kRasterState) {
+				Check(operation && (event.payload.words[7] >> 1u) == operation,
+					"raster flags corrupted the command operation");
+				Check((event.payload.words[7] & 1u) == (rasterStates++ == 0 ? 1u : 0u),
+					"raster flags lost enabled or disabled scissor state");
+			}
 			if (schema == PayloadSchema::kTransferResourceAccess) {
 				Check(operation && event.payload.words[7] == operation, "resource access borrowed another operation");
+				Check((event.payload.words[6] & 2u) == 2u, "resource flags lost capacity admission");
 				if (event.payload.words[6] & 1u) {
 					writeVersion = event.payload.words[2];
 					Check(writeVersion && event.payload.words[3], "recorded write omitted its command epoch");
@@ -2401,7 +2410,8 @@ namespace
 						"successor frame inherited the left-eye epoch");
 			}
 		}
-		Check(writeVersion && publications == 2, "transfer fixture did not retain both publication records");
+		Check(writeVersion && publications == 2 && rasterStates == 2,
+			"transfer fixture did not retain publication and raster records");
 
 		Check(runtime.StartCapture(config) == StartResult::kStarted, "turnover source capture did not start");
 		runtime.SetCpuFrame(12);
