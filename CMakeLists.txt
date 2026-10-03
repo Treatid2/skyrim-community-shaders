@@ -2437,6 +2437,31 @@ if(BUILD_CONTROLLER_TESTS)
     add_test(NAME ScreenshotDispatch COMMAND screenshot_dispatch_test)
     set_tests_properties(ScreenshotDispatch PROPERTIES LABELS "ControllerTests")
 
+    set(_screenshot_worker_test_dir "${CMAKE_CURRENT_BINARY_DIR}/screenshot-worker-test")
+    set(_screenshot_worker_test_headers
+        "${_screenshot_worker_test_dir}/screenshot_worker_types_under_test.h"
+        "${_screenshot_worker_test_dir}/screenshot_worker_lanes_under_test.h"
+    )
+    add_custom_command(
+        OUTPUT ${_screenshot_worker_test_headers}
+        COMMAND "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}"
+            "-DOUTPUT_DIRECTORY=${_screenshot_worker_test_dir}" -P
+            "${PROJECT_SOURCE_DIR}/tests/extract_screenshot_worker_lanes.cmake"
+        DEPENDS src/Features/ScreenshotApi.cpp src/Features/ScreenshotApi.h
+            tests/extract_screenshot_worker_lanes.cmake
+        VERBATIM
+    )
+    add_executable(screenshot_worker_lanes_test EXCLUDE_FROM_ALL
+        tests/screenshot_worker_lanes_test.cpp ${_screenshot_worker_test_headers}
+    )
+    target_compile_features(screenshot_worker_lanes_test PRIVATE cxx_std_23)
+    target_include_directories(screenshot_worker_lanes_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/src" "${_screenshot_worker_test_dir}"
+    )
+    target_link_libraries(screenshot_worker_lanes_test PRIVATE nlohmann_json::nlohmann_json)
+    add_test(NAME ScreenshotWorkerLanes COMMAND screenshot_worker_lanes_test)
+    set_tests_properties(ScreenshotWorkerLanes PROPERTIES LABELS "ControllerTests")
+
     add_executable(
         api_upscaling_contract_test
         EXCLUDE_FROM_ALL
@@ -2702,6 +2727,7 @@ if(BUILD_CONTROLLER_TESTS)
             screenshot_manifest_snapshot_test
             screenshot_capture_present_test
             screenshot_dispatch_test
+            screenshot_worker_lanes_test
             api_upscaling_contract_test
             api_upscaling_service_policy_test
             api_shader_service_policy_test
