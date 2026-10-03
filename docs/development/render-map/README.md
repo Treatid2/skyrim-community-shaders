@@ -12,6 +12,10 @@ gaps are represented explicitly. Stopping a capture produces an immutable
 completed-capture snapshot which the artifact layer can serialize without
 holding render-thread state.
 
+CPU-access payloads use JSON null for unavailable visibility and publication
+boundaries. Successful readable maps establish CPU visibility; only matched
+writable unmaps establish GPU publication.
+
 The runtime, its D3D and engine hooks, and its integration call sites are
 developer instrumentation. They are compiled only when
 `DEVBENCH_BRIDGE=ON`. A normal release build with `DEVBENCH_BRIDGE=OFF`

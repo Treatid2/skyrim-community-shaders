@@ -45,6 +45,48 @@ namespace
 		Check(emitted == advertised, "registry advertises an unreachable payload schema");
 	}
 
+	void TestResourceCpuAccessBoundaries()
+	{
+		struct Case
+		{
+			ResourceCpuAccessPhase phase;
+			std::uint32_t mapType;
+			std::uint32_t result;
+			std::uint64_t mapObservationId;
+			bool visible;
+			bool published;
+		};
+		const Case cases[] = {
+			{ ResourceCpuAccessPhase::kMap, 1, 0, 9, true, false },
+			{ ResourceCpuAccessPhase::kMap, 3, 0, 9, true, false },
+			{ ResourceCpuAccessPhase::kMap, 2, 0, 9, false, false },
+			{ ResourceCpuAccessPhase::kMap, 4, 0, 9, false, false },
+			{ ResourceCpuAccessPhase::kMap, 5, 0, 9, false, false },
+			{ ResourceCpuAccessPhase::kMap, 1, 0x80004005u, 0, false, false },
+			{ ResourceCpuAccessPhase::kUnmap, 1, 0, 9, false, false },
+			{ ResourceCpuAccessPhase::kUnmap, 2, 0, 9, false, true },
+			{ ResourceCpuAccessPhase::kUnmap, 3, 0, 9, false, true },
+			{ ResourceCpuAccessPhase::kUnmap, 4, 0, 9, false, true },
+			{ ResourceCpuAccessPhase::kUnmap, 5, 0, 9, false, true },
+			{ ResourceCpuAccessPhase::kUnmap, 2, 0, 0, false, false },
+		};
+		for (const auto& test : cases) {
+			EventRecord event{};
+			event.kind = EventKind::kResourceCpuAccess;
+			event.payload = {
+				.schema = static_cast<std::uint16_t>(PayloadSchema::kResourceCpuAccess),
+				.words = { static_cast<std::uint64_t>(test.phase), test.mapObservationId, 7, 0, test.mapType, 0, test.result, 0 },
+			};
+			const auto payload = SerializeEvent(event, "cpu-boundary-test", 42).at("payload");
+			Check(test.visible ? payload.at("visibilityBoundary") == "cpu-readable-after-map-return" :
+								 payload.at("visibilityBoundary").is_null(),
+				"CPU map visibility boundary has the wrong JSON value");
+			Check(test.published ? payload.at("publicationBoundary") == "gpu-visible-after-unmap-return" :
+								   payload.at("publicationBoundary").is_null(),
+				"CPU unmap publication boundary has the wrong JSON value");
+		}
+	}
+
 	CollectorConfig Config()
 	{
 		CollectorConfig config{
@@ -853,6 +895,7 @@ int main()
 	try {
 		TestTransferSerializationAndDurableAdmissionGap();
 		TestPayloadSchemaCatalogue();
+		TestResourceCpuAccessBoundaries();
 		TestRuntimeArtifactIdentity();
 		TestPreparedStartFailures();
 		TestPreparedStartSuccess();
