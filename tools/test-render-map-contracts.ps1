@@ -56,6 +56,18 @@ $eventSchemaPath = Join-Path $schemaRoot 'render-event.schema.json'
 $graphSchemaPath = Join-Path $schemaRoot 'render-graph.schema.json'
 $eventSchema = Get-Content -Raw -LiteralPath $eventSchemaPath | ConvertFrom-Json -Depth 100
 $null = Get-Content -Raw -LiteralPath $graphSchemaPath | ConvertFrom-Json -Depth 100
+$serializerSource = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src/RenderMap/Serialization.cpp')
+$bridgeSource = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src/RenderMap/DevBenchBridge.cpp')
+$inventory = [regex]::Match($bridgeSource, '(?s)"eventSchemas",\s*json::array\(\{(?<schemas>.*?)\}\)')
+Assert-True $inventory.Success 'Render-map registry has no event schema inventory'
+$advertisedSchemas = @([regex]::Matches($inventory.Groups['schemas'].Value, '"(?<name>[a-z][a-z0-9-]*-v\d+)"') |
+    ForEach-Object { $_.Groups['name'].Value })
+$serializedSchemas = @([regex]::Matches($serializerSource, '\{\s*"schema",\s*"(?<name>[a-z][a-z0-9-]*-v\d+)"') |
+    ForEach-Object { $_.Groups['name'].Value } | Sort-Object -Unique)
+Assert-True ($serializedSchemas.Count -gt 0) 'Render-map serializer has no literal payload schema families'
+foreach ($serializedSchema in $serializedSchemas) {
+    Assert-True ($advertisedSchemas -contains $serializedSchema) "Registry omits serialized payload schema $serializedSchema"
+}
 $fixtureRoot = Join-Path $repoRoot 'tests/fixtures/render-map'
 $fixtureEventsPath = Join-Path $fixtureRoot 'deferred-command-events.json'
 $fixtureEdgeCasesPath = Join-Path $fixtureRoot 'deferred-command-edge-cases.json'

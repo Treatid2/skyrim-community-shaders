@@ -69,6 +69,10 @@ completed-event paging through the shared versioned service envelope. Contract
 the original value and independent minimum/maximum. Supplied bounds must be
 unsigned JSON integers and are checked before narrowing or duration conversion.
 
+The registry advertises every payload schema family emitted by the serializer,
+including `device-context-observation-v2`, `draw-call-v4` and `dispatch-call-v2`.
+The source contract checks this inventory against the serializer.
+
 The registry byte minimum describes its default catalogue profile. Each start
 request recomputes `minimumMaxBytes` using the requested catalogue sizes and
 one complete event slot. A smaller budget returns field-specific details
