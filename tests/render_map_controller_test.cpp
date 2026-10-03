@@ -816,6 +816,72 @@ namespace
 		std::filesystem::remove_all(root);
 	}
 
+	void TestSummaryAndManifestCompleteness()
+	{
+		struct Case
+		{
+			std::uint64_t CaptureStatistics::* counter;
+			const char* reason;
+			bool eventLoss;
+		};
+		const Case cases[] = {
+			{ &CaptureStatistics::droppedStopped, "event-loss", true },
+			{ &CaptureStatistics::droppedEventLimit, "event-loss", true },
+			{ &CaptureStatistics::droppedByteLimit, "event-loss", true },
+			{ &CaptureStatistics::scopeOverflow, "scope-overflow", false },
+			{ &CaptureStatistics::scopeMismatch, "scope-mismatch", false },
+			{ &CaptureStatistics::droppedShaderObservations, "shader-observation-loss", false },
+			{ &CaptureStatistics::droppedStageShaderObservations, "stage-shader-observation-loss", false },
+			{ &CaptureStatistics::droppedResourceObservations, "resource-observation-loss", false },
+			{ &CaptureStatistics::droppedTargetViewObservations, "target-view-observation-loss", false },
+			{ &CaptureStatistics::droppedTargetBindingObservations, "target-binding-observation-loss", false },
+			{ &CaptureStatistics::droppedSceneObjectObservations, "scene-object-observation-loss", false },
+			{ &CaptureStatistics::droppedGeometryObservations, "geometry-observation-loss", false },
+			{ &CaptureStatistics::droppedMaterialStateObservations, "material-state-observation-loss", false },
+		};
+		const auto root = std::filesystem::temp_directory_path() /
+		                  std::format("csx-render-map-completeness-test-{}", std::chrono::steady_clock::now().time_since_epoch().count());
+		std::uint64_t index = 0;
+		const auto verify = [&](CompletedCapture a_capture, const char* a_reason, bool a_evidenceLoss, bool a_eventLoss) {
+			a_capture.descriptor.captureId = std::format("capture-completeness-{}", ++index);
+			a_capture.snapshot.config = Config();
+			const auto summary = SerializeCaptureSummary(a_capture);
+			const auto bundle = WriteCaptureArtifacts(a_capture, ArtifactContext(root), 42);
+			Check(bundle.success, "completeness fixture could not publish artifacts");
+			std::ifstream stream(bundle.directory / "capture-manifest.json");
+			nlohmann::json manifest;
+			stream >> manifest;
+			const auto expected = a_reason ? nlohmann::json::array({ a_reason }) : nlohmann::json::array();
+			Check(summary["completion"]["incompleteReasons"] == expected &&
+					  manifest["extensions"]["csx.captureIncompleteReasons"] == expected,
+				"summary and manifest disagree on the exact incompleteness reasons");
+			Check(summary["completion"]["incomplete"] == (a_reason != nullptr) &&
+					  manifest["status"] == (a_reason ? "incomplete" : "complete") &&
+					  manifest["artifacts"][0]["complete"] == (a_reason == nullptr),
+				"summary and durable artifact disagree on evidence completeness");
+			Check(summary["completion"]["truncated"] == a_evidenceLoss &&
+					  manifest["completion"]["truncated"] == a_eventLoss &&
+					  manifest["completion"]["droppedEventCount"] == (a_eventLoss ? 1 : 0),
+				"evidence truncation was conflated with event loss or lifecycle failure");
+		};
+		for (const auto& test : cases) {
+			CompletedCapture capture;
+			capture.snapshot.statistics.*test.counter = 1;
+			verify(std::move(capture), test.reason, true, test.eventLoss);
+		}
+		for (const auto reason : { StopReason::kShutdown, StopReason::kFailure }) {
+			CompletedCapture capture;
+			capture.snapshot.stopReason = reason;
+			verify(std::move(capture), "lifecycle-failure", false, false);
+		}
+		CompletedCapture bounded;
+		bounded.snapshot.stopReason = StopReason::kFrameLimit;
+		bounded.snapshot.statistics.droppedFrameLimit = 1;
+		bounded.snapshot.statistics.droppedTimeLimit = 1;
+		verify(std::move(bounded), nullptr, false, false);
+		std::filesystem::remove_all(root);
+	}
+
 	void TestTransferSerializationAndDurableAdmissionGap()
 	{
 		const auto payload = [](PayloadSchema schema, std::array<std::uint64_t, 8> words) {
@@ -884,6 +950,10 @@ namespace
 				  manifest["extensions"]["csx.observedTransferVersionAdmissionFailures"] == 1 &&
 				  !manifest["completion"]["errors"].empty(),
 			"durable manifest concealed the version admission gap");
+		Check(manifest["extensions"]["csx.captureIncompleteReasons"] == summary["completion"]["incompleteReasons"] &&
+				  summary["completion"]["incompleteReasons"] == nlohmann::json::array({ "transfer-version-admission-failure" }) &&
+				  summary["completion"]["incomplete"] == true && manifest["completion"]["truncated"] == false,
+			"transfer admission failure diverged between summary and manifest projections");
 		stream.close();
 		std::filesystem::remove_all(root);
 	}
@@ -894,6 +964,7 @@ int main()
 {
 	try {
 		TestTransferSerializationAndDurableAdmissionGap();
+		TestSummaryAndManifestCompleteness();
 		TestPayloadSchemaCatalogue();
 		TestResourceCpuAccessBoundaries();
 		TestRuntimeArtifactIdentity();

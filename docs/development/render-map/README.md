@@ -129,6 +129,23 @@ subresource versions or a causal pixel transfer to the headset.
 Capture summary and manifest 1.8 retain the version-resource capacity and
 observed admission failures. Those failures mark the artifact incomplete;
 ordinary event/catalogue losses retain their existing separate counters.
+Summary `completion.truncated` reports lost event or structural evidence,
+including catalogue capacity, scope pairing, and transfer admission failures.
+Manifest `completion.truncated` specifically reports lost events, represented
+by a synthetic gap. Both outputs use the same reason model: summary
+`completion.incompleteReasons` and manifest extension
+`csx.captureIncompleteReasons` enumerate those failures and shutdown/failure
+termination. Lifecycle failure alone makes evidence incomplete without
+claiming truncation. The summary's `state: complete` means the capture has
+finished; `completion.incomplete` reports whether its evidence is incomplete.
+Frame/time bounds and intentional selector filtering remain separate counters.
+
+When `executionWithinSelectedGeometry` selects draws or dispatches, the
+resolved event mask includes paired geometry boundaries and their semantic
+declarations. The requested mask retains the user's selection. An eligible
+immediate draw can consume its prepared geometry identity after setup returns;
+deferred execution requires the selected geometry scope to be active.
+
 No new capture setter, D3D state mutation or renderer selection is introduced.
 Instrumentation is opt-in and may add frame cost. Native fixture execution
 and live SE/AE/VR qualification are separate from source checks.
