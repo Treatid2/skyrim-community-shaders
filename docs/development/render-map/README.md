@@ -65,13 +65,16 @@ not enter the Community Shaders binary in either build mode.
 
 `communityshaders.render_map` publishes registry, status, start, stop and
 completed-event paging through the shared versioned service envelope. Contract
-1.21/schema revision 22 retains field-specific `invalid_bounds` errors with
+1.21/schema revision 23 retains field-specific `invalid_bounds` errors with
 the original value and independent minimum/maximum. Supplied bounds must be
 unsigned JSON integers and are checked before narrowing or duration conversion.
 
-The registry advertises every payload schema family emitted by the serializer,
-including `device-context-observation-v2`, `draw-call-v4` and `dispatch-call-v2`.
-The source contract checks this inventory against the serializer.
+The registry and serializer share the current payload schema catalogue. It
+contains exactly the reachable outputs, including both geometry-boundary
+versions, `device-context-observation-v2`, `draw-call-v4` and `dispatch-call-v2`.
+Obsolete, unreachable versions are omitted. Source checks enforce both
+inventory directions; the controller fixture serializes every payload variant
+and compares the emitted set with the advertised catalogue.
 
 The registry byte minimum describes its default catalogue profile. Each start
 request recomputes `minimumMaxBytes` using the requested catalogue sizes and

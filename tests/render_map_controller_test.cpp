@@ -1,6 +1,7 @@
 #include "RenderMap/Artifacts.h"
 #include "RenderMap/CaptureStart.h"
 #include "RenderMap/Controller.h"
+#include "RenderMap/PayloadSchemaNames.h"
 #include "RenderMap/Serialization.h"
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <new>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -24,6 +26,23 @@ namespace
 	{
 		if (!a_condition)
 			throw std::runtime_error(std::string(a_message));
+	}
+
+	void TestPayloadSchemaCatalogue()
+	{
+		const std::set<std::string> advertised(
+			PayloadSchemaNames::kAll.begin(), PayloadSchemaNames::kAll.end());
+		Check(advertised.size() == PayloadSchemaNames::kAll.size(), "registry repeats payload schemas");
+		std::set<std::string> emitted;
+		for (std::uint16_t schema = 1; schema <= static_cast<std::uint16_t>(PayloadSchema::kTransferCopyRegion); ++schema) {
+			EventRecord event{};
+			event.payload.schema = schema;
+			const auto serialized = SerializeEvent(event, "catalogue-test", 42);
+			const auto name = serialized["payload"]["schema"].get<std::string>();
+			Check(advertised.contains(name), "serializer emits an unadvertised payload schema");
+			emitted.insert(name);
+		}
+		Check(emitted == advertised, "registry advertises an unreachable payload schema");
 	}
 
 	CollectorConfig Config()
@@ -833,6 +852,7 @@ int main()
 {
 	try {
 		TestTransferSerializationAndDurableAdmissionGap();
+		TestPayloadSchemaCatalogue();
 		TestRuntimeArtifactIdentity();
 		TestPreparedStartFailures();
 		TestPreparedStartSuccess();
