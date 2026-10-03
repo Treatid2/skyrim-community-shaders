@@ -1,5 +1,7 @@
 #include "RenderMap/Serialization.h"
 
+#include "RenderMap/PayloadSchemaNames.h"
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -518,7 +520,7 @@ namespace CSX::RenderMap
 			const auto observationId = a_payload.words[0];
 			if (!a_observation) {
 				return {
-					{ "schema", "shader-observation-v2" },
+					{ "schema", PayloadSchemaNames::kShaderObservationV2 },
 					{ "shaderObservationId", ShaderObservationId(observationId, a_generation) },
 					{ "shaderPointer", PointerEvidence(a_payload.words[1]) },
 					{ "pointerGeneration", a_payload.words[2] },
@@ -527,7 +529,7 @@ namespace CSX::RenderMap
 				};
 			}
 			return {
-				{ "schema", "shader-observation-v2" },
+				{ "schema", PayloadSchemaNames::kShaderObservationV2 },
 				{ "shaderObservationId", ShaderObservationId(observationId, a_generation) },
 				{ "shaderPointer", PointerEvidence(a_observation->pointerEvidence) },
 				{ "pointerGeneration", a_observation->pointerGeneration },
@@ -556,7 +558,7 @@ namespace CSX::RenderMap
 			const auto observationId = a_payload.words[0];
 			if (!a_observation) {
 				return {
-					{ "schema", "stage-shader-observation-v3" },
+					{ "schema", PayloadSchemaNames::kStageShaderObservationV3 },
 					{ "stageShaderObservationId", StageShaderObservationId(stage, observationId, a_generation) },
 					{ "stage", ShaderStageName(stage) },
 					{ "d3dObjectPointer", PointerEvidence(a_payload.words[1]) },
@@ -582,7 +584,7 @@ namespace CSX::RenderMap
 				});
 			}
 			return {
-				{ "schema", "stage-shader-observation-v3" },
+				{ "schema", PayloadSchemaNames::kStageShaderObservationV3 },
 				{ "stageShaderObservationId", StageShaderObservationId(
 												  a_observation->stage, observationId, a_generation) },
 				{ "stage", ShaderStageName(a_observation->stage) },
@@ -613,7 +615,7 @@ namespace CSX::RenderMap
 			const auto observationId = a_payload.words[0];
 			if (!a_observation) {
 				return {
-					{ "schema", "scene-object-observation-v1" },
+					{ "schema", PayloadSchemaNames::kSceneObjectObservationV1 },
 					{ "sceneObjectObservationId", SceneObjectObservationId(observationId, a_generation) },
 					{ "referencePointer", PointerEvidence(a_payload.words[1]) },
 					{ "pointerGeneration", a_payload.words[2] },
@@ -621,7 +623,7 @@ namespace CSX::RenderMap
 				};
 			}
 			return {
-				{ "schema", "scene-object-observation-v1" },
+				{ "schema", PayloadSchemaNames::kSceneObjectObservationV1 },
 				{ "sceneObjectObservationId", SceneObjectObservationId(observationId, a_generation) },
 				{ "referencePointer", PointerEvidence(a_observation->pointerEvidence) },
 				{ "pointerGeneration", a_observation->pointerGeneration },
@@ -647,7 +649,7 @@ namespace CSX::RenderMap
 			const auto observationId = a_payload.words[0];
 			if (!a_observation) {
 				return {
-					{ "schema", "geometry-observation-v1" },
+					{ "schema", PayloadSchemaNames::kGeometryObservationV1 },
 					{ "geometryObservationId", GeometryObservationId(observationId, a_generation) },
 					{ "geometryPointer", PointerEvidence(a_payload.words[1]) },
 					{ "pointerGeneration", a_payload.words[2] },
@@ -655,7 +657,7 @@ namespace CSX::RenderMap
 				};
 			}
 			return {
-				{ "schema", "geometry-observation-v1" },
+				{ "schema", PayloadSchemaNames::kGeometryObservationV1 },
 				{ "geometryObservationId", GeometryObservationId(observationId, a_generation) },
 				{ "geometryPointer", PointerEvidence(a_observation->pointerEvidence) },
 				{ "pointerGeneration", a_observation->pointerGeneration },
@@ -683,7 +685,7 @@ namespace CSX::RenderMap
 			const auto observationId = a_payload.words[0];
 			if (!a_observation) {
 				return {
-					{ "schema", "material-state-observation-v1" },
+					{ "schema", PayloadSchemaNames::kMaterialStateObservationV1 },
 					{ "materialStateObservationId", MaterialStateObservationId(observationId, a_generation) },
 					{ "shaderPropertyPointer", PointerEvidence(a_payload.words[1]) },
 					{ "materialPointer", PointerEvidence(a_payload.words[2]) },
@@ -707,7 +709,7 @@ namespace CSX::RenderMap
 				});
 			}
 			return {
-				{ "schema", "material-state-observation-v1" },
+				{ "schema", PayloadSchemaNames::kMaterialStateObservationV1 },
 				{ "materialStateObservationId", MaterialStateObservationId(observationId, a_generation) },
 				{ "stateRevision", a_observation->stateRevision },
 				{ "fingerprint", std::format("0x{:016X}", a_observation->fingerprint) },
@@ -746,7 +748,7 @@ namespace CSX::RenderMap
 				}
 			}
 			return {
-				{ "schema", "render-target-binding-v2" },
+				{ "schema", PayloadSchemaNames::kRenderTargetBindingV2 },
 				{ "source", TargetBindingSourceName(a_source) },
 				{ "targetBindingObservationId", TargetBindingObservationId(a_observationId, a_generation) },
 				{ "renderTargetObservationIds", std::move(renderTargets) },
@@ -1187,7 +1189,7 @@ namespace CSX::RenderMap
 			switch (static_cast<PayloadSchema>(a_payload.schema)) {
 			case PayloadSchema::kRenderPassBoundary:
 				return {
-					{ "schema", "render-pass-boundary-v1" },
+					{ "schema", PayloadSchemaNames::kRenderPassBoundaryV1 },
 					{ "renderPassPointer", PointerEvidence(a_payload.words[0]) },
 					{ "geometryPointer", PointerEvidence(a_payload.words[1]) },
 					{ "technique", a_payload.words[2] },
@@ -1197,7 +1199,7 @@ namespace CSX::RenderMap
 				};
 			case PayloadSchema::kTechniqueBoundary:
 				return {
-					{ "schema", "technique-boundary-v2" },
+					{ "schema", PayloadSchemaNames::kTechniqueBoundaryV2 },
 					{ "shaderObservationId", ShaderObservationId(a_payload.words[0], a_generation) },
 					{ "shaderPointer", PointerEvidence(a_payload.words[1]) },
 					{ "shaderType", a_payload.words[2] },
@@ -1208,7 +1210,7 @@ namespace CSX::RenderMap
 				};
 			case PayloadSchema::kGeometryBoundary:
 				return {
-					{ "schema", "geometry-boundary-v1" },
+					{ "schema", PayloadSchemaNames::kGeometryBoundaryV1 },
 					{ "shaderPointer", PointerEvidence(a_payload.words[0]) },
 					{ "renderPassPointer", PointerEvidence(a_payload.words[1]) },
 					{ "geometryPointer", PointerEvidence(a_payload.words[2]) },
@@ -1218,7 +1220,7 @@ namespace CSX::RenderMap
 				};
 			case PayloadSchema::kGeometryBoundaryV2:
 				return {
-					{ "schema", "geometry-boundary-v2" },
+					{ "schema", PayloadSchemaNames::kGeometryBoundaryV2 },
 					{ "shaderPointer", PointerEvidence(a_payload.words[0]) },
 					{ "renderPassPointer", PointerEvidence(a_payload.words[1]) },
 					{ "geometryPointer", PointerEvidence(a_payload.words[2]) },
@@ -1247,7 +1249,7 @@ namespace CSX::RenderMap
 				{
 					const auto flags = a_payload.words[6];
 					return {
-						{ "schema", "technique-resolution-v1" },
+						{ "schema", PayloadSchemaNames::kTechniqueResolutionV1 },
 						{ "inputVertexDescriptor", a_payload.words[0] },
 						{ "inputPixelDescriptor", a_payload.words[1] },
 						{ "resolvedVertexDescriptor", a_payload.words[2] },
@@ -1301,7 +1303,7 @@ namespace CSX::RenderMap
 						break;
 					}
 					return {
-						{ "schema", "draw-call-v4" },
+						{ "schema", PayloadSchemaNames::kDrawCallV4 },
 						{ "operation", DrawOperationName(operation) },
 						{ "deviceContextPointer", PointerEvidence(a_payload.words[0]) },
 						{ "vertexShaderObservationId", StageShaderObservationId(
@@ -1330,7 +1332,7 @@ namespace CSX::RenderMap
 																							 { "threadGroupCountZ", a_payload.words[5] },
 																						 };
 					return {
-						{ "schema", "dispatch-call-v2" },
+						{ "schema", PayloadSchemaNames::kDispatchCallV2 },
 						{ "operation", DispatchOperationName(operation) },
 						{ "deviceContextPointer", PointerEvidence(a_payload.words[0]) },
 						{ "computeShaderObservationId", StageShaderObservationId(
@@ -1340,7 +1342,7 @@ namespace CSX::RenderMap
 				}
 			case PayloadSchema::kDeviceContextObservation:
 				return {
-					{ "schema", "device-context-observation-v2" },
+					{ "schema", PayloadSchemaNames::kDeviceContextObservationV2 },
 					{ "deviceContextObservationId", DeviceContextObservationId(
 														a_payload.words[0], a_generation) },
 					{ "contextPointer", PointerEvidence(a_payload.words[1]) },
@@ -1351,7 +1353,7 @@ namespace CSX::RenderMap
 				};
 			case PayloadSchema::kCommandRecordingObservation:
 				return {
-					{ "schema", "command-recording-observation-v1" },
+					{ "schema", PayloadSchemaNames::kCommandRecordingObservationV1 },
 					{ "commandRecordingObservationId", CommandRecordingObservationId(a_payload.words[0], a_generation) },
 					{ "deviceContextObservationId", DeviceContextObservationId(a_payload.words[1], a_generation) },
 					{ "epoch", a_payload.words[2] },
@@ -1359,7 +1361,7 @@ namespace CSX::RenderMap
 				};
 			case PayloadSchema::kCommandListObservation:
 				return {
-					{ "schema", "command-list-observation-v2" },
+					{ "schema", PayloadSchemaNames::kCommandListObservationV2 },
 					{ "commandListObservationId", CommandListObservationId(a_payload.words[0], a_generation) },
 					{ "commandListPointer", PointerEvidence(a_payload.words[1]) },
 					{ "pointerGeneration", a_payload.words[2] },
@@ -1370,7 +1372,7 @@ namespace CSX::RenderMap
 				};
 			case PayloadSchema::kFinishCommandList:
 				return {
-					{ "schema", "finish-command-list-v2" },
+					{ "schema", PayloadSchemaNames::kFinishCommandListV2 },
 					{ "commandRecordingObservationId", CommandRecordingObservationId(a_payload.words[0], a_generation) },
 					{ "commandListObservationId", CommandListObservationId(a_payload.words[1], a_generation) },
 					{ "commandListPointer", PointerEvidence(a_payload.words[2]) },
@@ -1382,7 +1384,7 @@ namespace CSX::RenderMap
 				};
 			case PayloadSchema::kExecuteCommandList:
 				return {
-					{ "schema", "execute-command-list-v1" },
+					{ "schema", PayloadSchemaNames::kExecuteCommandListV1 },
 					{ "commandListObservationId", CommandListObservationId(a_payload.words[0], a_generation) },
 					{ "commandListPointer", PointerEvidence(a_payload.words[1]) },
 					{ "sourceCommandRecordingObservationId", CommandRecordingObservationId(a_payload.words[2], a_generation) },
@@ -1393,7 +1395,7 @@ namespace CSX::RenderMap
 					const auto kind = static_cast<TargetViewKind>(a_payload.words[3]);
 					const auto* observation = FindTargetViewObservation(a_snapshot, a_payload.words[0]);
 					return {
-						{ "schema", "target-view-observation-v1" },
+						{ "schema", PayloadSchemaNames::kTargetViewObservationV1 },
 						{ "targetViewObservationId", TargetViewObservationId(
 														 kind, a_payload.words[0], a_generation) },
 						{ "kind", TargetViewKindName(kind) },
@@ -1418,7 +1420,7 @@ namespace CSX::RenderMap
 				{
 					const auto* observation = FindResourceObservation(a_snapshot, a_payload.words[0]);
 					return {
-						{ "schema", "resource-observation-v1" },
+						{ "schema", PayloadSchemaNames::kResourceObservationV1 },
 						{ "resourceObservationId", ResourceObservationId(a_payload.words[0], a_generation) },
 						{ "d3dObjectPointer", PointerEvidence(observation ? observation->d3dObject : a_payload.words[1]) },
 						{ "pointerGeneration", observation ? observation->pointerGeneration : a_payload.words[2] },
@@ -1445,7 +1447,7 @@ namespace CSX::RenderMap
 					                          TargetViewKind::kShaderResource :
 					                          TargetViewKind::kUnorderedAccess;
 					return {
-						{ "schema", "resource-view-binding-v2" },
+						{ "schema", PayloadSchemaNames::kResourceViewBindingV2 },
 						{ "viewObservationId", TargetViewObservationId(viewKind, a_payload.words[0], a_generation) },
 						{ "bindingKind", bindingKind == ResourceBindingKind::kShaderResource ? "shader-resource" : "unordered-access" },
 						{ "stage", ResourceStageName(static_cast<ResourceStage>(a_payload.words[2])) },
@@ -1456,7 +1458,7 @@ namespace CSX::RenderMap
 				}
 			case PayloadSchema::kResourceViewStateObserved:
 				return {
-					{ "schema", "resource-view-state-observed-v1" },
+					{ "schema", PayloadSchemaNames::kResourceViewStateObservedV1 },
 					{ "bindingKind", static_cast<ResourceBindingKind>(a_payload.words[0]) ==
 											 ResourceBindingKind::kShaderResource ?
 										 "shader-resource" :
@@ -1502,7 +1504,7 @@ namespace CSX::RenderMap
 						break;
 					}
 					return {
-						{ "schema", "resource-flow-v1" },
+						{ "schema", PayloadSchemaNames::kResourceFlowV1 },
 						{ "operation", name },
 						{ "sourceResourceObservationId", ResourceObservationId(a_payload.words[1], a_generation) },
 						{ "destinationResourceObservationId", ResourceObservationId(a_payload.words[2], a_generation) },
@@ -1521,7 +1523,7 @@ namespace CSX::RenderMap
 					const auto readable = mapType == 1 || mapType == 3;
 					const auto writable = mapType >= 2 && mapType <= 5;
 					return {
-						{ "schema", "resource-cpu-access-v1" },
+						{ "schema", PayloadSchemaNames::kResourceCpuAccessV1 },
 						{ "phase", phase == ResourceCpuAccessPhase::kMap ? "map" : "unmap" },
 						{ "mapObservationId", CpuMapObservationId(a_payload.words[1], a_generation) },
 						{ "resourceObservationId", ResourceObservationId(a_payload.words[2], a_generation) },
@@ -1556,7 +1558,7 @@ namespace CSX::RenderMap
 					const auto readiness = static_cast<ResourceReadinessDomain>(a_payload.words[6]);
 					const auto eye = static_cast<Eye>(a_payload.words[7] & 0xFFu);
 					return {
-						{ "schema", "resource-version-observation-v1" },
+						{ "schema", PayloadSchemaNames::kResourceVersionObservationV1 },
 						{ "resourceVersionObservationId", ResourceVersionObservationId(a_payload.words[0], a_generation) },
 						{ "resourceObservationId", ResourceObservationId(a_payload.words[1], a_generation) },
 						{ "subresources", { { "first", a_payload.words[2] }, { "count", a_payload.words[3] } } },
@@ -1571,14 +1573,14 @@ namespace CSX::RenderMap
 				}
 			case PayloadSchema::kVisibilityCandidate:
 				return {
-					{ "schema", "visibility-candidate-v1" },
+					{ "schema", PayloadSchemaNames::kVisibilityCandidateV1 },
 					{ "objectPointer", PointerEvidence(a_payload.words[0]) },
 					{ "objectIndex", a_payload.words[1] },
 					{ "producerFrame", OptionalFrame(a_payload.words[2]) },
 				};
 			case PayloadSchema::kVisibilityResult:
 				return {
-					{ "schema", "visibility-result-ready-v1" },
+					{ "schema", PayloadSchemaNames::kVisibilityResultReadyV1 },
 					{ "resourceVersionObservationId", ResourceVersionObservationId(a_payload.words[0], a_generation) },
 					{ "viewObservationId", TargetViewObservationId(
 											   TargetViewKind::kShaderResource, a_payload.words[1], a_generation) },
@@ -1589,7 +1591,7 @@ namespace CSX::RenderMap
 				{
 					const auto flags = a_payload.words[7];
 					return {
-						{ "schema", "visibility-submission-v1" },
+						{ "schema", PayloadSchemaNames::kVisibilitySubmissionV1 },
 						{ "submissionObservationId", SubmissionObservationId(a_payload.words[0], a_generation) },
 						{ "renderPassPointer", PointerEvidence(a_payload.words[1]) },
 						{ "geometryPointer", PointerEvidence(a_payload.words[2]) },
@@ -1607,7 +1609,7 @@ namespace CSX::RenderMap
 				}
 			case PayloadSchema::kEyeSubmission:
 				return {
-					{ "schema", "eye-submission-v1" },
+					{ "schema", PayloadSchemaNames::kEyeSubmissionV1 },
 					{ "resourceObservationId", ResourceObservationId(a_payload.words[0], a_generation) },
 					{ "eye", EyeName(static_cast<Eye>(a_payload.words[1])) },
 					{ "eyeMask", a_payload.words[2] == 0 ? json(nullptr) : json(a_payload.words[2]) },
@@ -1622,7 +1624,7 @@ namespace CSX::RenderMap
 				};
 			case PayloadSchema::kCullDecision:
 				return {
-					{ "schema", "cull-decision-v1" },
+					{ "schema", PayloadSchemaNames::kCullDecisionV1 },
 					{ "resourceVersionObservationId", ResourceVersionObservationId(a_payload.words[0], a_generation) },
 					{ "objectIndex", a_payload.words[1] },
 					{ "producerVisible", a_payload.words[2] != 0 },

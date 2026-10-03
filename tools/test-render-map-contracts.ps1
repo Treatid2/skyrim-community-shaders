@@ -58,16 +58,24 @@ $eventSchema = Get-Content -Raw -LiteralPath $eventSchemaPath | ConvertFrom-Json
 $null = Get-Content -Raw -LiteralPath $graphSchemaPath | ConvertFrom-Json -Depth 100
 $serializerSource = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src/RenderMap/Serialization.cpp')
 $bridgeSource = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src/RenderMap/DevBenchBridge.cpp')
-$inventory = [regex]::Match($bridgeSource, '(?s)"eventSchemas",\s*json::array\(\{(?<schemas>.*?)\}\)')
-Assert-True $inventory.Success 'Render-map registry has no event schema inventory'
-$advertisedSchemas = @([regex]::Matches($inventory.Groups['schemas'].Value, '"(?<name>[a-z][a-z0-9-]*-v\d+)"') |
-    ForEach-Object { $_.Groups['name'].Value })
-$serializedSchemas = @([regex]::Matches($serializerSource, '\{\s*"schema",\s*"(?<name>[a-z][a-z0-9-]*-v\d+)"') |
-    ForEach-Object { $_.Groups['name'].Value } | Sort-Object -Unique)
-Assert-True ($serializedSchemas.Count -gt 0) 'Render-map serializer has no literal payload schema families'
-foreach ($serializedSchema in $serializedSchemas) {
-    Assert-True ($advertisedSchemas -contains $serializedSchema) "Registry omits serialized payload schema $serializedSchema"
+$catalogueSource = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src/RenderMap/PayloadSchemaNames.h')
+Assert-True ($bridgeSource.Contains('{ "eventSchemas", json(CSX::RenderMap::PayloadSchemaNames::kAll) }')) 'Registry must use the shared current schema catalogue'
+$definitions = @([regex]::Matches($catalogueSource, 'inline constexpr char (?<symbol>k\w+)\[\] = "(?<name>[a-z][a-z0-9-]*-v\d+)";'))
+$catalogue = [regex]::Match($catalogueSource, '(?s)kAll = std::to_array<const char\*>\(\{(?<symbols>.*?)\}\)')
+Assert-True $catalogue.Success 'Render-map payload catalogue is missing'
+$advertisedSymbols = @([regex]::Matches($catalogue.Groups['symbols'].Value, '\bk\w+\b') | ForEach-Object { $_.Value })
+$serializedSymbols = @([regex]::Matches($serializerSource, '\{\s*"schema",\s*PayloadSchemaNames::(?<symbol>k\w+)') | ForEach-Object { $_.Groups['symbol'].Value } | Sort-Object -Unique)
+Assert-True ($serializedSymbols.Count -gt 0) 'Render-map serializer has no named payload schema families'
+Assert-True ($advertisedSymbols.Count -eq @($advertisedSymbols | Sort-Object -Unique).Count) 'Registry advertises duplicate schema symbols'
+Assert-True ($definitions.Count -eq @($definitions | ForEach-Object { $_.Groups['name'].Value } | Sort-Object -Unique).Count) 'Catalogue defines duplicate schema names'
+foreach ($symbol in $serializedSymbols) {
+    Assert-True ($advertisedSymbols -contains $symbol) "Registry omits serialized payload schema $symbol"
 }
+foreach ($symbol in $advertisedSymbols) {
+    Assert-True ($serializedSymbols -contains $symbol) "Registry advertises unreachable payload schema $symbol"
+    Assert-True (@($definitions | Where-Object { $_.Groups['symbol'].Value -eq $symbol }).Count -eq 1) "Catalogue name is missing or ambiguous: $symbol"
+}
+Assert-True (-not [regex]::IsMatch($serializerSource, '\{\s*"schema",\s*"[a-z][a-z0-9-]*-v\d+"')) 'Serializer must use shared payload schema names'
 $fixtureRoot = Join-Path $repoRoot 'tests/fixtures/render-map'
 $fixtureEventsPath = Join-Path $fixtureRoot 'deferred-command-events.json'
 $fixtureEdgeCasesPath = Join-Path $fixtureRoot 'deferred-command-edge-cases.json'

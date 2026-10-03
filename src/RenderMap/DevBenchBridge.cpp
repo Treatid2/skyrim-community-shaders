@@ -10,6 +10,7 @@
 #	include "RenderMap/Controller.h"
 #	include "RenderMap/DevBenchCaptureBounds.h"
 #	include "RenderMap/Serialization.h"
+#	include "RenderMap/PayloadSchemaNames.h"
 #	include "ShaderCache.h"
 
 #	include <DevBenchAPI.h>
@@ -34,7 +35,7 @@ namespace
 	using CSX::RenderMap::ControlStatus;
 	constexpr std::uint32_t kContractMajor = 1;
 	constexpr std::uint32_t kContractMinor = 20;
-	constexpr std::uint32_t kSchemaRevision = 21;
+	constexpr std::uint32_t kSchemaRevision = 22;
 	using namespace CSX::RenderMap::DevBenchBounds;
 	constexpr auto kPlannedEventKinds =
 		CSX::RenderMap::EventKindBit(CSX::RenderMap::EventKind::kFrameBegin) |
@@ -293,7 +294,7 @@ namespace
 				{ "minor", kContractMinor },
 				{ "schemaRevision", kSchemaRevision },
 				{ "actions", json::array({ "registry", "status", "start", "stop", "capture_events" }) },
-				{ "eventSchemas", json::array({ "render-pass-boundary-v1", "technique-boundary-v2", "geometry-boundary-v1", "geometry-boundary-v2", "scene-object-observation-v1", "geometry-observation-v1", "material-state-observation-v1", "shader-observation-v2", "stage-shader-observation-v3", "technique-resolution-v1", "device-context-observation-v1", "device-context-observation-v2", "target-view-observation-v1", "resource-observation-v1", "resource-view-binding-v1", "resource-view-binding-v2", "resource-view-state-observed-v1", "resource-flow-v1", "resource-cpu-access-v1", "resource-version-observation-v1", "visibility-candidate-v1", "visibility-result-ready-v1", "visibility-submission-v1", "cull-decision-v1", "eye-submission-v1", "render-target-binding-v1", "render-target-binding-v2", "draw-call-v2", "draw-call-v3", "draw-call-v4", "dispatch-call-v1", "dispatch-call-v2", "command-recording-observation-v1", "command-list-observation-v2", "finish-command-list-v2", "execute-command-list-v1" }) },
+				{ "eventSchemas", json(CSX::RenderMap::PayloadSchemaNames::kAll) },
 				{ "eventKinds", CSX::RenderMap::SerializeEventKindMask(kSelectableEventKinds) },
 				{ "plannedEventKinds", CSX::RenderMap::SerializeEventKindMask(kPlannedEventKinds) },
 				{ "eventSelection", {
