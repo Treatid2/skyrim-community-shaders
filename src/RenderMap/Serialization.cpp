@@ -1545,12 +1545,12 @@ namespace CSX::RenderMap
 						{ "rowPitch", static_cast<std::uint32_t>(a_payload.words[7]) },
 						{ "depthPitch", static_cast<std::uint32_t>(a_payload.words[7] >> 32u) },
 						{ "visibilityBoundary", phase == ResourceCpuAccessPhase::kMap && succeeded && readable ?
-													"cpu-readable-after-map-return" :
-													nullptr },
+													json("cpu-readable-after-map-return") :
+													json(nullptr) },
 						{ "publicationBoundary", phase == ResourceCpuAccessPhase::kUnmap &&
 														 a_payload.words[1] != 0 && writable ?
-													 "gpu-visible-after-unmap-return" :
-													 nullptr },
+													 json("gpu-visible-after-unmap-return") :
+													 json(nullptr) },
 					};
 				}
 			case PayloadSchema::kResourceVersion:
