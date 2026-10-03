@@ -2426,6 +2426,14 @@ namespace CSX::RenderMap
 				collector.CountFiltered();
 				return;
 			}
+			if (!collector.IsExecutionAllowedByGeometryScope()) {
+				collector.CountFiltered();
+				MarkDeferredRecordingIncomplete(
+					a_context, context.captureGeneration, context.observationId,
+					recordingObservationId,
+					CommandRecordingIncompleteReason::kEventNotRecorded);
+				return;
+			}
 #if defined(CSX_RENDER_MAP_TESTING)
 			PauseDeferredPublicationBeforeAppendForTesting();
 #endif
@@ -2536,6 +2544,14 @@ namespace CSX::RenderMap
 			}
 			if (recordingObservationId == 0) {
 				collector.CountFiltered();
+				return;
+			}
+			if (!collector.IsExecutionAllowedByGeometryScope()) {
+				collector.CountFiltered();
+				MarkDeferredRecordingIncomplete(
+					a_context, context.captureGeneration, context.observationId,
+					recordingObservationId,
+					CommandRecordingIncompleteReason::kEventNotRecorded);
 				return;
 			}
 #if defined(CSX_RENDER_MAP_TESTING)
