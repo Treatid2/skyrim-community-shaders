@@ -2425,6 +2425,51 @@ namespace
 		}
 	}
 
+	void TestFailedPostWriteObservationClearsCommandEpoch()
+	{
+		for (const bool failResource : { false, true }) {
+			Runtime runtime;
+			runtime.SetImmediateContext(0xA000);
+			auto config = Config();
+			config.maxEvents = 128;
+			config.maxResourceObservations = 1;
+			config.maxTargetViewObservations = 1;
+			config.maxBytes = Collector::RequiredStorageBytes(config);
+			const ResourceObservationInput resource{ .d3dObject = 0xA100, .dimension = ResourceDimension::kTexture2D, .widthOrBytes = 64, .height = 32, .depthOrArraySize = 1, .mipLevels = 1 };
+			ResourceViewInput target{ .resource = resource,
+				.view = { .kind = TargetViewKind::kRenderTarget, .d3dObject = 0xA200 } };
+			Check(runtime.StartCapture(config) == StartResult::kStarted, "failed write observation capture did not start");
+			runtime.SetCpuFrame(12);
+			{
+				auto scope = runtime.EnterPostProcessing(resource, resource, 9, 77);
+				Check(runtime.IsInsidePostProcessing(), "failed write observation scope did not activate");
+				runtime.RecordTransferResourceAccess(0xA000, target, ResourceStage::kOutputMerger, 0, true);
+				runtime.RecordEyeSubmission(resource, Eye::kLeft, 1, 0, 0, 0.5f, 1, 0, 90, 77);
+				if (failResource)
+					target.resource.widthOrBytes = 128;
+				else
+					target.view.d3dObject = 0xA300;
+				runtime.RecordTransferResourceAccess(0xA000, target, ResourceStage::kOutputMerger, 0, true);
+			}
+			runtime.RecordEyeSubmission(resource, Eye::kRight, 2, 0.5f, 0, 1, 1, 0, 91, 78);
+			const auto capture = runtime.StopCapture();
+			Check(capture.has_value(), "failed write observation capture did not stop");
+			Check(failResource ? capture->statistics.droppedResourceObservations != 0 :
+								 capture->statistics.droppedTargetViewObservations != 0,
+				"failed post-write regression did not exhaust the intended catalogue");
+			std::size_t publications = 0;
+			for (const auto& event : capture->events) {
+				if (event.payload.schema != static_cast<std::uint16_t>(PayloadSchema::kEyePublication))
+					continue;
+				if (publications++ == 0)
+					Check(event.payload.words[1] && event.payload.words[2], "initial same-frame write did not establish an epoch");
+				else
+					Check(!event.payload.words[1] && !event.payload.words[2], "failed post-write observation published a stale command epoch");
+			}
+			Check(publications == 2, "failed post-write regression lost eye publication records");
+		}
+	}
+
 	void TestTransferVersionAdmissionAndTurnover()
 	{
 		TransferVersions versions;
@@ -2531,6 +2576,7 @@ namespace
 int main()
 {
 	try {
+		TestFailedPostWriteObservationClearsCommandEpoch();
 		TestTransferVersionAdmissionAndTurnover();
 		TestInactiveRuntime();
 		TestNestedBoundaries();
