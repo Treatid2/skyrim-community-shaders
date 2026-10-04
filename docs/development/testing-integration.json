@@ -1,0 +1,160 @@
+{
+    "schemaVersion": "csx.testing-composition-audit.1",
+    "capturedUtc": "2026-10-04T23:39:27.231423+00:00",
+    "cleanAcceptanceHead": "2d68a11b6e58603945b1519b37da1875f230ed1a",
+    "testingSourceCommitBeforeManifest": "89b0f5e165ba0f9fac2186ada3376ef4882f1516",
+    "sourceTreeBeforeManifest": "e4ba52f67cd67902b62a6464d8f41e4873452395",
+    "repository": "Treatid2/skyrim-community-shaders",
+    "branch": "codex/testing-integration-VR",
+    "includedCandidates": [
+        {
+            "pr": 45,
+            "commit": "6022ffeb18341ded34aea1cfd853755a1bf30ead",
+            "representation": "Corrected candidate already inherited through PR50",
+            "publishedHeadAtCapture": "161acbfc6008d2bcbafaae1df9f1672693f79fc3"
+        },
+        {
+            "pr": 46,
+            "commit": "d12ccd94f51f680c8fa483336ea27a2c169fe574",
+            "representation": "Current candidate already inherited through PR50"
+        },
+        {
+            "pr": 44,
+            "commit": "5410b4ba499413ed0fa382e0c0beaefd89070f60",
+            "representation": "Corrected candidate already inherited through PR50",
+            "publishedHeadAtCapture": "00031b7565d78bf4ef35ef0041db219f6f4c162a"
+        },
+        {
+            "pr": 50,
+            "commit": "ad8c7a2a8cf7dc9295d40dadd3f45da85fec4dd0",
+            "representation": "Starting mapping composition; contains reconciled PR47 scope"
+        },
+        {
+            "pr": 48,
+            "commit": "24d52369598635f8978929ce82ab13549954ad02",
+            "representation": "Deliberate integration merge"
+        },
+        {
+            "pr": 51,
+            "commit": "1bd694a7106f2ac2c31214e8aec3d1004c164f96",
+            "representation": "Deliberate integration merge"
+        }
+    ],
+    "preservedMappingObjects": [
+        {
+            "path": ".gitmodules",
+            "gitObject": "44557799db51f7691fecc11508d69028eb6c80b4",
+            "matchesMappingCandidate": true
+        },
+        {
+            "path": "vcpkg.json",
+            "gitObject": "d5c5d25c8bb671a545a07d30998c05663ac07911",
+            "matchesMappingCandidate": true
+        },
+        {
+            "path": "src/Api",
+            "gitObject": "46f1283194a0be03a776f7c875e95900ee41f47a",
+            "matchesMappingCandidate": true
+        },
+        {
+            "path": "src/RenderMap",
+            "gitObject": "60b1cecb8e11c3574a851fabb2e04377326b7b43",
+            "matchesMappingCandidate": true
+        },
+        {
+            "path": "src/Hooks.cpp",
+            "gitObject": "5c5c13579004ab64cee401e6c857c219a9b2d403",
+            "matchesMappingCandidate": true
+        },
+        {
+            "path": "src/Features/Upscaling/FSRTemporalTuningDevBenchBridge.cpp",
+            "gitObject": "28dedc5e76f28463b91d0d32b9e374ad55c97876",
+            "matchesMappingCandidate": true
+        },
+        {
+            "path": "src/Features/Upscaling/Streamline.cpp",
+            "gitObject": "2fe8ce6c23416f9512430eca755a9520fc37622e",
+            "matchesMappingCandidate": true
+        },
+        {
+            "path": "src/Features/Upscaling/Streamline.h",
+            "gitObject": "9a500790345dd64099067978f24ba0549b1d7315",
+            "matchesMappingCandidate": true
+        },
+        {
+            "path": "src/Features/Upscaling/NvidiaPipelinePolicy.h",
+            "gitObject": "4d25e1446b911475c2215355609367e38f7f1409",
+            "matchesMappingCandidate": true
+        },
+        {
+            "path": "src/Features/Upscaling/ReflexPolicy.h",
+            "gitObject": "abcad04cf9ea55196ede3c49943e9f5cb5bc6590",
+            "matchesMappingCandidate": true
+        },
+        {
+            "path": "src/Features/Upscaling/FidelityFX.cpp",
+            "gitObject": "327e5d3f5008d3849585e9e5bb4fbdfa137fa28f",
+            "matchesMappingCandidate": true
+        },
+        {
+            "path": "src/Features/Upscaling/FidelityFX.h",
+            "gitObject": "7f7e249c924560687d701b80cc93173908819389",
+            "matchesMappingCandidate": true
+        }
+    ],
+    "currentRenderScalePolicyBlobsMatched": [
+        "src/ShaderCacheDisablePolicy.h",
+        "src/Features/ScreenSpaceShadowsCachePolicy.h",
+        "src/Features/Upscaling/VRVendorRelatchPolicy.h",
+        "tests/shader_cache_disable_policy_test.cpp",
+        "tests/screen_space_shadows_cache_policy_test.cpp",
+        "tests/vr_vendor_relatch_policy_test.cpp"
+    ],
+    "captureCommonLibAdaptationPreserved": [
+        "-\t\t\treturn slot.texture;",
+        "+\t\t\treturn REX::W32::AsReal(slot.texture);",
+        "-\t\tif (auto* tex = resolveFromView(slot.SRV)) {",
+        "+\t\tif (auto* tex = resolveFromView(REX::W32::AsReal(slot.SRV))) {",
+        "-\t\treturn resolveFromView(slot.RTV);",
+        "+\t\treturn resolveFromView(REX::W32::AsReal(slot.RTV));",
+        "-\t\t\tsrc.srv = slot.SRV;",
+        "+\t\t\tsrc.srv = REX::W32::AsReal(slot.SRV);",
+        "-\t\tsrc.srv = slot.SRV;",
+        "+\t\tsrc.srv = REX::W32::AsReal(slot.SRV);"
+    ],
+    "presetValuesPreserved": ["Performance", "Balanced", "Quality"],
+    "dependencyTopLevelTreesPreserved": true,
+    "corrections": [
+        "Retain ad8 preset values during five compatibility-metadata conflicts; owner generator recomputed combined runtime-settings identity.",
+        "PR51 merged without conflicts; storage/worker source matches its candidate, while ScreenshotFeature retains exactly the inherited CommonLib AsReal adaptation.",
+        "After the capture merge changed the settings-contract inventory, regenerate only five preset identity files; all preset values and native source remain unchanged."
+    ],
+    "excludedWork": [
+        {
+            "scope": "Published historical PR44/PR45 heads and obsolete PR47 devbench-main lineage",
+            "reason": "Corrected/reconciled implementations already inherited through PR50; no duplicate ports or service rollback."
+        },
+        {
+            "scope": "Unrelated upstream main-VR movement and upstream PR61/62/102/103 candidate lineages",
+            "reason": "Local testing composition only; no unrelated intake authorized."
+        },
+        {
+            "scope": "Untracked historical workspace files and retained Mapping runtime/cache state",
+            "reason": "Source reads use committed Git objects; runtime transition remains Mapping-owned."
+        }
+    ],
+    "limitations": [
+        "Experimental testing admission, not clean-head acceptance or review/runtime PASS.",
+        "Broker exact ON artifact and Mapping supported transition/loaded identity remain pending."
+    ],
+    "authority": {
+        "humanIntentTurn": "01a10935-c3b2-7881-b3ce-87759b52b803",
+        "humanCoordinationTurn": "01a1093d-7194-7273-8be4-06606dc8dac3",
+        "humanCoordinationMessage": "01a1093d-7215-7c33-ba53-ed821a9dd7c8"
+    },
+    "pr47Representation": {
+        "publishedHeadAtCapture": "2a719dfc489efd24acf7a848569df7adb0ba2465",
+        "representation": "Reconciled mapping/capture implementation through current PR50, not ancestry inclusion of obsolete development branch",
+        "handoff": "CLEAN-AND-TESTING-HEADS-20261005.md"
+    }
+}
