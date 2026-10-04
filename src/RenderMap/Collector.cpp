@@ -1174,10 +1174,13 @@ namespace CSX::RenderMap
 		{
 			const std::lock_guard lock(session->windowMutex);
 			if (session->config.latePostProcessingWindow && session->window.phase != CaptureWindowPhase::kMatchedEyes) {
+				if (session->window.bootstrapThreadId != 0 && !session->window.bootstrapComplete)
+					session->window.bootstrapEventCount = session->recorded.load(std::memory_order_acquire);
 				session->window.phase = CaptureWindowPhase::kIncomplete;
 				if (session->window.failure == CaptureWindowFailure::kNone)
 					session->window.failure = CaptureWindowFailure::kStopped;
-				session->window.endTick = snapshot.endTimestampTicks;
+				if (session->window.endTick == 0)
+					session->window.endTick = snapshot.endTimestampTicks;
 			}
 			snapshot.window = session->window;
 		}
@@ -1310,12 +1313,18 @@ namespace CSX::RenderMap
 
 	void Collector::CompleteWindowBootstrap(bool a_success) noexcept
 	{
+		PollCaptureWindow();
 		const auto session = activeSession.load(std::memory_order_acquire);
 		if (!session || !session->config.latePostProcessingWindow)
 			return;
 		const std::lock_guard lock(session->windowMutex);
-		if (session->window.phase != CaptureWindowPhase::kBootstrap ||
-			session->window.bootstrapThreadId != CurrentThreadId())
+		if (session->window.bootstrapThreadId != CurrentThreadId())
+			return;
+		if (session->window.phase == CaptureWindowPhase::kIncomplete && !session->window.bootstrapComplete) {
+			session->window.bootstrapEventCount = session->recorded.load(std::memory_order_acquire);
+			return;
+		}
+		if (session->window.phase != CaptureWindowPhase::kBootstrap)
 			return;
 		session->window.bootstrapEventCount = session->recorded.load(std::memory_order_acquire);
 		session->window.bootstrapComplete = a_success && session->window.bootstrapEventCount > 0 &&

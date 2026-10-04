@@ -386,7 +386,7 @@ namespace
 
 	void TestLateWindowIncompleteConditions()
 	{
-		for (int lane = 0; lane < 7; ++lane) {
+		for (int lane = 0; lane < 8; ++lane) {
 			Runtime runtime;
 			runtime.SetImmediateContext(0xA000);
 			auto config = LateConfig();
@@ -396,7 +396,7 @@ namespace
 				config.maxEvents = 1;
 				config.maxBytes = Collector::RequiredStorageBytes(config);
 			}
-			if (lane == 5)
+			if (lane == 5 || lane == 7)
 				config.maxDuration = std::chrono::milliseconds(100);
 			Check(runtime.StartCapture(config) == StartResult::kStarted, "incomplete window did not arm");
 			if (lane == 0) {
@@ -407,6 +407,10 @@ namespace
 					const ResourceObservationInput resource{ .d3dObject = 0xA100, .dimension = ResourceDimension::kTexture2D };
 					auto scope = runtime.EnterPostProcessing(resource, resource, 9, 77);
 					runtime.RecordPostProcessingBootstrap({ 1, 2, 3, 4, 5, 6 });
+					if (lane == 7) {
+						std::this_thread::sleep_for(std::chrono::milliseconds(120));
+						Check(!runtime.IsCapturing(), "bootstrap deadline did not stop admission");
+					}
 					runtime.CompleteWindowBootstrap(true);
 				}
 				if (lane == 2)
@@ -422,6 +426,7 @@ namespace
 					runtime.RecordEyeSubmission({ .d3dObject = 0xA100, .dimension = ResourceDimension::kTexture2D },
 						Eye::kLeft, 1, 0, 0, 0.5f, 1, 0, 90, 77);
 			}
+			const auto beforeStop = runtime.GetCaptureWindow();
 			auto snapshot = runtime.StopCapture();
 			Check(snapshot && snapshot->window.phase == CaptureWindowPhase::kIncomplete &&
 					  snapshot->window.failure != CaptureWindowFailure::kNone,
@@ -430,6 +435,12 @@ namespace
 				Check(snapshot->window.failure == CaptureWindowFailure::kFrameChanged, "frame change was not attributed");
 			if (lane == 6)
 				Check(snapshot->window.acceptedEyeMask == 1, "missing-eye stop lost its partial pair");
+			if (beforeStop.endTick != 0)
+				Check(snapshot->window.endTick == beforeStop.endTick, "finalization changed the latched window end");
+			if (lane == 7)
+				Check(snapshot->window.bootstrapEventCount == snapshot->statistics.recorded &&
+						  snapshot->window.bootstrapEventCount > 0 && !snapshot->window.bootstrapComplete,
+					"expired bootstrap lost its retained partial-event provenance");
 		}
 	}
 
