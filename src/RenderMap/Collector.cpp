@@ -887,6 +887,8 @@ namespace CSX::RenderMap
 		std::uint32_t materialStateObservationCount{ 0 };
 
 		std::atomic_bool accepting{ true };
+		mutable std::mutex windowMutex;
+		CaptureWindowSnapshot window;
 		std::atomic_uint64_t inFlight{ 0 };
 		std::atomic_uint64_t nextIndex{ 0 };
 		std::atomic_uint64_t nextObservationId{ 1 };
@@ -912,6 +914,17 @@ namespace CSX::RenderMap
 		std::atomic_uint64_t droppedSceneObjectObservations{ 0 };
 		std::atomic_uint64_t droppedGeometryObservations{ 0 };
 		std::atomic_uint64_t droppedMaterialStateObservations{ 0 };
+
+		bool AcceptsCurrentThread() const noexcept
+		{
+			if (!accepting.load(std::memory_order_acquire))
+				return false;
+			if (!config.latePostProcessingWindow)
+				return true;
+			const std::lock_guard lock(windowMutex);
+			return window.phase == CaptureWindowPhase::kActive ||
+			       (window.phase == CaptureWindowPhase::kBootstrap && window.bootstrapThreadId == CurrentThreadId());
+		}
 	};
 
 	Collector::ScopeGuard::ScopeGuard(
@@ -1000,7 +1013,10 @@ namespace CSX::RenderMap
 			a_config.maxTargetViewObservations == 0 || a_config.maxTargetBindingObservations == 0 ||
 			a_config.maxSceneObjectObservations == 0 || a_config.maxGeometryObservations == 0 ||
 			a_config.maxMaterialStateObservations == 0 || a_config.geometryShaderTypeMask == 0 ||
-			normalizedConfig.requestedEventKindMask == 0) {
+			normalizedConfig.requestedEventKindMask == 0 ||
+			(a_config.latePostProcessingWindow &&
+				(a_config.maxActivationWait.count() <= 0 || a_config.executionWithinSelectedGeometry ||
+					(normalizedConfig.requestedEventKindMask & EventKindBit(EventKind::kEyeSubmitted)) == 0))) {
 			return StartResult::kInvalidBounds;
 		}
 
@@ -1070,6 +1086,11 @@ namespace CSX::RenderMap
 		if (session->maxDurationTicks == 0)
 			return StartResult::kInvalidBounds;
 		session->startTimestampTicks = ReadClockTicks();
+		if (a_config.latePostProcessingWindow) {
+			session->window.phase = CaptureWindowPhase::kArmed;
+			session->window.armedTick = session->startTimestampTicks;
+			session->accepting.store(false, std::memory_order_relaxed);
+		}
 
 		std::shared_ptr<Session> expected;
 		if (!activeSession.compare_exchange_strong(
@@ -1120,6 +1141,7 @@ namespace CSX::RenderMap
 
 	std::optional<CaptureSnapshot> Collector::Stop(StopReason a_reason, std::chrono::milliseconds a_drainTimeout)
 	{
+		PollCaptureWindow();
 		std::lock_guard stopLock(stopMutex);
 		auto session = drainingSession;
 		if (!session) {
@@ -1149,6 +1171,16 @@ namespace CSX::RenderMap
 		snapshot.startTimestampTicks = session->startTimestampTicks;
 		snapshot.endTimestampTicks = ReadClockTicks();
 		snapshot.stopReason = LimitToStopReason(session->firstLimit.load(std::memory_order_acquire), a_reason);
+		{
+			const std::lock_guard lock(session->windowMutex);
+			if (session->config.latePostProcessingWindow && session->window.phase != CaptureWindowPhase::kMatchedEyes) {
+				session->window.phase = CaptureWindowPhase::kIncomplete;
+				if (session->window.failure == CaptureWindowFailure::kNone)
+					session->window.failure = CaptureWindowFailure::kStopped;
+				session->window.endTick = snapshot.endTimestampTicks;
+			}
+			snapshot.window = session->window;
+		}
 		snapshot.statistics = {
 			.attempted = session->attempted.load(std::memory_order_relaxed),
 			.recorded = session->recorded.load(std::memory_order_relaxed),
@@ -1210,8 +1242,117 @@ namespace CSX::RenderMap
 
 	bool Collector::IsCapturing() const noexcept
 	{
+		PollCaptureWindow();
 		const auto session = activeSession.load(std::memory_order_acquire);
-		return session && session->accepting.load(std::memory_order_acquire);
+		return session && session->AcceptsCurrentThread();
+	}
+
+	void Collector::PollCaptureWindow(std::uint64_t a_frame) const noexcept
+	{
+		const auto session = activeSession.load(std::memory_order_acquire);
+		if (!session || !session->config.latePostProcessingWindow)
+			return;
+		const std::lock_guard lock(session->windowMutex);
+		auto& window = session->window;
+		if (window.phase != CaptureWindowPhase::kArmed && window.phase != CaptureWindowPhase::kActive &&
+			window.phase != CaptureWindowPhase::kBootstrap)
+			return;
+		const auto tick = ReadClockTicks();
+		if (window.phase == CaptureWindowPhase::kArmed &&
+			tick - window.armedTick >= DurationToTicks(session->config.maxActivationWait)) {
+			window.failure = CaptureWindowFailure::kActivationTimeout;
+		} else if (window.phase == CaptureWindowPhase::kActive || window.phase == CaptureWindowPhase::kBootstrap) {
+			if (a_frame != kUnknownFrame && a_frame != window.cpuFrame)
+				window.failure = CaptureWindowFailure::kFrameChanged;
+			else if (tick - window.activationTick >= session->maxDurationTicks)
+				window.failure = CaptureWindowFailure::kActiveTimeout;
+		}
+		if (window.failure != CaptureWindowFailure::kNone) {
+			window.phase = CaptureWindowPhase::kIncomplete;
+			window.endTick = tick;
+			session->accepting.store(false, std::memory_order_release);
+		}
+	}
+
+	CaptureWindowSnapshot Collector::GetCaptureWindow() const noexcept
+	{
+		PollCaptureWindow();
+		const auto session = activeSession.load(std::memory_order_acquire);
+		if (!session)
+			return {};
+		const std::lock_guard lock(session->windowMutex);
+		return session->window;
+	}
+
+	bool Collector::ActivatePostProcessingWindow(std::uint32_t a_target, std::uint64_t a_frame,
+		std::uint64_t a_publicationGeneration) noexcept
+	{
+		PollCaptureWindow();
+		const std::lock_guard stopLock(stopMutex);
+		const auto session = activeSession.load(std::memory_order_acquire);
+		if (!session || !session->config.latePostProcessingWindow ||
+			a_target != session->config.activationTarget || a_frame == kUnknownFrame || a_frame == 0 ||
+			a_publicationGeneration == 0)
+			return false;
+		const std::lock_guard lock(session->windowMutex);
+		if (session->window.phase != CaptureWindowPhase::kArmed)
+			return false;
+		session->window.phase = CaptureWindowPhase::kBootstrap;
+		session->window.activationTick = ReadClockTicks();
+		session->window.cpuFrame = a_frame;
+		session->window.publicationGeneration = a_publicationGeneration;
+		session->window.bootstrapThreadId = CurrentThreadId();
+		session->firstFrame.store(a_frame, std::memory_order_relaxed);
+		SynchronizeThreadState(this, session->generation).frame.cpuFrame = a_frame;
+		session->accepting.store(true, std::memory_order_release);
+		return true;
+	}
+
+	void Collector::CompleteWindowBootstrap(bool a_success) noexcept
+	{
+		const auto session = activeSession.load(std::memory_order_acquire);
+		if (!session || !session->config.latePostProcessingWindow)
+			return;
+		const std::lock_guard lock(session->windowMutex);
+		if (session->window.phase != CaptureWindowPhase::kBootstrap ||
+			session->window.bootstrapThreadId != CurrentThreadId())
+			return;
+		session->window.bootstrapEventCount = session->recorded.load(std::memory_order_acquire);
+		session->window.bootstrapComplete = a_success && session->window.bootstrapEventCount > 0 &&
+		                                    session->accepting.load(std::memory_order_acquire) && session->droppedShaderObservations.load() == 0 &&
+		                                    session->scopeOverflow.load() == 0 && session->scopeMismatch.load() == 0 &&
+		                                    session->droppedResourceObservations.load() == 0 && session->droppedTargetViewObservations.load() == 0 &&
+		                                    session->droppedTargetBindingObservations.load() == 0 && session->droppedStageShaderObservations.load() == 0;
+		session->window.phase = session->window.bootstrapComplete ? CaptureWindowPhase::kActive : CaptureWindowPhase::kIncomplete;
+		if (!session->window.bootstrapComplete) {
+			session->window.failure = CaptureWindowFailure::kBootstrapFailed;
+			session->window.endTick = ReadClockTicks();
+			session->accepting.store(false, std::memory_order_release);
+		}
+	}
+
+	void Collector::AcceptWindowEye(Eye a_eye, std::uint64_t a_frame, std::uint64_t a_cycle,
+		std::uint64_t a_publicationGeneration) noexcept
+	{
+		PollCaptureWindow(a_frame);
+		const auto session = activeSession.load(std::memory_order_acquire);
+		if (!session || !session->config.latePostProcessingWindow)
+			return;
+		const std::lock_guard lock(session->windowMutex);
+		auto& window = session->window;
+		const auto bit = a_eye == Eye::kLeft ? 1u : a_eye == Eye::kRight ? 2u :
+		                                                                   0u;
+		if (window.phase != CaptureWindowPhase::kActive || !session->accepting.load(std::memory_order_acquire) ||
+			!bit || !a_cycle || a_frame != window.cpuFrame || a_publicationGeneration != window.publicationGeneration ||
+			(window.compositorCycle != 0 && window.compositorCycle != a_cycle))
+			return;
+		window.compositorCycle = a_cycle;
+		window.acceptedEyeMask |= static_cast<std::uint8_t>(bit);
+		if (window.acceptedEyeMask == 3) {
+			window.phase = CaptureWindowPhase::kMatchedEyes;
+			window.endTick = ReadClockTicks();
+			session->accepting.store(false, std::memory_order_release);
+		}
 	}
 
 	bool Collector::IsDraining() const noexcept
@@ -1236,7 +1377,7 @@ namespace CSX::RenderMap
 		std::uint64_t a_preparedGeometrySetupObservationId) const noexcept
 	{
 		const auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->accepting.load(std::memory_order_acquire))
+		if (!session || !session->AcceptsCurrentThread())
 			return false;
 		if (!session->config.executionWithinSelectedGeometry)
 			return true;
@@ -1287,6 +1428,13 @@ namespace CSX::RenderMap
 			return RecordResult::kInactive;
 		if (a_expectedGeneration != 0 && session->generation != a_expectedGeneration)
 			return RecordResult::kStopped;
+		if (session->config.latePostProcessingWindow) {
+			PollCaptureWindow();
+			const std::lock_guard lock(session->windowMutex);
+			if (session->window.phase == CaptureWindowPhase::kArmed ||
+				(session->window.phase == CaptureWindowPhase::kBootstrap && session->window.bootstrapThreadId != CurrentThreadId()))
+				return RecordResult::kFiltered;
+		}
 
 		session->inFlight.fetch_add(1, std::memory_order_acq_rel);
 		const auto releaseFlight = [&] {
@@ -1306,8 +1454,21 @@ namespace CSX::RenderMap
 			releaseFlight();
 			return RecordResult::kFiltered;
 		}
+		if (session->config.latePostProcessingWindow) {
+			const std::lock_guard lock(session->windowMutex);
+			if (session->window.phase == CaptureWindowPhase::kBootstrap &&
+				session->window.bootstrapThreadId != CurrentThreadId()) {
+				releaseFlight();
+				return RecordResult::kFiltered;
+			}
+		}
 		const auto timestamp = ReadClockTicks();
-		if (timestamp - session->startTimestampTicks >= session->maxDurationTicks) {
+		const auto origin = session->config.latePostProcessingWindow ? GetCaptureWindow().activationTick : session->startTimestampTicks;
+		if (!session->accepting.load(std::memory_order_acquire)) {
+			releaseFlight();
+			return RecordResult::kStopped;
+		}
+		if (timestamp - origin >= session->maxDurationTicks) {
 			session->droppedTimeLimit.fetch_add(1, std::memory_order_relaxed);
 			LatchLimit(session->firstLimit, session->accepting, RecordResult::kTimeLimit);
 			releaseFlight();
@@ -1315,6 +1476,13 @@ namespace CSX::RenderMap
 		}
 
 		auto& state = SynchronizeThreadState(this, session->generation);
+		if (session->config.latePostProcessingWindow) {
+			PollCaptureWindow(state.frame.cpuFrame);
+			if (!session->accepting.load(std::memory_order_acquire)) {
+				releaseFlight();
+				return RecordResult::kStopped;
+			}
+		}
 		if (state.frame.cpuFrame != kUnknownFrame) {
 			auto firstFrame = session->firstFrame.load(std::memory_order_acquire);
 			if (firstFrame == kUnknownFrame) {
@@ -1378,7 +1546,7 @@ namespace CSX::RenderMap
 		std::uint64_t a_expectedGeneration) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->accepting.load(std::memory_order_acquire) || a_kind == ScopeKind::kCount ||
+		if (!session || !session->AcceptsCurrentThread() || a_kind == ScopeKind::kCount ||
 			(a_expectedGeneration != 0 && session->generation != a_expectedGeneration))
 			return {};
 
@@ -1402,12 +1570,12 @@ namespace CSX::RenderMap
 	std::uint64_t Collector::AllocateObservationId(std::uint64_t a_expectedGeneration) noexcept
 	{
 		const auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->accepting.load(std::memory_order_acquire) ||
+		if (!session || !session->AcceptsCurrentThread() ||
 			(a_expectedGeneration != 0 && session->generation != a_expectedGeneration))
 			return 0;
 		const auto observationId = session->nextObservationId.fetch_add(1, std::memory_order_relaxed);
 		return activeSession.load(std::memory_order_acquire) == session &&
-		               session->accepting.load(std::memory_order_acquire) ?
+		               session->AcceptsCurrentThread() ?
 		           observationId :
 		           0;
 	}
@@ -1415,12 +1583,12 @@ namespace CSX::RenderMap
 	ShaderObservationResult Collector::ObserveShader(const ShaderObservationInput& a_input) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->accepting.load(std::memory_order_acquire) || a_input.shader == 0)
+		if (!session || !session->AcceptsCurrentThread() || a_input.shader == 0)
 			return {};
 
 		session->inFlight.fetch_add(1, std::memory_order_acq_rel);
 		const auto releaseFlight = [&] { session->inFlight.fetch_sub(1, std::memory_order_release); };
-		if (!session->accepting.load(std::memory_order_acquire) ||
+		if (!session->AcceptsCurrentThread() ||
 			activeSession.load(std::memory_order_acquire) != session) {
 			releaseFlight();
 			return {};
@@ -1480,12 +1648,12 @@ namespace CSX::RenderMap
 	StageShaderObservationResult Collector::ObserveStageShader(const StageShaderObservationInput& a_input) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->accepting.load(std::memory_order_acquire) || a_input.d3dObject == 0)
+		if (!session || !session->AcceptsCurrentThread() || a_input.d3dObject == 0)
 			return {};
 
 		session->inFlight.fetch_add(1, std::memory_order_acq_rel);
 		const auto releaseFlight = [&] { session->inFlight.fetch_sub(1, std::memory_order_release); };
-		if (!session->accepting.load(std::memory_order_acquire) || activeSession.load(std::memory_order_acquire) != session) {
+		if (!session->AcceptsCurrentThread() || activeSession.load(std::memory_order_acquire) != session) {
 			releaseFlight();
 			return {};
 		}
@@ -1570,12 +1738,12 @@ namespace CSX::RenderMap
 		std::uintptr_t a_d3dObject) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->accepting.load(std::memory_order_acquire) || a_d3dObject == 0)
+		if (!session || !session->AcceptsCurrentThread() || a_d3dObject == 0)
 			return {};
 
 		session->inFlight.fetch_add(1, std::memory_order_acq_rel);
 		const auto releaseFlight = [&] { session->inFlight.fetch_sub(1, std::memory_order_release); };
-		if (!session->accepting.load(std::memory_order_acquire) || activeSession.load(std::memory_order_acquire) != session) {
+		if (!session->AcceptsCurrentThread() || activeSession.load(std::memory_order_acquire) != session) {
 			releaseFlight();
 			return {};
 		}
@@ -1602,12 +1770,12 @@ namespace CSX::RenderMap
 		const ResourceObservationInput& a_input) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->accepting.load(std::memory_order_acquire) || a_input.d3dObject == 0)
+		if (!session || !session->AcceptsCurrentThread() || a_input.d3dObject == 0)
 			return {};
 
 		session->inFlight.fetch_add(1, std::memory_order_acq_rel);
 		const auto releaseFlight = [&] { session->inFlight.fetch_sub(1, std::memory_order_release); };
-		if (!session->accepting.load(std::memory_order_acquire) || activeSession.load(std::memory_order_acquire) != session) {
+		if (!session->AcceptsCurrentThread() || activeSession.load(std::memory_order_acquire) != session) {
 			releaseFlight();
 			return {};
 		}
@@ -1659,12 +1827,12 @@ namespace CSX::RenderMap
 		const TargetViewObservationInput& a_input) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->accepting.load(std::memory_order_acquire) || a_input.d3dObject == 0)
+		if (!session || !session->AcceptsCurrentThread() || a_input.d3dObject == 0)
 			return {};
 
 		session->inFlight.fetch_add(1, std::memory_order_acq_rel);
 		const auto releaseFlight = [&] { session->inFlight.fetch_sub(1, std::memory_order_release); };
-		if (!session->accepting.load(std::memory_order_acquire) || activeSession.load(std::memory_order_acquire) != session) {
+		if (!session->AcceptsCurrentThread() || activeSession.load(std::memory_order_acquire) != session) {
 			releaseFlight();
 			return {};
 		}
@@ -1727,14 +1895,14 @@ namespace CSX::RenderMap
 		const TargetBindingObservationInput& a_input) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->accepting.load(std::memory_order_acquire) ||
+		if (!session || !session->AcceptsCurrentThread() ||
 			a_input.renderTargetCount > kMaximumRenderTargets) {
 			return {};
 		}
 
 		session->inFlight.fetch_add(1, std::memory_order_acq_rel);
 		const auto releaseFlight = [&] { session->inFlight.fetch_sub(1, std::memory_order_release); };
-		if (!session->accepting.load(std::memory_order_acquire) || activeSession.load(std::memory_order_acquire) != session) {
+		if (!session->AcceptsCurrentThread() || activeSession.load(std::memory_order_acquire) != session) {
 			releaseFlight();
 			return {};
 		}
@@ -1781,12 +1949,12 @@ namespace CSX::RenderMap
 		const SceneObjectObservationInput& a_input) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->accepting.load(std::memory_order_acquire) || a_input.reference == 0)
+		if (!session || !session->AcceptsCurrentThread() || a_input.reference == 0)
 			return {};
 
 		session->inFlight.fetch_add(1, std::memory_order_acq_rel);
 		const auto releaseFlight = [&] { session->inFlight.fetch_sub(1, std::memory_order_release); };
-		if (!session->accepting.load(std::memory_order_acquire) || activeSession.load(std::memory_order_acquire) != session) {
+		if (!session->AcceptsCurrentThread() || activeSession.load(std::memory_order_acquire) != session) {
 			releaseFlight();
 			return {};
 		}
@@ -1844,12 +2012,12 @@ namespace CSX::RenderMap
 		const GeometryObservationInput& a_input) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->accepting.load(std::memory_order_acquire) || a_input.geometry == 0)
+		if (!session || !session->AcceptsCurrentThread() || a_input.geometry == 0)
 			return {};
 
 		session->inFlight.fetch_add(1, std::memory_order_acq_rel);
 		const auto releaseFlight = [&] { session->inFlight.fetch_sub(1, std::memory_order_release); };
-		if (!session->accepting.load(std::memory_order_acquire) || activeSession.load(std::memory_order_acquire) != session) {
+		if (!session->AcceptsCurrentThread() || activeSession.load(std::memory_order_acquire) != session) {
 			releaseFlight();
 			return {};
 		}
@@ -1910,14 +2078,14 @@ namespace CSX::RenderMap
 		const MaterialStateObservationInput& a_input) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->accepting.load(std::memory_order_acquire) ||
+		if (!session || !session->AcceptsCurrentThread() ||
 			(a_input.shaderProperty == 0 && a_input.material == 0)) {
 			return {};
 		}
 
 		session->inFlight.fetch_add(1, std::memory_order_acq_rel);
 		const auto releaseFlight = [&] { session->inFlight.fetch_sub(1, std::memory_order_release); };
-		if (!session->accepting.load(std::memory_order_acquire) || activeSession.load(std::memory_order_acquire) != session) {
+		if (!session->AcceptsCurrentThread() || activeSession.load(std::memory_order_acquire) != session) {
 			releaseFlight();
 			return {};
 		}
@@ -1996,10 +2164,10 @@ namespace CSX::RenderMap
 	void Collector::RetireShaderObservation(std::uintptr_t a_shader) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->accepting.load(std::memory_order_acquire) || a_shader == 0)
+		if (!session || !session->AcceptsCurrentThread() || a_shader == 0)
 			return;
 		session->inFlight.fetch_add(1, std::memory_order_acq_rel);
-		if (!session->accepting.load(std::memory_order_acquire) ||
+		if (!session->AcceptsCurrentThread() ||
 			activeSession.load(std::memory_order_acquire) != session) {
 			session->inFlight.fetch_sub(1, std::memory_order_release);
 			return;

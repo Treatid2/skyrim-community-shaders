@@ -55,6 +55,7 @@ namespace CSX::RenderMap
 		kEyePublication = 34,
 		kTransferOperation = 35,
 		kTransferCopyRegion = 36,
+		kNativePipelineSnapshot = 37,
 	};
 
 	enum class DeviceContextKind : std::uint8_t
@@ -278,6 +279,13 @@ namespace CSX::RenderMap
 			StopReason a_reason = StopReason::kRequested,
 			std::chrono::milliseconds a_drainTimeout = std::chrono::milliseconds(100));
 		bool IsCapturing() const noexcept;
+		/** Start the opt-in late window before constructing its native boundary. */
+		bool ActivatePostProcessingWindow(std::uint32_t a_target, std::uint64_t a_frame,
+			std::uint64_t a_publicationGeneration) noexcept;
+		void CompleteWindowBootstrap(bool a_success) noexcept;
+		/** Record queried shader pointers as state, without inventing a draw/dispatch. */
+		void RecordPostProcessingBootstrap(const std::array<std::uintptr_t, 6>& a_shaders) noexcept;
+		CaptureWindowSnapshot GetCaptureWindow() const noexcept;
 		bool IsCaptureDraining() const noexcept;
 		std::uint64_t ActiveCaptureGeneration() const noexcept;
 

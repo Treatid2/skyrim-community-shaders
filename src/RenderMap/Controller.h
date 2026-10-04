@@ -40,6 +40,7 @@ namespace CSX::RenderMap
 	{
 		std::optional<CaptureDescriptor> active;
 		bool accepting{ false };
+		CaptureWindowSnapshot window;
 		std::vector<std::string> completedCaptureIds;
 	};
 

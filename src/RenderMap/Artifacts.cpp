@@ -164,7 +164,7 @@ namespace CSX::RenderMap
 				{ "schema", {
 								{ "name", "csx.render-event" },
 								{ "major", 1 },
-								{ "minor", 18 },
+								{ "minor", 19 },
 								{ "producerVersion", "collector-v1" },
 							} },
 				{ "captureId", a_capture.descriptor.captureId },
@@ -259,6 +259,7 @@ namespace CSX::RenderMap
 			                      a_context.extensions :
 			                      json::object();
 			extensions.update({
+				{ "csx.captureWindow", SerializeCaptureWindow(snapshot.window) },
 				{ "csx.processId", a_processId },
 				{ "csx.captureIncompleteReasons", completeness.reasons },
 				{ "csx.sessionGeneration", snapshot.sessionGeneration },
@@ -292,7 +293,7 @@ namespace CSX::RenderMap
 				{ "schema", {
 								{ "name", "csx.render-capture-manifest" },
 								{ "major", 1 },
-								{ "minor", 8 },
+								{ "minor", 9 },
 								{ "producerVersion", "collector-v1" },
 							} },
 				{ "captureId", a_capture.descriptor.captureId },
@@ -323,6 +324,7 @@ namespace CSX::RenderMap
 								{ "maxMaterialStateObservations", snapshot.config.maxMaterialStateObservations },
 								{ "geometryShaderTypes", SerializeGeometryShaderTypeMask(snapshot.config.geometryShaderTypeMask) },
 								{ "executionWithinSelectedGeometry", snapshot.config.executionWithinSelectedGeometry },
+								{ "activation", summary["bounds"]["activation"] },
 								{ "pointerPolicy", "retain" },
 							} },
 				{ "clock", {

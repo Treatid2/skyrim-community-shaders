@@ -149,6 +149,41 @@ namespace CSX::RenderMap
 		kFailure,
 	};
 
+	enum class CaptureWindowPhase : std::uint8_t
+	{
+		kDisabled,
+		kArmed,
+		kBootstrap,
+		kActive,
+		kMatchedEyes,
+		kIncomplete,
+	};
+	enum class CaptureWindowFailure : std::uint8_t
+	{
+		kNone,
+		kActivationTimeout,
+		kBootstrapFailed,
+		kFrameChanged,
+		kActiveTimeout,
+		kStopped,
+	};
+
+	struct CaptureWindowSnapshot
+	{
+		CaptureWindowPhase phase{ CaptureWindowPhase::kDisabled };
+		CaptureWindowFailure failure{ CaptureWindowFailure::kNone };
+		std::uint64_t armedTick{ 0 };
+		std::uint64_t activationTick{ 0 };
+		std::uint64_t endTick{ 0 };
+		std::uint64_t cpuFrame{ kUnknownFrame };
+		std::uint64_t publicationGeneration{ 0 };
+		std::uint64_t compositorCycle{ 0 };
+		std::uint64_t bootstrapThreadId{ 0 };
+		std::uint64_t bootstrapEventCount{ 0 };
+		std::uint8_t acceptedEyeMask{ 0 };
+		bool bootstrapComplete{ false };
+	};
+
 	struct CollectorConfig
 	{
 		std::uint64_t captureNumericId{ 0 };
@@ -169,6 +204,9 @@ namespace CSX::RenderMap
 		bool executionWithinSelectedGeometry{ false };
 		EventKindMask requestedEventKindMask{ kAllEventKindsMask };
 		EventKindMask eventKindMask{ kAllEventKindsMask };
+		bool latePostProcessingWindow{ false };
+		std::uint32_t activationTarget{ 0 };
+		std::chrono::nanoseconds maxActivationWait{ std::chrono::seconds(2) };
 	};
 
 	struct FrameContext
@@ -203,7 +241,7 @@ namespace CSX::RenderMap
 	struct EventRecord
 	{
 		std::uint16_t schemaMajor{ 1 };
-		std::uint16_t schemaMinor{ 18 };
+		std::uint16_t schemaMinor{ 19 };
 		EventKind kind{ EventKind::kCaptureMarker };
 		std::uint16_t reserved{ 0 };
 		std::uint64_t captureNumericId{ 0 };
@@ -637,6 +675,7 @@ namespace CSX::RenderMap
 		std::uint64_t endTimestampTicks{ 0 };
 		StopReason stopReason{ StopReason::kRequested };
 		CaptureStatistics statistics;
+		CaptureWindowSnapshot window;
 		std::vector<EventRecord> events;
 		std::vector<ShaderObservationRecord> shaderObservations;
 		std::vector<StageShaderObservationRecord> stageShaderObservations;
@@ -699,6 +738,16 @@ namespace CSX::RenderMap
 		bool IsCapturing() const noexcept;
 		bool IsDraining() const noexcept;
 		std::uint64_t ActiveGeneration() const noexcept;
+		/** Arm without collecting the prefix; activate only at the declared target. */
+		bool ActivatePostProcessingWindow(std::uint32_t a_target, std::uint64_t a_frame,
+			std::uint64_t a_publicationGeneration) noexcept;
+		/** Finish attributable bootstrap before accepting another thread's events. */
+		void CompleteWindowBootstrap(bool a_success) noexcept;
+		/** Called only after the accepted native eye and publication records succeed. */
+		void AcceptWindowEye(Eye a_eye, std::uint64_t a_frame, std::uint64_t a_cycle,
+			std::uint64_t a_publicationGeneration) noexcept;
+		CaptureWindowSnapshot GetCaptureWindow() const noexcept;
+		void PollCaptureWindow(std::uint64_t a_frame = kUnknownFrame) const noexcept;
 		bool IsGeometryShaderTypeSelected(std::uint32_t a_shaderType) const noexcept;
 		bool IsExecutionAllowedByGeometryScope(
 			std::uint64_t a_preparedGeometrySetupObservationId = 0) const noexcept;

@@ -61,6 +61,51 @@ namespace
 		Check(collector.Start(config) == StartResult::kInvalidBounds, "zero target-binding-observation bound was accepted");
 	}
 
+	void TestLateWindowCollectorAdmission()
+	{
+		Collector collector;
+		auto config = Config();
+		config.latePostProcessingWindow = true;
+		config.activationTarget = 9;
+		config.requestedEventKindMask = EventKindBit(EventKind::kEyeSubmitted);
+		config.maxActivationWait = std::chrono::seconds(1);
+		config.maxBytes = Collector::RequiredStorageBytes(config);
+		auto invalid = config;
+		invalid.executionWithinSelectedGeometry = true;
+		Check(collector.Start(invalid) == StartResult::kInvalidBounds, "late window accepted restricted geometry");
+		invalid = config;
+		invalid.requestedEventKindMask = EventKindBit(EventKind::kDraw);
+		Check(collector.Start(invalid) == StartResult::kInvalidBounds, "late window omitted requested eyes");
+		invalid = config;
+		invalid.maxActivationWait = std::chrono::nanoseconds::zero();
+		Check(collector.Start(invalid) == StartResult::kInvalidBounds, "late window accepted an unbounded armed wait");
+		Check(collector.Start(config) == StartResult::kStarted, "late collector did not arm");
+		const auto generation = collector.ActiveGeneration();
+		for (int index = 0; index < 5000; ++index)
+			Check(collector.Record(EventKind::kDraw) == RecordResult::kFiltered, "collector admitted prefix events");
+		Check(collector.ObserveResource({ .d3dObject = 1 }).observationId == 0,
+			"collector admitted a prefix catalogue entry");
+		Check(collector.ActivatePostProcessingWindow(9, 12, 77), "collector boundary did not activate");
+		std::thread excluded([&] {
+			Check(collector.Record(EventKind::kDraw) == RecordResult::kFiltered,
+				"foreign thread populated bootstrap events");
+			Check(collector.ObserveResource({ .d3dObject = 2 }).observationId == 0,
+				"foreign thread populated bootstrap catalogue");
+		});
+		excluded.join();
+		Check(collector.Record(EventKind::kRasterStateObserved) == RecordResult::kRecorded,
+			"bootstrap owner could not retain its state");
+		collector.CompleteWindowBootstrap(true);
+		auto snapshot = collector.Stop();
+		Check(snapshot && snapshot->events.size() == 1 && snapshot->resourceObservations.empty() &&
+				  snapshot->statistics.droppedStopped == 0 && snapshot->statistics.droppedEventLimit == 0 &&
+				  snapshot->window.phase == CaptureWindowPhase::kIncomplete,
+			"omitted prefix consumed capacity or was promoted to a complete window");
+		Check(collector.Start(Config()) == StartResult::kStarted && collector.ActiveGeneration() != generation,
+			"late window drain did not release single-owner admission");
+		Check(collector.Stop().has_value(), "successor collector could not drain");
+	}
+
 	void TestDevBenchDefaultBudget()
 	{
 		auto config = CSX::RenderMap::DevBenchBounds::DefaultConfig();
@@ -349,6 +394,7 @@ int main()
 {
 	try {
 		TestBoundsValidation();
+		TestLateWindowCollectorAdmission();
 		TestDevBenchDefaultBudget();
 		TestDevBenchJsonBounds();
 		TestDevBenchMinimumEventBudget();

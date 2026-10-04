@@ -2637,6 +2637,52 @@
                         "required": ["schema"],
                         "properties": {
                             "schema": {
+                                "const": "native-pipeline-snapshot-v1"
+                            }
+                        }
+                    }
+                }
+            },
+            "then": {
+                "properties": {
+                    "type": {
+                        "enum": ["raster-state-observed"]
+                    },
+                    "payload": {
+                        "type": "object",
+                        "required": [
+                            "schema",
+                            "source",
+                            "nativeShaderBindings",
+                            "nativeLifetimeJoinVerified"
+                        ],
+                        "properties": {
+                            "schema": {
+                                "const": "native-pipeline-snapshot-v1"
+                            },
+                            "source": {
+                                "const": "activation-getters"
+                            },
+                            "nativeShaderBindings": {
+                                "type": "object"
+                            },
+                            "nativeLifetimeJoinVerified": {
+                                "const": false
+                            }
+                        },
+                        "additionalProperties": false
+                    }
+                }
+            }
+        },
+        {
+            "if": {
+                "required": ["payload"],
+                "properties": {
+                    "payload": {
+                        "required": ["schema"],
+                        "properties": {
+                            "schema": {
                                 "const": "post-processing-operation-v1"
                             }
                         }

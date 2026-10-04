@@ -1229,6 +1229,20 @@ namespace CSX::RenderMap
 											  } },
 					{ "nativeLifetimeJoinVerified", false },
 				};
+			case PayloadSchema::kNativePipelineSnapshot:
+				return {
+					{ "schema", PayloadSchemaNames::kNativePipelineSnapshotV1 },
+					{ "source", "activation-getters" },
+					{ "nativeShaderBindings", {
+												  { "vertex", PointerEvidence(a_payload.words[0]) },
+												  { "hull", PointerEvidence(a_payload.words[1]) },
+												  { "domain", PointerEvidence(a_payload.words[2]) },
+												  { "geometry", PointerEvidence(a_payload.words[3]) },
+												  { "pixel", PointerEvidence(a_payload.words[4]) },
+												  { "compute", PointerEvidence(a_payload.words[5]) },
+											  } },
+					{ "nativeLifetimeJoinVerified", false },
+				};
 			case PayloadSchema::kRasterState:
 				return {
 					{ "schema", PayloadSchemaNames::kRasterStateObservationV1 },
@@ -1806,7 +1820,38 @@ namespace CSX::RenderMap
 			{ "maxMaterialStateObservations", a_config.maxMaterialStateObservations },
 			{ "geometryShaderTypes", SerializeGeometryShaderTypeMask(a_config.geometryShaderTypeMask) },
 			{ "executionWithinSelectedGeometry", a_config.executionWithinSelectedGeometry },
+			{ "activation", {
+								{ "mode", a_config.latePostProcessingWindow ? "main-post-processing-to-accepted-eyes" : "immediate" },
+								{ "target", a_config.latePostProcessingWindow ? json(a_config.activationTarget) : json(nullptr) },
+								{ "maxWaitMs", std::chrono::duration_cast<std::chrono::milliseconds>(a_config.maxActivationWait).count() },
+							} },
 			{ "pointerPolicy", "retain" },
+		};
+	}
+
+	nlohmann::json SerializeCaptureWindow(const CaptureWindowSnapshot& a_window)
+	{
+		static constexpr std::array phases{ "disabled", "armed", "bootstrap", "active", "matched-eyes", "incomplete" };
+		static constexpr std::array failures{ "none", "activation-timeout", "bootstrap-failed", "frame-changed", "active-timeout", "stopped" };
+		return {
+			{ "phase", phases.at(static_cast<std::size_t>(a_window.phase)) },
+			{ "failure", failures.at(static_cast<std::size_t>(a_window.failure)) },
+			{ "armedTick", a_window.armedTick },
+			{ "activationTick", a_window.activationTick },
+			{ "endTick", a_window.endTick },
+			{ "cpuFrame", a_window.cpuFrame == kUnknownFrame ? json(nullptr) : json(a_window.cpuFrame) },
+			{ "publicationGeneration", a_window.publicationGeneration },
+			{ "compositorCycle", a_window.compositorCycle },
+			{ "acceptedEyeMask", a_window.acceptedEyeMask },
+			{ "bootstrapThreadId", a_window.bootstrapThreadId },
+			{ "bootstrapComplete", a_window.bootstrapComplete },
+			{ "bootstrapEventCount", a_window.bootstrapEventCount },
+			{ "prefixEventCount", nullptr },
+			{ "preWindowProducerHistory", "unobserved" },
+			{ "fullPipelineEstablished", false },
+			{ "pixelTransferEstablished", false },
+			{ "omittedPrefix", { { "fromTickInclusive", a_window.armedTick },
+								   { "toTickExclusive", a_window.activationTick ? json(a_window.activationTick) : json(nullptr) } } },
 		};
 	}
 
@@ -1822,8 +1867,10 @@ namespace CSX::RenderMap
 		}
 		return {
 			{ "capturing", a_status.accepting },
-			{ "state", !a_status.active ? "idle" : (a_status.accepting ? "capturing" : "awaiting-finalization") },
+			{ "state", !a_status.active ? "idle" : a_status.window.phase == CaptureWindowPhase::kArmed ? "armed" :
+																										 (a_status.accepting ? "capturing" : "awaiting-finalization") },
 			{ "active", std::move(active) },
+			{ "captureWindow", SerializeCaptureWindow(a_status.window) },
 			{ "completedCaptureIds", a_status.completedCaptureIds },
 		};
 	}
@@ -1843,6 +1890,15 @@ namespace CSX::RenderMap
 			}
 		};
 		structuralReason(statistics.scopeOverflow, "scope-overflow", "scope depth overflowed during capture");
+		const auto& window = a_snapshot.window;
+		const bool matchedWindow = window.phase == CaptureWindowPhase::kMatchedEyes && window.bootstrapComplete &&
+		                           window.acceptedEyeMask == 3 && window.cpuFrame != kUnknownFrame && window.cpuFrame != 0 &&
+		                           window.publicationGeneration != 0 && window.compositorCycle != 0;
+		structuralReason(a_snapshot.config.latePostProcessingWindow && !matchedWindow,
+			"capture-window-incomplete", "declared late window did not retain its matching accepted-eye pair");
+		structuralReason(a_snapshot.config.latePostProcessingWindow && std::any_of(a_snapshot.events.begin(), a_snapshot.events.end(),
+																		   [&](const auto& event) { return event.frame.cpuFrame != window.cpuFrame; }),
+			"window-frame-unobserved", "retained late-window event did not establish the activation frame");
 		structuralReason(statistics.scopeMismatch, "scope-mismatch", "scope nesting mismatch occurred during capture");
 		structuralReason(statistics.droppedShaderObservations, "shader-observation-loss", "shader observation capacity was exceeded during capture");
 		structuralReason(statistics.droppedStageShaderObservations, "stage-shader-observation-loss", "stage shader observation capacity was exceeded during capture");
@@ -1874,6 +1930,7 @@ namespace CSX::RenderMap
 			{ "numericId", a_capture.descriptor.numericId },
 			{ "state", "complete" },
 			{ "bounds", SerializeBounds(snapshot.config) },
+			{ "captureWindow", SerializeCaptureWindow(snapshot.window) },
 			{ "clock", {
 						   { "source", "QueryPerformanceCounter" },
 						   { "frequencyHz", snapshot.clockFrequencyHz },

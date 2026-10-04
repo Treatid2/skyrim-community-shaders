@@ -27,6 +27,7 @@ namespace CSX::RenderMap
 	CaptureCompleteness EvaluateCaptureCompleteness(const CaptureSnapshot& a_snapshot);
 
 	nlohmann::json SerializeBounds(const CollectorConfig& a_config);
+	nlohmann::json SerializeCaptureWindow(const CaptureWindowSnapshot& a_window);
 	nlohmann::json SerializeEventKindMask(EventKindMask a_mask);
 	nlohmann::json SerializeGeometryShaderTypeMask(std::uint64_t a_mask);
 	nlohmann::json SerializeControllerStatus(const ControllerSnapshot& a_status);

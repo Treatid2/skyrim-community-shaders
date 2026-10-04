@@ -1,6 +1,63 @@
 {
     "valid": [
         {
+            "name": "activation-native-state-without-execution",
+            "event": {
+                "schema": {
+                    "name": "csx.render-event",
+                    "major": 1,
+                    "minor": 18,
+                    "producerVersion": "collector-v1"
+                },
+                "captureId": "capture-deferred-command-contract",
+                "sequence": 0,
+                "timestampQpc": 1000,
+                "processId": 1,
+                "threadId": 2,
+                "frame": {
+                    "cpuFrame": 1,
+                    "sceneEpoch": 1,
+                    "submissionEpoch": null,
+                    "eye": "left",
+                    "eyeMask": 1
+                },
+                "execution": {
+                    "observationDomain": "cpu-call",
+                    "commandStreamSequence": null,
+                    "gpuTimestampTicks": null,
+                    "gpuTimestampFrequencyHz": null
+                },
+                "deviceContextObservationId": "obs-device-context-1-g1",
+                "commandRecordingObservationId": null,
+                "submissionObservationId": null,
+                "type": "raster-state-observed",
+                "scopes": {
+                    "renderPass": null,
+                    "technique": null,
+                    "geometry": null,
+                    "commandList": null
+                },
+                "causes": [],
+                "manifestRefs": [],
+                "engineRefs": [],
+                "observationRefs": [],
+                "payload": {
+                    "schema": "native-pipeline-snapshot-v1",
+                    "source": "activation-getters",
+                    "nativeShaderBindings": {
+                        "vertex": "0x100",
+                        "hull": null,
+                        "domain": null,
+                        "geometry": null,
+                        "pixel": "0x200",
+                        "compute": null
+                    },
+                    "nativeLifetimeJoinVerified": false
+                },
+                "extensions": {}
+            }
+        },
+        {
             "name": "destination-before-boundary",
             "event": {
                 "schema": {
@@ -349,6 +406,64 @@
         }
     ],
     "invalid": [
+        {
+            "name": "bootstrap-must-not-invent-operation",
+            "event": {
+                "schema": {
+                    "name": "csx.render-event",
+                    "major": 1,
+                    "minor": 18,
+                    "producerVersion": "collector-v1"
+                },
+                "captureId": "capture-deferred-command-contract",
+                "sequence": 0,
+                "timestampQpc": 1000,
+                "processId": 1,
+                "threadId": 2,
+                "frame": {
+                    "cpuFrame": 1,
+                    "sceneEpoch": 1,
+                    "submissionEpoch": null,
+                    "eye": "left",
+                    "eyeMask": 1
+                },
+                "execution": {
+                    "observationDomain": "cpu-call",
+                    "commandStreamSequence": null,
+                    "gpuTimestampTicks": null,
+                    "gpuTimestampFrequencyHz": null
+                },
+                "deviceContextObservationId": "obs-device-context-1-g1",
+                "commandRecordingObservationId": null,
+                "submissionObservationId": null,
+                "type": "raster-state-observed",
+                "scopes": {
+                    "renderPass": null,
+                    "technique": null,
+                    "geometry": null,
+                    "commandList": null
+                },
+                "causes": [],
+                "manifestRefs": [],
+                "engineRefs": [],
+                "observationRefs": [],
+                "payload": {
+                    "schema": "native-pipeline-snapshot-v1",
+                    "source": "activation-getters",
+                    "nativeShaderBindings": {
+                        "vertex": "0x100",
+                        "hull": null,
+                        "domain": null,
+                        "geometry": null,
+                        "pixel": "0x200",
+                        "compute": null
+                    },
+                    "nativeLifetimeJoinVerified": false,
+                    "operationObservationId": 1
+                },
+                "extensions": {}
+            }
+        },
         {
             "name": "boundary-cannot-prove-source",
             "event": {

@@ -34,7 +34,7 @@ namespace
 			PayloadSchemaNames::kAll.begin(), PayloadSchemaNames::kAll.end());
 		Check(advertised.size() == PayloadSchemaNames::kAll.size(), "registry repeats payload schemas");
 		std::set<std::string> emitted;
-		for (std::uint16_t schema = 1; schema <= static_cast<std::uint16_t>(PayloadSchema::kTransferCopyRegion); ++schema) {
+		for (std::uint16_t schema = 1; schema <= static_cast<std::uint16_t>(PayloadSchema::kNativePipelineSnapshot); ++schema) {
 			EventRecord event{};
 			event.payload.schema = schema;
 			const auto serialized = SerializeEvent(event, "catalogue-test", 42);
@@ -610,7 +610,7 @@ namespace
 		const auto& observedGeometry = page["events"][1];
 		const auto& material = page["events"][2];
 		const auto& setup = page["events"][3];
-		Check(object["schema"]["minor"] == 18 && object["payload"]["schema"] == "scene-object-observation-v1",
+		Check(object["schema"]["minor"] == 19 && object["payload"]["schema"] == "scene-object-observation-v1",
 			"scene-object declaration schema is wrong");
 		Check(observedGeometry["payload"]["schema"] == "geometry-observation-v1" &&
 				  observedGeometry["payload"]["sceneObjectObservationId"] == object["payload"]["sceneObjectObservationId"],
@@ -760,7 +760,7 @@ namespace
 		manifestStream >> manifest;
 		Check(manifest["status"] == "complete", "complete capture manifest has the wrong status");
 		Check(manifest["completion"]["eventCount"] == 8, "manifest event count is wrong");
-		Check(manifest["schema"]["minor"] == 8, "capture manifest schema revision is wrong");
+		Check(manifest["schema"]["minor"] == 9, "capture manifest schema revision is wrong");
 		Check(manifest["bounds"]["requestedEventKinds"].is_array() &&
 				  manifest["bounds"]["resolvedEventKinds"].is_array() &&
 				  manifest["bounds"]["observedEventKinds"].is_array(),
@@ -884,6 +884,28 @@ namespace
 
 	void TestTransferSerializationAndDurableAdmissionGap()
 	{
+		EventRecord bootstrap;
+		bootstrap.kind = EventKind::kRasterStateObserved;
+		bootstrap.payload = { .schema = static_cast<std::uint16_t>(PayloadSchema::kNativePipelineSnapshot),
+			.words = { 1, 2, 3, 4, 5, 6 } };
+		const auto nativeState = SerializeEvent(bootstrap, "capture-bootstrap-test", 42).at("payload");
+		Check(nativeState["schema"] == "native-pipeline-snapshot-v1" && nativeState["source"] == "activation-getters" &&
+				  !nativeState.contains("operationObservationId") && nativeState["nativeLifetimeJoinVerified"] == false,
+			"bootstrap invented execution or object lifetime evidence");
+		CaptureSnapshot windowSnapshot;
+		windowSnapshot.config.latePostProcessingWindow = true;
+		windowSnapshot.window = { .phase = CaptureWindowPhase::kActive, .armedTick = 10, .activationTick = 20, .cpuFrame = 12, .publicationGeneration = 77, .compositorCycle = 90, .bootstrapThreadId = 3, .bootstrapEventCount = 4, .acceptedEyeMask = 1, .bootstrapComplete = true };
+		Check(!EvaluateCaptureCompleteness(windowSnapshot).reasons.empty(), "missing eye pair claimed completeness");
+		windowSnapshot.window.phase = CaptureWindowPhase::kMatchedEyes;
+		windowSnapshot.window.acceptedEyeMask = 3;
+		Check(EvaluateCaptureCompleteness(windowSnapshot).reasons.empty(), "complete bounded window was rejected");
+		windowSnapshot.statistics.droppedTargetViewObservations = 1;
+		Check(!EvaluateCaptureCompleteness(windowSnapshot).reasons.empty(), "matched pair hid catalogue loss");
+		const auto window = SerializeCaptureWindow(windowSnapshot.window);
+		Check(window["prefixEventCount"].is_null() && window["preWindowProducerHistory"] == "unobserved" &&
+				  window["fullPipelineEstablished"] == false && window["pixelTransferEstablished"] == false &&
+				  window["omittedPrefix"]["fromTickInclusive"] == 10 && window["omittedPrefix"]["toTickExclusive"] == 20,
+			"late window promoted unknown prefix history or changed half-open bounds");
 		const auto payload = [](PayloadSchema schema, std::array<std::uint64_t, 8> words) {
 			EventRecord event;
 			event.sessionGeneration = 77;

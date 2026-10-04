@@ -58816,6 +58816,9 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 		{
 			auto& runtime = CSX::RenderMap::GetRuntime();
 			auto* renderer = globals::game::renderer;
+			const bool activated = runtime.ActivatePostProcessingWindow(
+				static_cast<std::uint32_t>(a_target), globals::state ? globals::state->frameCount : 0,
+				globals::state ? globals::state->GetRenderTargetResourcePublicationGeneration() : 0);
 			const auto source = renderer && runtime.IsCapturing() ? CSX::RenderMap::DescribeResource(
 																		REX::W32::AsReal(renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN].texture)) :
 			                                                        CSX::RenderMap::ResourceObservationInput{};
@@ -58826,6 +58829,8 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 			                             CSX::RenderMap::ResourceObservationInput{};
 			const auto transferScope = runtime.EnterPostProcessing(source, destination,
 				static_cast<std::uint32_t>(a_target), globals::state ? globals::state->GetRenderTargetResourcePublicationGeneration() : 0);
+			if (activated)
+				runtime.CompleteWindowBootstrap(CSX::RenderMap::CapturePostProcessingBootstrap(globals::d3d::context));
 			func(a_this, a3, a_target, a_4, a_5);
 		}
 #else

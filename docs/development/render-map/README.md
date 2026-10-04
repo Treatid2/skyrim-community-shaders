@@ -69,7 +69,7 @@ not enter the Community Shaders binary in either build mode.
 
 `communityshaders.render_map` publishes registry, status, start, stop and
 completed-event paging through the shared versioned service envelope. Contract
-1.21/schema revision 23 retains field-specific `invalid_bounds` errors with
+1.22/schema revision 24 retains field-specific `invalid_bounds` errors with
 the original value and independent minimum/maximum. Supplied bounds must be
 unsigned JSON integers and are checked before narrowing or duration conversion.
 
@@ -152,3 +152,39 @@ deferred execution requires the selected geometry scope to be active.
 No new capture setter, D3D state mutation or renderer selection is introduced.
 Instrumentation is opt-in and may add frame cost. Native fixture execution
 and live SE/AE/VR qualification are separate from source checks.
+
+## Late main-pass window
+
+In Skyrim VR, start with `activation: "main_post_processing"`, requested
+`eventKinds: ["eye-submitted"]`, and an explicit `maxActivationWaitMs`
+(1..10000; default 2000). The normal immediate selector remains the default.
+The late selector rejects geometry-restricted execution and requires the eye
+family; its existing dependency closure remains intact.
+
+The collector allocates its bounded catalogues and event buffer when armed,
+but admits no prefix events or catalogue entries. The armed wait is independent
+of `maxDurationMs`, which begins at the original main-target
+`Upscaling::Main_PostProcessing` call. At that boundary, the activation thread
+queries the immediate context, native shaders, output targets, SRV/UAV bindings,
+viewport/scissor state and resource descriptors using the existing getters.
+This bounded bootstrap shares the active event/catalogue budget. Its dedicated
+`native-pipeline-snapshot-v1` payload records state without inventing a draw or
+dispatch. Other threads cannot populate the bootstrap.
+
+The active window retains dependent events until both native accepted eyes
+are recorded in its exact CPU frame, compositor cycle and resource publication
+generation. Duplicate or mismatched eyes cannot complete it. Activation wait,
+active duration, frame changes, bootstrap failure, missing eyes, event/byte
+limits and explicit stop yield an incomplete window. Hook/status observations
+latch deadlines; the caller still issues `stop` to use the existing bounded
+in-flight drain and durable finalization. An armed or terminal unfinalized
+capture retains single-owner admission and cannot be replaced by another start.
+
+Manifest revision 1.9 and controller/summary `captureWindow` retain phase,
+failure, bootstrap thread/count, activation frame, publication, accepted eye
+mask and half-open omitted-prefix QPC bounds. Prefix count is null and prior
+producer history is unobserved. Completion proves structural coverage within
+this window; it does not establish the earlier pipeline, producer freshness,
+native object lifetime, pixel transfer or GPU completion. Historical
+`RequiredStorageBytes` coefficients from another binary must not be reused:
+the current binary recomputes admission from its compiled structure sizes.

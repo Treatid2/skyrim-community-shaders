@@ -215,4 +215,4 @@ try {
     }
 }
 
-Write-Output "Render-map contracts passed: 2 schemas, $($fixtureEvents.Count) baseline deferred-command fixtures, $($validEdgeCaseEvents.Count) valid edge cases, $($fixtureEdgeCases.invalid.Count) rejected edge cases, 13 cross-identity cases, 6 valid and 6 rejected post-processing cases, 5 hook contracts, and the offline graph suite."
+Write-Output "Render-map contracts passed: 2 schemas, $($fixtureEvents.Count) baseline deferred-command fixtures, $($validEdgeCaseEvents.Count) valid edge cases, $($fixtureEdgeCases.invalid.Count) rejected edge cases, 13 cross-identity cases, $($postProcessingCases.valid.Count) valid and $($postProcessingCases.invalid.Count) rejected post-processing cases, 5 hook contracts, and the offline graph suite."

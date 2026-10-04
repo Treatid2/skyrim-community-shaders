@@ -602,7 +602,7 @@ namespace CSX::RenderMap
 	StartResult Runtime::StartCapture(const CollectorConfig& a_config)
 	{
 		std::scoped_lock lifecycleLock(captureLifecycleMutex);
-		if (collector.IsCapturing() || collector.IsDraining())
+		if (collector.ActiveGeneration() != 0 || collector.IsDraining())
 			return collector.Start(a_config);
 
 		// Reset while hooks still observe an inactive collector; publishing first
@@ -652,6 +652,37 @@ namespace CSX::RenderMap
 		return collector.IsCapturing();
 	}
 
+	bool Runtime::ActivatePostProcessingWindow(std::uint32_t a_target, std::uint64_t a_frame,
+		std::uint64_t a_publicationGeneration) noexcept
+	{
+		return collector.ActivatePostProcessingWindow(a_target, a_frame, a_publicationGeneration);
+	}
+
+	void Runtime::CompleteWindowBootstrap(bool a_success) noexcept
+	{
+		collector.CompleteWindowBootstrap(a_success);
+	}
+
+	void Runtime::RecordPostProcessingBootstrap(const std::array<std::uintptr_t, 6>& a_shaders) noexcept
+	{
+		if (!IsInsidePostProcessing())
+			return;
+		const auto context = immediateContext.load(std::memory_order_acquire);
+		BindStage(context, ShaderStage::kVertex, a_shaders[0]);
+		BindStage(context, ShaderStage::kPixel, a_shaders[4]);
+		BindStage(context, ShaderStage::kCompute, a_shaders[5]);
+		transferOperation = 0;
+		collector.RecordForGeneration(EventKind::kRasterStateObserved,
+			{ .schema = static_cast<std::uint16_t>(PayloadSchema::kNativePipelineSnapshot),
+				.words = { a_shaders[0], a_shaders[1], a_shaders[2], a_shaders[3], a_shaders[4], a_shaders[5] } },
+			EnsureImmediateContextObservation(), postProcessingGeneration, NextCommandStreamSequence());
+	}
+
+	CaptureWindowSnapshot Runtime::GetCaptureWindow() const noexcept
+	{
+		return collector.GetCaptureWindow();
+	}
+
 	bool Runtime::IsCaptureDraining() const noexcept
 	{
 		return collector.IsDraining();
@@ -664,8 +695,7 @@ namespace CSX::RenderMap
 
 	void Runtime::SetCpuFrame(std::uint64_t a_cpuFrame) noexcept
 	{
-		if (!collector.IsCapturing())
-			return;
+		collector.PollCaptureWindow(a_cpuFrame);
 		auto frame = collector.GetThreadFrameContext();
 		frame.cpuFrame = a_cpuFrame;
 		collector.SetThreadFrameContext(frame);
@@ -2141,15 +2171,16 @@ namespace CSX::RenderMap
 			const std::lock_guard lock(transferVersionMutex);
 			version = transferVersions.Read(resource.sessionGeneration, resource.observationId, frame.cpuFrame);
 		}
-		collector.RecordForGeneration(
+		const auto eyeRecorded = collector.RecordForGeneration(
 			EventKind::kEyeSubmitted,
 			EyeSubmissionPayload(
 				resource.observationId, a_eye, a_eyeMask,
 				a_uMin, a_vMin, a_uMax, a_vMax, a_submitFlags, a_compositorCycle),
 			0,
 			resource.sessionGeneration);
+		auto publicationRecorded = RecordResult::kFiltered;
 		if (a_publicationGeneration)
-			collector.RecordForGeneration(EventKind::kEyeSubmitted,
+			publicationRecorded = collector.RecordForGeneration(EventKind::kEyeSubmitted,
 				{ .schema = static_cast<std::uint16_t>(PayloadSchema::kEyePublication), .words = {
 																							resource.observationId,
 																							version.observation,
@@ -2160,6 +2191,8 @@ namespace CSX::RenderMap
 																							a_eyeMask,
 																						} },
 				0, resource.sessionGeneration);
+		if (eyeRecorded == RecordResult::kRecorded && publicationRecorded == RecordResult::kRecorded)
+			collector.AcceptWindowEye(a_eye, frame.cpuFrame, a_compositorCycle, a_publicationGeneration);
 		collector.SetThreadFrameContext(previousFrame);
 	}
 

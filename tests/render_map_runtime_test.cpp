@@ -311,6 +311,128 @@ namespace
 			"overflowed stage shader was silently joined to an existing observation");
 	}
 
+	CollectorConfig LateConfig()
+	{
+		auto config = Config();
+		config.maxEvents = 128;
+		config.requestedEventKindMask = EventKindBit(EventKind::kEyeSubmitted);
+		config.latePostProcessingWindow = true;
+		config.activationTarget = 9;
+		config.maxActivationWait = std::chrono::seconds(1);
+		config.maxBytes = Collector::RequiredStorageBytes(config);
+		return config;
+	}
+
+	void TestLateWindowSkipsPrefixAndMatchesAcceptedPair()
+	{
+		Runtime runtime;
+		runtime.SetImmediateContext(0xA000);
+		Check(runtime.StartCapture(LateConfig()) == StartResult::kStarted, "late window did not arm");
+		runtime.SetCpuFrame(12);
+		for (int index = 0; index < 5000; ++index) {
+			auto prefix = runtime.EnterRenderPass({ .renderPass = 1 });
+			runtime.RecordDraw(0xA000, DrawOperation::kDraw, 3);
+		}
+		Check(!runtime.IsCapturing() && runtime.GetCaptureWindow().phase == CaptureWindowPhase::kArmed,
+			"prefix consumed the late window");
+		Check(runtime.StartCapture(LateConfig()) == StartResult::kAlreadyCapturing,
+			"another start replaced an armed window");
+		Check(!runtime.ActivatePostProcessingWindow(8, 12, 77) &&
+				  !runtime.ActivatePostProcessingWindow(9, kUnknownFrame, 77) &&
+				  !runtime.ActivatePostProcessingWindow(9, 12, 0),
+			"invalid boundary activated");
+		Check(runtime.ActivatePostProcessingWindow(9, 12, 77), "declared boundary did not activate");
+		Check(!runtime.ActivatePostProcessingWindow(9, 12, 77), "boundary activated twice");
+		std::thread excluded([&] { runtime.RecordDraw(0xA000, DrawOperation::kDraw, 99); });
+		excluded.join();
+		const ResourceObservationInput resource{ .d3dObject = 0xA100,
+			.dimension = ResourceDimension::kTexture2D,
+			.widthOrBytes = 64,
+			.height = 32,
+			.depthOrArraySize = 1,
+			.mipLevels = 1 };
+		{
+			auto scope = runtime.EnterPostProcessing(resource, resource, 9, 77);
+			Check(runtime.IsInsidePostProcessing(), "activated boundary did not retain provenance");
+			runtime.RecordPostProcessingBootstrap({ 1, 2, 3, 4, 5, 6 });
+			runtime.RecordRasterState(0xA000, 0, { 0, 0, 64, 32, 0, 1 }, { 0, 0, 64, 32 }, 1, 1, false);
+			runtime.RecordTransferResourceAccess(0xA000, { .resource = resource }, ResourceStage::kPixel, 0, false);
+			runtime.CompleteWindowBootstrap(true);
+		}
+		Check(runtime.GetCaptureWindow().bootstrapComplete, "bootstrap was not committed");
+		runtime.RecordEyeSubmission(resource, Eye::kLeft, 1, 0, 0, 0.5f, 1, 0, 90, 77);
+		runtime.RecordEyeSubmission(resource, Eye::kLeft, 1, 0, 0, 0.5f, 1, 0, 90, 77);
+		runtime.RecordEyeSubmission(resource, Eye::kRight, 2, 0.5f, 0, 1, 1, 0, 91, 77);
+		runtime.RecordEyeSubmission(resource, Eye::kRight, 2, 0.5f, 0, 1, 1, 0, 90, 78);
+		Check(runtime.IsCapturing() && runtime.GetCaptureWindow().acceptedEyeMask == 1,
+			"repeated or mismatched eye completed a pair");
+		runtime.RecordEyeSubmission(resource, Eye::kRight, 2, 0.5f, 0, 1, 1, 0, 90, 77);
+		Check(!runtime.IsCapturing(), "matched window continued accepting prefix work");
+		Check(runtime.StartCapture(LateConfig()) == StartResult::kAlreadyCapturing,
+			"another start replaced an unfinalized terminal window");
+		auto snapshot = runtime.StopCapture();
+		Check(snapshot && snapshot->window.phase == CaptureWindowPhase::kMatchedEyes &&
+				  snapshot->window.acceptedEyeMask == 3 && snapshot->window.compositorCycle == 90 &&
+				  snapshot->window.cpuFrame == 12 && snapshot->window.bootstrapEventCount > 0,
+			"matching accepted pair was not retained");
+		Check(snapshot->statistics.droppedEventLimit == 0 && snapshot->statistics.droppedStopped == 0,
+			"omitted prefix was misclassified as event loss");
+		Check(std::none_of(snapshot->events.begin(), snapshot->events.end(), [](const auto& event) {
+			return event.kind == EventKind::kDraw || event.kind == EventKind::kDispatch ||
+			       event.payload.schema == static_cast<std::uint16_t>(PayloadSchema::kTransferOperation);
+		}),
+			"bootstrap invented an execution operation or retained prefix draws");
+	}
+
+	void TestLateWindowIncompleteConditions()
+	{
+		for (int lane = 0; lane < 7; ++lane) {
+			Runtime runtime;
+			runtime.SetImmediateContext(0xA000);
+			auto config = LateConfig();
+			if (lane == 0)
+				config.maxActivationWait = std::chrono::nanoseconds(1);
+			if (lane == 4) {
+				config.maxEvents = 1;
+				config.maxBytes = Collector::RequiredStorageBytes(config);
+			}
+			if (lane == 5)
+				config.maxDuration = std::chrono::milliseconds(100);
+			Check(runtime.StartCapture(config) == StartResult::kStarted, "incomplete window did not arm");
+			if (lane == 0) {
+				Check(!runtime.ActivatePostProcessingWindow(9, 12, 77), "expired arm activated");
+			} else if (lane != 1) {
+				Check(runtime.ActivatePostProcessingWindow(9, 12, 77), "incomplete lane did not activate");
+				if (lane >= 3) {
+					const ResourceObservationInput resource{ .d3dObject = 0xA100, .dimension = ResourceDimension::kTexture2D };
+					auto scope = runtime.EnterPostProcessing(resource, resource, 9, 77);
+					runtime.RecordPostProcessingBootstrap({ 1, 2, 3, 4, 5, 6 });
+					runtime.CompleteWindowBootstrap(true);
+				}
+				if (lane == 2)
+					runtime.CompleteWindowBootstrap(false);
+				if (lane == 3)
+					runtime.SetCpuFrame(13);
+				if (lane == 5) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(120));
+					Check(!runtime.IsCapturing() && runtime.GetCaptureWindow().failure == CaptureWindowFailure::kActiveTimeout,
+						"active deadline did not fail closed");
+				}
+				if (lane == 6)
+					runtime.RecordEyeSubmission({ .d3dObject = 0xA100, .dimension = ResourceDimension::kTexture2D },
+						Eye::kLeft, 1, 0, 0, 0.5f, 1, 0, 90, 77);
+			}
+			auto snapshot = runtime.StopCapture();
+			Check(snapshot && snapshot->window.phase == CaptureWindowPhase::kIncomplete &&
+					  snapshot->window.failure != CaptureWindowFailure::kNone,
+				"incomplete lane claimed completion");
+			if (lane == 3)
+				Check(snapshot->window.failure == CaptureWindowFailure::kFrameChanged, "frame change was not attributed");
+			if (lane == 6)
+				Check(snapshot->window.acceptedEyeMask == 1, "missing-eye stop lost its partial pair");
+		}
+	}
+
 	void TestImmediateContextDrawAndDispatchState()
 	{
 		Runtime runtime;
@@ -2585,6 +2707,8 @@ int main()
 		TestShaderObservationBoundIsExplicit();
 		TestResolvedStageShaderIdentity();
 		TestStageShaderObservationBoundIsExplicit();
+		TestLateWindowSkipsPrefixAndMatchesAcceptedPair();
+		TestLateWindowIncompleteConditions();
 		TestImmediateContextDrawAndDispatchState();
 		TestCaptureStartSeedsInheritedStageIdentity();
 		TestCreatedStagePointerReuseAdvancesIdentity();

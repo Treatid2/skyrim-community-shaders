@@ -378,7 +378,8 @@ namespace CSX::RenderMap
 		void ObserveEffectiveStateBeforeDraw(ID3D11DeviceContext* a_context);
 		void ObserveEffectiveStateBeforeDispatch(ID3D11DeviceContext* a_context);
 		void ObservePostProcessingState(ID3D11DeviceContext* a_context, bool a_compute, bool a_after);
-		void BeginPostProcessingOperation(ID3D11DeviceContext* a_context, bool a_compute, std::uint32_t a_operation);
+		void BeginPostProcessingOperation(ID3D11DeviceContext* a_context, bool a_compute, std::uint32_t a_operation,
+			bool a_bootstrap = false);
 
 		template <class... Args>
 		void RecordDrawWithEffectiveState(
@@ -601,7 +602,8 @@ namespace CSX::RenderMap
 			}
 		}
 
-		void BeginPostProcessingOperation(ID3D11DeviceContext* a_context, bool a_compute, std::uint32_t a_operation)
+		void BeginPostProcessingOperation(ID3D11DeviceContext* a_context, bool a_compute, std::uint32_t a_operation,
+			bool a_bootstrap)
 		{
 			if (!a_context || !GetRuntime().IsInsidePostProcessing() ||
 				a_context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE)
@@ -622,7 +624,10 @@ namespace CSX::RenderMap
 			std::array<std::uintptr_t, 6> pointers{};
 			for (std::size_t index = 0; index < shaders.size(); ++index)
 				pointers[index] = reinterpret_cast<std::uintptr_t>(shaders[index]);
-			GetRuntime().BeginTransferOperation(reinterpret_cast<std::uintptr_t>(a_context), a_compute, a_operation, pointers);
+			if (a_bootstrap)
+				GetRuntime().RecordPostProcessingBootstrap(pointers);
+			else
+				GetRuntime().BeginTransferOperation(reinterpret_cast<std::uintptr_t>(a_context), a_compute, a_operation, pointers);
 		}
 
 		void ObservePostProcessingState(ID3D11DeviceContext* a_context, bool a_compute, bool a_after)
@@ -1186,6 +1191,22 @@ namespace CSX::RenderMap
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
+	}
+
+	bool CapturePostProcessingBootstrap(ID3D11DeviceContext* a_context) noexcept
+	{
+		if (!a_context || a_context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE ||
+			!GetRuntime().IsInsidePostProcessing() || !GetRuntime().IsCapturing())
+			return false;
+		try {
+			ObserveEffectiveStateBeforeDraw(a_context);
+			BeginPostProcessingOperation(a_context, false, 0, true);
+			ObservePostProcessingState(a_context, false, false);
+			ObservePostProcessingState(a_context, true, false);
+			return GetRuntime().IsCapturing();
+		} catch (...) {
+			return false;
+		}
 	}
 
 	void InstallD3DContextHooks(ID3D11DeviceContext* a_context)

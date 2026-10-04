@@ -42,6 +42,7 @@ namespace CSX::RenderMap::PayloadSchemaNames
 	inline constexpr char kPostProcessingResourceAccessV1[] = "post-processing-resource-access-v1";
 	inline constexpr char kAcceptedEyePublicationV1[] = "accepted-eye-publication-v1";
 	inline constexpr char kPostProcessingCopyRegionV1[] = "post-processing-copy-region-v1";
+	inline constexpr char kNativePipelineSnapshotV1[] = "native-pipeline-snapshot-v1";
 
 	inline constexpr auto kAll = std::to_array<const char*>({
 		kShaderObservationV2,
@@ -80,5 +81,6 @@ namespace CSX::RenderMap::PayloadSchemaNames
 		kPostProcessingResourceAccessV1,
 		kAcceptedEyePublicationV1,
 		kPostProcessingCopyRegionV1,
+		kNativePipelineSnapshotV1,
 	});
 }

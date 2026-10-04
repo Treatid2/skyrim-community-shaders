@@ -34,8 +34,8 @@ namespace
 	using json = nlohmann::json;
 	using CSX::RenderMap::ControlStatus;
 	constexpr std::uint32_t kContractMajor = 1;
-	constexpr std::uint32_t kContractMinor = 21;
-	constexpr std::uint32_t kSchemaRevision = 23;
+	constexpr std::uint32_t kContractMinor = 22;
+	constexpr std::uint32_t kSchemaRevision = 24;
 	using namespace CSX::RenderMap::DevBenchBounds;
 	constexpr auto kPlannedEventKinds =
 		CSX::RenderMap::EventKindBit(CSX::RenderMap::EventKind::kFrameBegin) |
@@ -345,6 +345,8 @@ namespace
 										  { "captureStartProvenanceRequired", true },
 									  } },
 				{ "startAdmission", "provenance-and-response-before-hook-activation" },
+				{ "activationModes", json::array({ "immediate", "main_post_processing" }) },
+				{ "lateWindow", { { "runtime", "SkyrimVR" }, { "prefixHistory", "unobserved" }, { "bootstrap", "activation-getters" }, { "completion", "same-frame-cycle-and-publication-accepted-eye-pair" }, { "maximumActivationWaitMs", kMaximumDurationMs }, { "automaticFinalization", false } } },
 				{ "limits", {
 								{ "maximumFrames", kMaximumFrames },
 								{ "maximumDurationMs", kMaximumDurationMs },
@@ -439,6 +441,17 @@ namespace
 			if (a_args.contains("executionWithinSelectedGeometry") && !a_args["executionWithinSelectedGeometry"].is_boolean())
 				return Foundation().MakeError(a_args, "invalid_field", "executionWithinSelectedGeometry must be a boolean", "validation", false, "executionWithinSelectedGeometry");
 			const auto executionWithinSelectedGeometry = a_args.value("executionWithinSelectedGeometry", false);
+			if (a_args.contains("activation") && !a_args["activation"].is_string())
+				return Foundation().MakeError(a_args, "invalid_field", "activation must be a string", "validation", false, "activation");
+			const auto activation = a_args.value("activation", std::string("immediate"));
+			const bool lateWindow = activation == "main_post_processing";
+			if (activation != "immediate" && !lateWindow)
+				return Foundation().MakeError(a_args, "invalid_field", "activation must be immediate or main_post_processing", "validation", false, "activation");
+			if (lateWindow && (!REL::Module::IsVR() || executionWithinSelectedGeometry ||
+								  (requestedEventKindMask & CSX::RenderMap::EventKindBit(CSX::RenderMap::EventKind::kEyeSubmitted)) == 0))
+				return Foundation().MakeError(a_args, "invalid_activation", "late activation requires VR, requested eye-submitted and unrestricted geometry execution", "validation", false, "activation");
+			if (!lateWindow && a_args.contains("maxActivationWaitMs"))
+				return Foundation().MakeError(a_args, "invalid_field", "maxActivationWaitMs requires main_post_processing activation", "validation", false, "maxActivationWaitMs");
 			if (const auto violation = Validate(a_args)) {
 				if (violation->invalidType)
 					return Foundation().MakeError(a_args, "invalid_field", "capture bound must be an unsigned integer", "validation", false, violation->bound.field);
@@ -474,6 +487,9 @@ namespace
 				.geometryShaderTypeMask = geometryShaderTypeMask,
 				.executionWithinSelectedGeometry = executionWithinSelectedGeometry,
 				.requestedEventKindMask = requestedEventKindMask,
+				.latePostProcessingWindow = lateWindow,
+				.activationTarget = static_cast<std::uint32_t>(RE::RENDER_TARGET::kMAIN),
+				.maxActivationWait = std::chrono::milliseconds(a_args.value("maxActivationWaitMs", kDefaultDurationMs)),
 			};
 			const auto maxBytes = a_args.value("maxBytes", kDefaultBytes);
 			config.maxBytes = maxBytes;
@@ -640,7 +656,7 @@ namespace CSX::RenderMap::DevBenchBridge
 			return;
 		}
 		const char* descriptor = R"({
-			"description":"Versioned, explicitly bounded CSX render-map diagnostic capture. Capture is off by default; start retains runtime provenance and its response before hook activation. Stop requires the original capture-start provenance; events are read only after stop. Main_PostProcessing observations retain native bindings, raster state, candidate command epochs and accepted eye publication; these do not prove pixel transfers.",
+			"description":"Versioned, explicitly bounded CSX render-map diagnostic capture. Capture is off by default; start retains runtime provenance and its response before hook activation. Stop requires the original capture-start provenance; events are read only after stop. The VR-only main_post_processing selector arms with a bounded wait, bootstraps queried native state at the original main-target boundary and retains dependent late events through a same-frame accepted-eye pair with matching cycle/publication. Earlier history is explicitly unobserved. Main_PostProcessing observations retain native bindings, raster state, candidate command epochs and accepted eye publication; these do not prove pixel transfers.",
 			"inputSchema":{"type":"object","required":["contractMajor","clientId","commandId","action"],"properties":{
 				"contractMajor":{"type":"integer","const":1},"clientId":{"type":"string","minLength":1,"maxLength":128},
 				"commandId":{"type":"string","minLength":1,"maxLength":128},"expectedBuildId":{"type":"string"},
@@ -649,6 +665,8 @@ namespace CSX::RenderMap::DevBenchBridge
 				"eventKinds":{"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"string"}},
 				"geometryShaderTypes":{"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"integer","minimum":0,"maximum":63}},
 				"executionWithinSelectedGeometry":{"type":"boolean"},
+				"activation":{"type":"string","enum":["immediate","main_post_processing"],"default":"immediate","description":"VR-only late window at the original main-target Main_PostProcessing call through a matching accepted-eye pair. Requires eye-submitted and excludes earlier pipeline work."},
+				"maxActivationWaitMs":{"type":"integer","minimum":1,"maximum":10000,"default":2000,"description":"Bounded armed wait for main_post_processing activation, separate from the active maxDurationMs."},
 				"maxFrames":{"type":"integer","minimum":1,"maximum":600},
 				"maxDurationMs":{"type":"integer","minimum":1,"maximum":10000},"maxEvents":{"type":"integer","minimum":1,"maximum":65536},
 				"maxBytes":{"type":"integer","minimum":1,"maximum":67108864},"maxScopeDepth":{"type":"integer","minimum":1,"maximum":32},
