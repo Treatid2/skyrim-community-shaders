@@ -480,13 +480,24 @@ capability explicitly permits both.
   `Pictures\Community Shaders`; relative sequence paths resolve below
   `Videos\Community Shaders`.
 - `game_relative` resolves under the canonical game directory.
+- Sequence preparation retains the approved game or Windows capture root,
+  opens or creates each destination component relative to its retained parent,
+  and rejects reparse points, conflicting write/delete handles, unsafe
+  components, and paths requiring more than 256 components. The actual opened
+  parent supplies `resolvedDirectory`. These handles remain held through frame
+  and manifest publication; result-application retries retain the same lease.
+- Explicit absolute destinations and absolute configured settings retain their
+  unrestricted destination policy. Each sequence child is created exclusively
+  with the full request identity, so an existing directory is never adopted.
 - `absolute` is accepted only when advertised and must be an absolute canonical
   path.
 - Relative traversal outside the selected root is rejected as `unsafe_path`.
 - Existing files are never overwritten in version 1. `overwrite` must be
   `never`; name collisions receive a deterministic numeric suffix.
-- The worker writes a sibling temporary file, flushes and closes it, then
-  atomically renames it to the final name where the filesystem permits.
+- The worker encodes in memory and creates a sibling temporary file exclusively.
+  It retains the producer handle while writing, flushing and publishing with a
+  native same-directory leaf rename, then verifies the final path and identity.
+  This preserves the directory lease throughout atomic publication.
 - The receipt records both the requested destination policy and resolved path.
 - The API never deletes artifacts.
 
@@ -666,6 +677,29 @@ Manifest snapshots are immutable. Both document assembly and retirement of
 retained child snapshots run on the manifest worker. Retirement releases the
 chain iteratively, including when requests are acknowledged or expire, so
 long sequences cannot cause recursive destruction on the render path.
+
+Contract 1.1, schema revision 2 adds independent destination-preparation and
+manifest-publication I/O lanes. Sequence admission freezes the configured
+path and returns a `preparing` receipt without filesystem work. Until
+preparation finishes, the receipt reports `preparationPending: true` and a
+null partial-manifest path. Queued cancellation skips preparation; an active
+synchronous filesystem call may finish. Stop/cancel after successful
+preparation queues only the terminal manifest.
+
+Outstanding preparation work is limited to 64 and publication work to 256,
+including completed results waiting for application. Partial checkpoints use
+at most 192 publication slots, reserving 64 for final manifests. Preparation
+admission closes at 256 retired child chains; the remaining 64 active
+operations bound retirement overshoot. Capabilities report the thresholds;
+`status.ioWorkers` reports outstanding work and lane admission state.
+
+Preparation result application preserves work through publication failures
+using the existing retry-delay policy. The background result service drains
+both lanes independently of render ticks; the dispatch deadline watchdog
+remains independent. Shutdown marks cancellation before applying ready
+preparation results. Destruction uses one absolute two-second I/O deadline.
+After that deadline, blocked workers retain isolated shared state until
+their active call returns; timeout does not claim filesystem cancellation.
 
 Manifest result publication uses one retry gate shared by the background
 publisher and foreground drains (request, replay, and render tick). Failed

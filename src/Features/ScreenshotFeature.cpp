@@ -7,6 +7,7 @@
 #include "Api/ScreenshotService.h"
 #include "Features/ScreenshotApi.h"
 #include "Features/ScreenshotApiPolicy.h"
+#include "Features/ScreenshotStorageSecurity.h"
 #include "Features/VR.h"
 #include "Globals.h"
 #include "Menu.h"
@@ -1612,15 +1613,11 @@ namespace
 		                           (outputPath.stem().wstring() +
 									   std::format(L".writing-{}-{}", GetCurrentProcessId(), GetTickCount64()) +
 									   outputPath.extension().wstring());
-		std::error_code ec;
-		std::filesystem::remove(temporaryPath, ec);
-		if (FAILED(DirectX::SaveToWICFile(*saveImage, wicFlags, codec, temporaryPath.c_str())))
+		DirectX::Blob encoded;
+		if (FAILED(DirectX::SaveToWICMemory(*saveImage, wicFlags, codec, encoded)))
 			return false;
-		std::filesystem::rename(temporaryPath, outputPath, ec);
-		if (ec) {
-			std::filesystem::remove(temporaryPath, ec);
-			return false;
-		}
+		CSX::ScreenshotStorage::CommittedFile::WriteAtomically(
+			temporaryPath, outputPath, encoded.GetBufferPointer(), encoded.GetBufferSize(), false);
 		return true;
 	}
 

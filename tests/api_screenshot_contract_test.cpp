@@ -14,7 +14,7 @@ int main()
 {
 	CSX::ScreenshotAPI::Interface001 service;
 	if (service.structSize != sizeof(service) ||
-		service.major != 1 || service.minor != 0 || service.schemaRevision != 1)
+		service.major != 1 || service.minor != 1 || service.schemaRevision != 2)
 		throw std::runtime_error("screenshot service metadata defaults are invalid");
 	if (std::string_view(CSX::ScreenshotAPI::ServiceName) != "csx.screenshot")
 		throw std::runtime_error("screenshot service identity is invalid");

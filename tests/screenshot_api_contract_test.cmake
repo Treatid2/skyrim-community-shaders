@@ -91,6 +91,9 @@ foreach(_required_contract_text IN ITEMS
 	outstandingArtifacts outstandingCaptureJobs captureJobCapacity
 	commandAccepted finalizationCommitted sequence.abort_requested
 	ManifestResultLoop manifestResultDrainer results.splice applicationFailures
+	PreparationWorkerLoop preparationPending destination_preparation_failed
+	destinationPreparationJobs manifestPublicationJobs partialManifestPublicationJobs
+	destinationPreparationOutstanding manifestPublicationOutstanding
 	packagingEventPublished is_nothrow_move_assignable_v
 	manifest_result_publication_retried condition.notify_all
 	nextApplicationAttempt resultApplicationActive PublicationRetryDelay
@@ -205,5 +208,18 @@ string(FIND "${_plugin_lifecycle}" "ScreenshotDevBenchBridge::Install();" _early
 if(_postload_position EQUAL -1 OR _early_install_position LESS _postload_position)
     message(FATAL_ERROR "Screenshot DevBench discovery must be attempted during PostLoad")
 endif()
+
+foreach(_custody_contract
+    "DirectoryLease::CreateExclusive(resolved, work.requestId, approvedRoot)"
+    "PathUtf8(work.directoryLease->Destination())"
+    "sequence.directoryLease = result.directoryLease"
+    "job.directoryLease->VerifyDirectChild(job.destination)"
+    ".directoryLease = a_sequence.directoryLease"
+)
+    string(FIND "${_implementation}" "${_custody_contract}" _custody_position)
+    if(_custody_position EQUAL -1)
+        message(FATAL_ERROR "Screenshot custody contract missing: ${_custody_contract}")
+    endif()
+endforeach()
 
 message(STATUS "Screenshot API contract, schemas, goldens, migration, actions, and journal events are coherent")
