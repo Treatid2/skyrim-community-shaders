@@ -95,6 +95,15 @@ Stop requires the original capture-start context and returns
 `capture_provenance_unavailable` if that context is absent, without rebuilding
 provenance at stop time.
 
+Before publishing stop artifacts, the adapter reserves its cache entry and
+prunes older retained state. Cache admission failure writes no files. A
+verified bundle moves into that entry without allocation before constructing
+the response. If response construction fails, a fresh `stop` command for the
+retained capture returns the same paths, hashes and byte counts without
+rewriting either file. This recovery requires the live process and retained
+capture/cache; it does not recover a bundle after process exit. Existing
+unrelated files still fail the writer's no-overwrite contract.
+
 Artifact runtime identity uses the loaded SE/AE or VR executable family and
 CommonLib's observed runtime version. Missing exact version evidence is null.
 Observed shader compilation identity must agree with the loaded runtime family;
