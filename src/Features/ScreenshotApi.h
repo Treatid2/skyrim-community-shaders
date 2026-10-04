@@ -3,6 +3,7 @@
 #include "Api/ServiceFoundation.h"
 #include "Features/ScreenshotApiPolicy.h"
 #include "ScreenshotManifestSnapshot.h"
+#include "ScreenshotStorageSecurity.h"
 #include "ScreenshotWorkerThread.h"
 
 #include <chrono>
@@ -146,6 +147,7 @@ private:
 		uint64_t manifestGeneration = 0;
 		uint64_t finalManifestGeneration = 0;
 		std::filesystem::path directory;
+		std::shared_ptr<CSX::ScreenshotStorage::DirectoryLease> directoryLease;
 		std::filesystem::path partialManifestPath;
 		std::filesystem::path finalManifestPath;
 		std::shared_ptr<const ManifestChildNode> manifestChildren;
@@ -159,6 +161,7 @@ private:
 		json capture = json::object();
 		std::filesystem::path configuredDirectory;
 		std::filesystem::path directory;
+		std::shared_ptr<CSX::ScreenshotStorage::DirectoryLease> directoryLease;
 		bool success = false;
 		bool cancelled = false;
 		std::string error = "sequence destination preparation failed";
@@ -186,6 +189,7 @@ private:
 		bool final = false;
 		std::filesystem::path destination;
 		std::filesystem::path partialPath;
+		std::shared_ptr<CSX::ScreenshotStorage::DirectoryLease> directoryLease;
 		json header = json::object();
 		std::shared_ptr<const ManifestChildNode> children;
 	};
@@ -324,7 +328,6 @@ private:
 	bool CanAdmitPreparationLocked() const;
 	void CancelQueuedPreparationLocked(std::string_view a_requestId);
 	static void PreparationWorkerLoop(std::shared_ptr<PreparationWorkerState> a_state);
-	static std::filesystem::path CreateSequenceDirectory(const std::filesystem::path& a_resolved, std::string_view a_requestId);
 	static void ManifestWorkerLoop(std::shared_ptr<ManifestWorkerState> a_state);
 	void ManifestResultLoop(std::stop_token a_stopToken);
 	std::optional<DueFrame> PrepareDueFrameLocked(uint64_t a_engineFrame);
@@ -339,5 +342,6 @@ private:
 	static std::filesystem::path ResolveDestinationDirectory(
 		const std::filesystem::path& a_configuredDirectory,
 		const json& a_capture,
-		bool a_sequence = false);
+		bool a_sequence = false,
+		std::filesystem::path* a_approvedRoot = nullptr);
 };

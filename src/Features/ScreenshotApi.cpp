@@ -36,7 +36,8 @@ namespace
 
 	std::filesystem::path ResolveConfiguredCaptureDirectory(
 		const std::filesystem::path& a_configured,
-		bool a_sequence)
+		bool a_sequence,
+		std::filesystem::path* a_approvedRoot = nullptr)
 	{
 		if (a_configured.empty())
 			throw std::runtime_error("the configured screenshot directory is empty");
@@ -50,6 +51,8 @@ namespace
 		const auto resolved = std::filesystem::weakly_canonical(root / a_configured);
 		if (!CSX::ScreenshotPolicy::IsContainedPath(root, resolved))
 			throw std::runtime_error("the configured screenshot directory escapes its Windows capture root");
+		if (a_approvedRoot)
+			*a_approvedRoot = std::filesystem::weakly_canonical(*knownFolder);
 		return resolved;
 	}
 
@@ -126,21 +129,9 @@ namespace
 		const std::filesystem::path& a_destination,
 		const json& a_document)
 	{
-		std::filesystem::create_directories(a_destination.parent_path());
-		const auto temporary = a_destination.string() + ".tmp";
-		{
-			std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
-			stream << a_document.dump(2);
-			stream.flush();
-			if (!stream)
-				throw std::runtime_error("manifest write failed");
-		}
-		if (!MoveFileExW(
-				std::filesystem::path(temporary).c_str(),
-				a_destination.c_str(),
-				MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-			throw std::runtime_error(std::format("manifest commit failed with Win32 error {}", GetLastError()));
-		}
+		const auto bytes = a_document.dump(2);
+		CSX::ScreenshotStorage::CommittedFile::WriteAtomically(
+			a_destination.native() + L".tmp", a_destination, bytes.data(), bytes.size(), true);
 	}
 
 	std::string SourceName(ScreenshotFeature::VRCaptureSource a_source)
@@ -337,9 +328,11 @@ void ScreenshotApi::PreparationWorkerLoop(std::shared_ptr<PreparationWorkerState
 		auto& work = active.front();
 		try {
 			if (!work.cancelled) {
-				const auto resolved = ResolveDestinationDirectory(work.configuredDirectory, work.capture, true);
-				work.capture["destination"]["resolvedDirectory"] = PathUtf8(resolved);
-				work.directory = CreateSequenceDirectory(resolved, work.requestId);
+				std::filesystem::path approvedRoot;
+				const auto resolved = ResolveDestinationDirectory(work.configuredDirectory, work.capture, true, &approvedRoot);
+				work.directoryLease = CSX::ScreenshotStorage::DirectoryLease::CreateExclusive(resolved, work.requestId, approvedRoot);
+				work.directory = work.directoryLease->Path();
+				work.capture["destination"]["resolvedDirectory"] = PathUtf8(work.directoryLease->Destination());
 				work.success = true;
 			}
 		} catch (const std::exception& error) {
@@ -364,13 +357,6 @@ void ScreenshotApi::PreparationWorkerLoop(std::shared_ptr<PreparationWorkerState
 		a_state->exited = true;
 	}
 	a_state->condition.notify_all();
-}
-
-std::filesystem::path ScreenshotApi::CreateSequenceDirectory(const std::filesystem::path& a_resolved, std::string_view a_requestId)
-{
-	const auto directory = a_resolved / ("CS_sequence_" + ShortId(a_requestId));
-	std::filesystem::create_directories(directory);
-	return directory;
 }
 
 void ScreenshotApi::ManifestWorkerLoop(std::shared_ptr<ManifestWorkerState> a_state)
@@ -437,7 +423,11 @@ void ScreenshotApi::ManifestWorkerLoop(std::shared_ptr<ManifestWorkerState> a_st
 				document["children"].get_ref<json::array_t&>().reserve(orderedChildren.size());
 				for (const auto& child : orderedChildren)
 					document["children"].push_back(child->child);
+				if (!job.directoryLease)
+					throw std::runtime_error("manifest directory ownership is unavailable");
+				job.directoryLease->VerifyDirectChild(job.destination);
 				WriteJsonAtomically(job.destination, document);
+				job.directoryLease->VerifyDirectChild(job.destination);
 				if (job.final) {
 					std::error_code ec;
 					std::filesystem::remove(job.partialPath, ec);
@@ -1827,6 +1817,7 @@ void ScreenshotApi::FinalizeSequenceLocked(
 	                                        (a_sequence.written == 0 ? "failed" : "failed_partial");
 	TransitionLocked(updatedParent, terminal, "request.terminal", { { "manifestPath", a_sequence.frameManifest && manifestWritten ? json(PathUtf8(a_sequence.finalManifestPath)) : json(nullptr) } });
 	parent->second = std::move(updatedParent);
+	a_sequence.directoryLease.reset();
 }
 
 void ScreenshotApi::QueueSequenceManifestLocked(SequenceRecord& a_sequence, bool a_final)
@@ -1857,6 +1848,7 @@ void ScreenshotApi::QueueSequenceManifestLocked(SequenceRecord& a_sequence, bool
 			.final = a_final,
 			.destination = a_final ? a_sequence.finalManifestPath : a_sequence.partialManifestPath,
 			.partialPath = a_sequence.partialManifestPath,
+			.directoryLease = a_sequence.directoryLease,
 			.header = {
 				{ "contract", { { "name", "csx.screenshot" }, { "major", kContractMajor }, { "minor", kContractMinor }, { "schemaRevision", kSchemaRevision } } },
 				{ "producer", BuildProvenance::GetProducer() },
@@ -1979,6 +1971,7 @@ void ScreenshotApi::DrainPreparationResultsLocked()
 				auto& sequence = found->second;
 				if (result.success) {
 					sequence.capture = result.capture;
+					sequence.directoryLease = result.directoryLease;
 					sequence.directory = result.directory;
 					sequence.partialManifestPath = result.directory / "sequence.json.partial";
 					sequence.finalManifestPath = result.directory / "sequence.json";
@@ -2160,7 +2153,7 @@ std::optional<ScreenshotApi::DueFrame> ScreenshotApi::PrepareDueFrameLocked(uint
 		if (found == sequences.end())
 			continue;
 		auto& sequence = found->second;
-		if (sequence.preparationPending || sequence.finalizing || sequence.stopRequested || sequence.cancelRequested || sequence.abortRequested || sequence.inFlight != 0 || sequence.nextOrdinal > sequence.frameCount)
+		if (sequence.preparationPending || !sequence.directoryLease || sequence.finalizing || sequence.stopRequested || sequence.cancelRequested || sequence.abortRequested || sequence.inFlight != 0 || sequence.nextOrdinal > sequence.frameCount)
 			continue;
 		const bool due = sequence.scheduleBasis == "game_frames" ? a_engineFrame >= sequence.nextEngineFrame : now >= sequence.nextWallClock;
 		if (!due)
@@ -2536,8 +2529,11 @@ bool ScreenshotApi::DrainForShutdown(std::chrono::milliseconds a_timeout)
 std::filesystem::path ScreenshotApi::ResolveDestinationDirectory(
 	const std::filesystem::path& a_configuredDirectory,
 	const json& a_capture,
-	bool a_sequence)
+	bool a_sequence,
+	std::filesystem::path* a_approvedRoot)
 {
+	if (a_approvedRoot)
+		a_approvedRoot->clear();
 	const auto destination = a_capture.value("destination", json::object());
 	const auto policy = destination.value("policy", std::string("settings_default"));
 	wchar_t executable[MAX_PATH]{};
@@ -2549,7 +2545,7 @@ std::filesystem::path ScreenshotApi::ResolveDestinationDirectory(
 	std::filesystem::path requested;
 	if (policy == "settings_default") {
 		requested = a_configuredDirectory;
-		return ResolveConfiguredCaptureDirectory(requested, a_sequence);
+		return ResolveConfiguredCaptureDirectory(requested, a_sequence, a_approvedRoot);
 	}
 
 	const auto directory = destination.value("directory", std::string{});
@@ -2567,5 +2563,7 @@ std::filesystem::path ScreenshotApi::ResolveDestinationDirectory(
 	const auto relative = std::filesystem::relative(resolved, gameDirectory);
 	if (relative.empty() || relative.is_absolute() || *relative.begin() == "..")
 		throw std::runtime_error("game_relative destination escapes the game directory");
+	if (a_approvedRoot)
+		*a_approvedRoot = gameDirectory;
 	return resolved;
 }

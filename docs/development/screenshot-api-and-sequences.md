@@ -480,13 +480,24 @@ capability explicitly permits both.
   `Pictures\Community Shaders`; relative sequence paths resolve below
   `Videos\Community Shaders`.
 - `game_relative` resolves under the canonical game directory.
+- Sequence preparation retains the approved game or Windows capture root,
+  opens or creates each destination component relative to its retained parent,
+  and rejects reparse points, conflicting write/delete handles, unsafe
+  components, and paths requiring more than 256 components. The actual opened
+  parent supplies `resolvedDirectory`. These handles remain held through frame
+  and manifest publication; result-application retries retain the same lease.
+- Explicit absolute destinations and absolute configured settings retain their
+  unrestricted destination policy. Each sequence child is created exclusively
+  with the full request identity, so an existing directory is never adopted.
 - `absolute` is accepted only when advertised and must be an absolute canonical
   path.
 - Relative traversal outside the selected root is rejected as `unsafe_path`.
 - Existing files are never overwritten in version 1. `overwrite` must be
   `never`; name collisions receive a deterministic numeric suffix.
-- The worker writes a sibling temporary file, flushes and closes it, then
-  atomically renames it to the final name where the filesystem permits.
+- The worker encodes in memory and creates a sibling temporary file exclusively.
+  It retains the producer handle while writing, flushing and publishing with a
+  native same-directory leaf rename, then verifies the final path and identity.
+  This preserves the directory lease throughout atomic publication.
 - The receipt records both the requested destination policy and resolved path.
 - The API never deletes artifacts.
 

@@ -48,6 +48,25 @@ namespace BuildProvenance
 }
 std::string PathUtf8(const std::filesystem::path& path) { return path.string(); }
 
+namespace CSX::ScreenshotStorage
+{
+	struct DirectoryLease
+	{
+		std::filesystem::path destination;
+		std::filesystem::path directory;
+		static std::shared_ptr<DirectoryLease> CreateExclusive(
+			const std::filesystem::path& path, std::string_view, const std::filesystem::path& root)
+		{
+			if (root != "fixture-approved-root")
+				throw std::runtime_error("preparation did not forward its approved root");
+			return std::make_shared<DirectoryLease>(DirectoryLease{ path / "actual-parent", path / "actual-parent" / "fixture-sequence" });
+		}
+		const std::filesystem::path& Destination() const { return destination; }
+		const std::filesystem::path& Path() const { return directory; }
+		void VerifyDirectChild(const std::filesystem::path&) const {}
+	};
+}
+
 struct BlockingIo
 {
 	std::mutex mutex;
@@ -141,18 +160,15 @@ struct ScreenshotApi
 		std::unique_lock lock(mutex);
 		dispatchDeadlineCondition.wait(lock, token, [] { return false; });
 	}
-	static std::filesystem::path ResolveDestinationDirectory(const std::filesystem::path& path, const json&, bool)
+	static std::filesystem::path ResolveDestinationDirectory(const std::filesystem::path& path, const json&, bool, std::filesystem::path* root)
 	{
+		*root = "fixture-approved-root";
 		++preparationCalls;
 		if (path == "blocked-preparation")
 			preparationIo.Wait();
 		if (path == "denied-preparation")
 			throw std::runtime_error("controlled preparation failure");
 		return path;
-	}
-	static std::filesystem::path CreateSequenceDirectory(const std::filesystem::path& path, std::string_view)
-	{
-		return path / "fixture-sequence";
 	}
 	void StopResultService()
 	{
@@ -192,7 +208,7 @@ struct ScreenshotApi
 		{
 			std::lock_guard workerLock(manifestWorkerState->mutex);
 			manifestWorkerState->jobs.push_back({
-				.job = { .requestId = id, .generation = 1, .final = true, .destination = path },
+				.job = { .requestId = id, .generation = 1, .final = true, .destination = path, .directoryLease = std::make_shared<CSX::ScreenshotStorage::DirectoryLease>() },
 				.result = { .requestId = id, .generation = 1, .final = true, .destination = path },
 			});
 			++manifestWorkerState->outstanding;
@@ -230,6 +246,13 @@ int main()
 		manifestIo.AwaitEntry();
 		api->AdmitPreparation("independent", "ready");
 		Await([&] { std::lock_guard lock(api->mutex); return !api->sequences.at("independent").preparationPending; });
+		{
+			std::lock_guard lock(api->mutex);
+			const auto& prepared = api->sequences.at("independent");
+			Require(prepared.directoryLease && prepared.directory == std::filesystem::path("ready/actual-parent/fixture-sequence") &&
+						prepared.capture["destination"]["resolvedDirectory"] == PathUtf8(prepared.directoryLease->Destination()),
+				"preparation receipt did not bind the retained parent and sequence lease");
+		}
 		Require(!api->DrainForShutdown(std::chrono::milliseconds(20)), "blocked manifest reported drained");
 		manifestIo.Release();
 		Require(api->DrainForShutdown(std::chrono::seconds(2)), "independent lanes did not drain");
