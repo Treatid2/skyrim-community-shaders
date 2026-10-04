@@ -1,5 +1,12 @@
 #include "RenderMap/D3DContextHooks.h"
 #include "RenderMap/Runtime.h"
+#if defined(_WIN32)
+#	ifndef NOMINMAX
+#		define NOMINMAX
+#	endif
+#	include "Utils/D3DPrivateDataLifetime.h"
+#	include "Utils/D3DShaderCreationObservation.h"
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -442,6 +449,184 @@ namespace
 						  snapshot->window.bootstrapEventCount > 0 && !snapshot->window.bootstrapComplete,
 					"expired bootstrap lost its retained partial-event provenance");
 		}
+	}
+
+	void TestShaderBytecodeCatalogueBounds()
+	{
+		ShaderBytecodeCatalogue catalogue(2, 8);
+		const std::array<std::uint8_t, 10> bytes{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+		auto* first = reinterpret_cast<void*>(0xA100);
+		auto* second = reinterpret_cast<void*>(0xA200);
+		auto* third = reinterpret_cast<void*>(0xA300);
+		auto record = [] { return ShaderBytecodeCatalogue::Record{ .bytecodeSize = 4 }; };
+		Check(catalogue.Store(first, record(), bytes.data(), 4, true) == ShaderBytecodeCatalogue::Admission::kStored,
+			"first dump was not admitted");
+		Check(catalogue.Store(second, record(), bytes.data(), 4, true) == ShaderBytecodeCatalogue::Admission::kStored,
+			"exact dump-byte bound was not admitted");
+		Check(catalogue.Store(third, record(), bytes.data(), 4, true) == ShaderBytecodeCatalogue::Admission::kIdentityLimit,
+			"bytecode identity count exceeded its bound");
+		Check(catalogue.Store(first, record(), bytes.data(), 4, true) == ShaderBytecodeCatalogue::Admission::kStored &&
+				  catalogue.ReadBytes(first).size() == 4 && catalogue.ReadBytes(second).size() == 4,
+			"replacement did not credit the previous retained dump");
+		catalogue.Retire(first);
+		Check(catalogue.Store(third, record(), bytes.data(), 8, true) == ShaderBytecodeCatalogue::Admission::kDumpUnavailable &&
+				  catalogue.ReadBytes(third).empty(),
+			"unavailable dump retained bytes beyond its remaining budget");
+		std::uint64_t size = 999;
+		std::array<char, kSha256HexLength + 1> digest{};
+		Check(!catalogue.ReadIdentity(first, size, digest) && size == 0,
+			"retired bytecode identity remained available");
+		Check(catalogue.ReadIdentity(third, size, digest) && size == 8,
+			"dump rejection lost independently available metadata");
+		catalogue.Retire(second);
+		Check(catalogue.Store(third, record(), bytes.data(), 8, true) == ShaderBytecodeCatalogue::Admission::kStored &&
+				  catalogue.ReadBytes(third).size() == 8,
+			"retirement did not reclaim the dump budget");
+		catalogue.Retire(third);
+		Check(catalogue.Store(first, record(), bytes.data(), bytes.size(), false) == ShaderBytecodeCatalogue::Admission::kStored &&
+				  catalogue.ReadBytes(first).empty(),
+			"capture-disabled metadata retained an unrequested dump");
+		auto preallocated = record();
+		preallocated.bytes.assign(32, 1);
+		Check(catalogue.Store(first, std::move(preallocated), bytes.data(), 4, true) == ShaderBytecodeCatalogue::Admission::kStored &&
+				  catalogue.ReadBytes(first).size() == 4,
+			"caller-provided bytes bypassed retained-dump admission");
+		ShaderBytecodeCatalogue closed(0, 0);
+		Check(closed.Store(first, record(), nullptr, 0, false) == ShaderBytecodeCatalogue::Admission::kIdentityLimit,
+			"zero-identity policy failed open");
+	}
+
+	void TestNativeShaderCreationPreservesResultOnDiagnosticFailure()
+	{
+#if defined(_WIN32)
+		struct NativeShader
+		{
+			unsigned identity;
+		};
+		for (const auto stage : { ShaderStage::kVertex, ShaderStage::kPixel, ShaderStage::kCompute }) {
+			NativeShader shader{ static_cast<unsigned>(stage) };
+			auto* output = &shader;
+			for (unsigned phase = 0; phase < 4; ++phase) {
+				const auto failuresBefore = ShaderMetadataFailureCount();
+				bool called = false;
+				const auto result = Util::ObserveSuccessfulShaderCreation(S_FALSE, &output, [&](auto* observed) {
+					called = observed == &shader;
+					if (phase == 3)
+						throw 17;
+					throw std::bad_alloc();
+				});
+				Check(called && result == S_FALSE && output == &shader &&
+						  ShaderMetadataFailureCount() == failuresBefore + 1,
+					"diagnostic byte/hash/runtime/map failure changed native shader success");
+			}
+			bool called = false;
+			Check(Util::ObserveSuccessfulShaderCreation(E_FAIL, &output, [&](auto*) { called = true; }) == E_FAIL &&
+					  !called && output == &shader,
+				"native failure entered the diagnostic observer");
+			output = nullptr;
+			Check(Util::ObserveSuccessfulShaderCreation(S_OK, &output, [&](auto*) { called = true; }) == S_OK && !called,
+				"missing native output entered diagnostics");
+			Check(Util::ObserveSuccessfulShaderCreation(S_OK, static_cast<NativeShader**>(nullptr), [&](auto*) { called = true; }) == S_OK && !called,
+				"missing native output address entered diagnostics");
+			output = &shader;
+			Check(Util::ObserveSuccessfulShaderCreation(S_OK, &output, [&](auto* observed) { called = observed == &shader; }) == S_OK &&
+					  called && output == &shader,
+				"normal diagnostic observation changed native shader success");
+		}
+#endif
+	}
+
+	void TestNativeShaderMetadataLifetime()
+	{
+#if defined(_WIN32)
+		struct PrivateDataOwner
+		{
+			IUnknown* retained{ nullptr };
+			bool reject{ false };
+			HRESULT SetPrivateDataInterface(REFGUID, IUnknown* a_value)
+			{
+				if (reject)
+					return E_FAIL;
+				retained = a_value;
+				retained->AddRef();
+				return S_OK;
+			}
+			~PrivateDataOwner()
+			{
+				if (retained)
+					retained->Release();
+			}
+		};
+		constexpr GUID lifetimeGuid{ 0x2748c12a, 0x197b, 0x4d6e, {} };
+		unsigned cleanups = 0;
+		{
+			PrivateDataOwner rejected{ .reject = true };
+			Check(FAILED(Util::AttachD3DPrivateDataLifetime(rejected, lifetimeGuid,
+					  [&cleanups]() noexcept { ++cleanups; })) &&
+					  cleanups == 0,
+				"failed private-data attachment ran unowned cleanup");
+		}
+		{
+			PrivateDataOwner owner;
+			Check(SUCCEEDED(Util::AttachD3DPrivateDataLifetime(owner, lifetimeGuid,
+					  [&cleanups]() noexcept { ++cleanups; })) &&
+					  cleanups == 0,
+				"retained native private data was retired early");
+			IUnknown* queried = nullptr;
+			Check(owner.retained->QueryInterface(__uuidof(IUnknown), reinterpret_cast<void**>(&queried)) == S_OK,
+				"lifetime sentinel violated IUnknown identity");
+			queried->Release();
+			Check(cleanups == 0, "temporary sentinel reference retired native metadata");
+		}
+		Check(cleanups == 1, "native private-data release did not retire metadata exactly once");
+#endif
+
+		std::function<void()> lateCleanup;
+		{
+			Runtime runtime;
+			runtime.RegisterCreatedStageShader(ShaderStage::kVertex, 0xB100, 128, "old");
+			lateCleanup = runtime.MakeStageShaderRetirementCallback(ShaderStage::kVertex, 0xB100);
+			lateCleanup();
+			runtime.SetImmediateContext(0xB000);
+			runtime.BindStage(0xB000, ShaderStage::kVertex, 0xB100);
+			Check(runtime.StartCapture(Config()) == StartResult::kStarted, "retirement capture did not start");
+			runtime.RecordDraw(0xB000, DrawOperation::kDraw, 3);
+			const auto snapshot = runtime.StopCapture();
+			Check(snapshot && snapshot->stageShaderObservations.size() == 1 &&
+					  snapshot->stageShaderObservations[0].bytecodeSize == 0,
+				"retired creation identity survived into a later capture");
+		}
+		lateCleanup();
+	}
+
+	void TestPersistentShaderRetentionBounds()
+	{
+		Runtime runtime;
+		constexpr std::uintptr_t firstShader = 0x10000;
+		for (std::size_t index = 0; index < kMaximumPersistentStageShaders; ++index)
+			runtime.RegisterCreatedStageShader(ShaderStage::kVertex, firstShader + index, 128, "bounded");
+		const auto overflowShader = firstShader + kMaximumPersistentStageShaders;
+		runtime.RegisterCreatedStageShader(ShaderStage::kVertex, overflowShader, 256, "overflow");
+		runtime.SetImmediateContext(0xB000);
+		runtime.BindStage(0xB000, ShaderStage::kVertex, overflowShader);
+		Check(runtime.StartCapture(Config()) == StartResult::kStarted, "bounded identity capture did not start");
+		runtime.RecordDraw(0xB000, DrawOperation::kDraw, 3);
+		const auto first = runtime.StopCapture();
+		Check(first && first->stageShaderObservations.size() == 1 && first->stageShaderObservations[0].bytecodeSize == 0,
+			"persistent catalogue admitted an identity beyond its bound");
+		runtime.MakeStageShaderRetirementCallback(ShaderStage::kVertex, firstShader)();
+		runtime.RegisterCreatedStageShader(ShaderStage::kVertex, overflowShader, 256, "admitted");
+		for (std::uint32_t index = 0; index < kMaximumEngineShaderAliasesPerStage + 2; ++index)
+			runtime.RegisterEngineStageShader(ShaderStage::kVertex, overflowShader, "Lighting", index, "Lighting");
+		Check(runtime.StartCapture(Config()) == StartResult::kStarted, "reclaimed identity capture did not start");
+		runtime.RecordDraw(0xB000, DrawOperation::kDraw, 3);
+		const auto second = runtime.StopCapture();
+		Check(second && second->stageShaderObservations.size() == 1 && second->stageShaderObservations[0].bytecodeSize == 256,
+			"native retirement did not free persistent catalogue capacity");
+		const auto& admitted = second->stageShaderObservations[0];
+		Check(admitted.engineAliasCount == kMaximumEngineShaderAliasesPerStage && admitted.engineAliasesTruncated &&
+				  admitted.engineAliasTotalCount == kMaximumEngineShaderAliasesPerStage + 1,
+			"alias retention overflow did not preserve an explicit lower bound");
 	}
 
 	void TestImmediateContextDrawAndDispatchState()
@@ -2720,6 +2905,10 @@ int main()
 		TestStageShaderObservationBoundIsExplicit();
 		TestLateWindowSkipsPrefixAndMatchesAcceptedPair();
 		TestLateWindowIncompleteConditions();
+		TestShaderBytecodeCatalogueBounds();
+		TestNativeShaderCreationPreservesResultOnDiagnosticFailure();
+		TestNativeShaderMetadataLifetime();
+		TestPersistentShaderRetentionBounds();
 		TestImmediateContextDrawAndDispatchState();
 		TestCaptureStartSeedsInheritedStageIdentity();
 		TestCreatedStagePointerReuseAdvancesIdentity();

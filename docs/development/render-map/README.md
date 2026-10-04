@@ -69,7 +69,7 @@ not enter the Community Shaders binary in either build mode.
 
 `communityshaders.render_map` publishes registry, status, start, stop and
 completed-event paging through the shared versioned service envelope. Contract
-1.22/schema revision 24 retains field-specific `invalid_bounds` errors with
+1.23/schema revision 25 retains field-specific `invalid_bounds` errors with
 the original value and independent minimum/maximum. Supplied bounds must be
 unsigned JSON integers and are checked before narrowing or duration conversion.
 
@@ -188,3 +188,22 @@ this window; it does not establish the earlier pipeline, producer freshness,
 native object lifetime, pixel transfer or GPU completion. Historical
 `RequiredStorageBytes` coefficients from another binary must not be reused:
 the current binary recomputes admission from its compiled structure sizes.
+
+## Persistent shader diagnostic storage
+
+Bridge-enabled shader provenance is retained independently of a live capture.
+Registry/status `shaderMetadata` declare separate limits: 65,536 bytecode
+identities, 65,536 stage identities, eight bounded aliases per stage identity,
+and 64 MiB of retained optional dump bytes. These limits are not included in
+the live capture's `maxBytes`; neither is a measured process-memory limit.
+Creation metadata retires through an attached D3D private-data reference whose
+cleanup retains only weak catalogue ownership. Failed attachment withholds
+metadata. Retirement reclaims identity/dump capacity; unavailable dumps never
+reuse an older byte sequence. Engine aliases require admitted creation metadata.
+
+Vertex, pixel and compute creation observations run behind a catch-all boundary
+that returns the original native HRESULT and output without modification. Missing
+outputs and failed native calls skip diagnostics. Hash/storage/registration/map
+exceptions and admission or cleanup failures increment the allocation-free
+`failureCount`; no logging or allocation is performed by the exception handler.
+COM teardown and native lifetime behavior still require live qualification.

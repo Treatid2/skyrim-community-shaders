@@ -10,6 +10,9 @@
 #ifdef DEVBENCH_BRIDGE_ENABLED
 #	include "RenderMap/D3DContextHooks.h"
 #	include "RenderMap/Runtime.h"
+#	include "RenderMap/ShaderBytecodeCatalogue.h"
+#	include "Utils/D3DShaderCreationObservation.h"
+#	include "Utils/D3DPrivateDataLifetime.h"
 #endif
 #include "ShaderCache.h"
 #include "State.h"
@@ -204,16 +207,17 @@ namespace
 		return boundary;
 	}
 
-	struct ShaderBytecodeRecord
-	{
-		std::vector<std::uint8_t> bytes;
-		std::uint64_t bytecodeSize{ 0 };
-		std::array<char, CSX::RenderMap::kSha256HexLength + 1> sha256{};
-		bool hashAvailable{ false };
-	};
+	using ShaderBytecodeRecord = CSX::RenderMap::ShaderBytecodeCatalogue::Record;
 
-	std::unordered_map<void*, ShaderBytecodeRecord> g_shaderBytecodeMap;
-	std::shared_mutex g_shaderBytecodeMutex;
+	std::shared_ptr<CSX::RenderMap::ShaderBytecodeCatalogue> GetShaderBytecodeStore()
+	{
+		static auto store = std::make_shared<CSX::RenderMap::ShaderBytecodeCatalogue>();
+		return store;
+	}
+
+	constexpr GUID kShaderMetadataLifetimeGuid{
+		0xd075a19e, 0x62e8, 0x4a50, { 0xab, 0x91, 0x34, 0xda, 0xf2, 0x65, 0x80, 0x11 }
+	};
 
 	std::string_view BoundedShaderString(const char* a_value) noexcept
 	{
@@ -357,14 +361,14 @@ namespace
 		std::uint64_t& a_size,
 		std::array<char, CSX::RenderMap::kSha256HexLength + 1>& a_sha256) noexcept
 	{
-		std::shared_lock lock(g_shaderBytecodeMutex);
-		const auto found = g_shaderBytecodeMap.find(a_shader);
-		if (found == g_shaderBytecodeMap.end())
+		try {
+			return GetShaderBytecodeStore()->ReadIdentity(a_shader, a_size, a_sha256);
+		} catch (...) {
+			CSX::RenderMap::RecordShaderMetadataFailure();
+			a_size = 0;
+			a_sha256 = {};
 			return false;
-		a_size = found->second.bytecodeSize;
-		a_sha256 = found->second.hashAvailable ? found->second.sha256 :
-		                                         std::array<char, CSX::RenderMap::kSha256HexLength + 1>{};
-		return true;
+		}
 	}
 }
 #else
@@ -379,32 +383,49 @@ namespace
 #ifdef DEVBENCH_BRIDGE_ENABLED
 void RegisterShaderBytecode(
 	CSX::RenderMap::ShaderStage a_stage,
-	void* Shader,
+	ID3D11DeviceChild* Shader,
 	const void* Bytecode,
 	size_t BytecodeLength)
 {
+	const auto store = GetShaderBytecodeStore();
+	auto retireIdentity = CSX::RenderMap::GetRuntime().MakeStageShaderRetirementCallback(
+		a_stage, reinterpret_cast<std::uintptr_t>(Shader));
+	const std::weak_ptr<CSX::RenderMap::ShaderBytecodeCatalogue> weakStore = store;
+	const auto attached = Util::AttachD3DPrivateDataLifetime(
+		*Shader, kShaderMetadataLifetimeGuid,
+		[weakStore, Shader, retireIdentity = std::move(retireIdentity)]() noexcept {
+			try {
+				if (const auto liveStore = weakStore.lock())
+					liveStore->Retire(Shader);
+			} catch (...) {
+				CSX::RenderMap::RecordShaderMetadataFailure();
+			}
+			retireIdentity();
+		});
+	if (FAILED(attached)) {
+		CSX::RenderMap::RecordShaderMetadataFailure();
+		return;
+	}
 	ShaderBytecodeRecord record;
 	record.bytecodeSize = BytecodeLength;
-	if (globals::shaderCache && globals::shaderCache->IsDump()) {
-		record.bytes.resize(BytecodeLength);
-		memcpy(record.bytes.data(), Bytecode, BytecodeLength);
-	}
 	record.hashAvailable = ComputeSha256Hex(Bytecode, BytecodeLength, record.sha256);
 	CSX::RenderMap::GetRuntime().RegisterCreatedStageShader(
-		a_stage,
-		reinterpret_cast<std::uintptr_t>(Shader),
-		BytecodeLength,
+		a_stage, reinterpret_cast<std::uintptr_t>(Shader), BytecodeLength,
 		record.hashAvailable ? std::string_view(record.sha256.data()) : std::string_view{});
-	logger::debug(fmt::runtime("Saving shader at index {:x} with {} bytes:\t{:x}"), (std::uintptr_t)Shader, BytecodeLength, (std::uintptr_t)Bytecode);
-	std::unique_lock lock(g_shaderBytecodeMutex);
-	g_shaderBytecodeMap.insert_or_assign(Shader, std::move(record));
+	const auto admission = store->Store(Shader, std::move(record), Bytecode, BytecodeLength,
+		globals::shaderCache && globals::shaderCache->IsDump());
+	if (admission != CSX::RenderMap::ShaderBytecodeCatalogue::Admission::kStored)
+		CSX::RenderMap::RecordShaderMetadataFailure();
 }
 
-std::vector<std::uint8_t> GetShaderBytecode(void* Shader)
+std::vector<std::uint8_t> GetShaderBytecode(void* Shader) noexcept
 {
-	logger::debug(fmt::runtime("Loading shader at index {:x}"), (std::uintptr_t)Shader);
-	std::shared_lock lock(g_shaderBytecodeMutex);
-	return g_shaderBytecodeMap.at(Shader).bytes;
+	try {
+		return GetShaderBytecodeStore()->ReadBytes(Shader);
+	} catch (...) {
+		CSX::RenderMap::RecordShaderMetadataFailure();
+		return {};
+	}
 }
 #else
 void RegisterShaderBytecode(void* Shader, const void* Bytecode, size_t BytecodeLength)
@@ -1557,17 +1578,15 @@ struct ID3D11Device_CreateVertexShader
 	static HRESULT thunk(ID3D11Device* This, const void* pShaderBytecode, SIZE_T BytecodeLength, ID3D11ClassLinkage* pClassLinkage, ID3D11VertexShader** ppVertexShader)
 	{
 		HRESULT hr = func(This, pShaderBytecode, BytecodeLength, pClassLinkage, ppVertexShader);
-
-		if (SUCCEEDED(hr) && ppVertexShader && *ppVertexShader) {
 #ifdef DEVBENCH_BRIDGE_ENABLED
-			RegisterShaderBytecode(
-				CSX::RenderMap::ShaderStage::kVertex, *ppVertexShader, pShaderBytecode, BytecodeLength);
+		return Util::ObserveSuccessfulShaderCreation(hr, ppVertexShader, [&](auto* a_shader) {
+			RegisterShaderBytecode(CSX::RenderMap::ShaderStage::kVertex, a_shader, pShaderBytecode, BytecodeLength);
+		});
 #else
+		if (SUCCEEDED(hr) && ppVertexShader && *ppVertexShader)
 			RegisterShaderBytecode(*ppVertexShader, pShaderBytecode, BytecodeLength);
-#endif
-		}
-
 		return hr;
+#endif
 	}
 	static inline REL::Relocation<decltype(thunk)> func;
 };
@@ -1599,17 +1618,15 @@ struct ID3D11Device_CreatePixelShader
 	static HRESULT STDMETHODCALLTYPE thunk(ID3D11Device* This, const void* pShaderBytecode, SIZE_T BytecodeLength, ID3D11ClassLinkage* pClassLinkage, ID3D11PixelShader** ppPixelShader)
 	{
 		HRESULT hr = func(This, pShaderBytecode, BytecodeLength, pClassLinkage, ppPixelShader);
-
-		if (SUCCEEDED(hr) && ppPixelShader && *ppPixelShader) {
 #ifdef DEVBENCH_BRIDGE_ENABLED
-			RegisterShaderBytecode(
-				CSX::RenderMap::ShaderStage::kPixel, *ppPixelShader, pShaderBytecode, BytecodeLength);
+		return Util::ObserveSuccessfulShaderCreation(hr, ppPixelShader, [&](auto* a_shader) {
+			RegisterShaderBytecode(CSX::RenderMap::ShaderStage::kPixel, a_shader, pShaderBytecode, BytecodeLength);
+		});
 #else
+		if (SUCCEEDED(hr) && ppPixelShader && *ppPixelShader)
 			RegisterShaderBytecode(*ppPixelShader, pShaderBytecode, BytecodeLength);
-#endif
-		}
-
 		return hr;
+#endif
 	}
 	static inline REL::Relocation<decltype(thunk)> func;
 };
@@ -1625,10 +1642,9 @@ struct ID3D11Device_CreateComputeShader
 		ID3D11ComputeShader** ppComputeShader)
 	{
 		const HRESULT hr = func(This, pShaderBytecode, BytecodeLength, pClassLinkage, ppComputeShader);
-		if (SUCCEEDED(hr) && ppComputeShader && *ppComputeShader)
-			RegisterShaderBytecode(
-				CSX::RenderMap::ShaderStage::kCompute, *ppComputeShader, pShaderBytecode, BytecodeLength);
-		return hr;
+		return Util::ObserveSuccessfulShaderCreation(hr, ppComputeShader, [&](auto* a_shader) {
+			RegisterShaderBytecode(CSX::RenderMap::ShaderStage::kCompute, a_shader, pShaderBytecode, BytecodeLength);
+		});
 	}
 	static inline REL::Relocation<decltype(thunk)> func;
 };

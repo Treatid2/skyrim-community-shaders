@@ -10,6 +10,7 @@
 #	include "RenderMap/Controller.h"
 #	include "RenderMap/DevBenchCaptureBounds.h"
 #	include "RenderMap/Serialization.h"
+#	include "RenderMap/ShaderBytecodeCatalogue.h"
 #	include "RenderMap/PayloadSchemaNames.h"
 #	include "ShaderCache.h"
 
@@ -33,9 +34,21 @@ namespace
 {
 	using json = nlohmann::json;
 	using CSX::RenderMap::ControlStatus;
+	json BuildShaderMetadataStatus()
+	{
+		return {
+			{ "maximumBytecodeIdentities", CSX::RenderMap::kMaximumPersistentStageShaders },
+			{ "maximumStageIdentities", CSX::RenderMap::kMaximumPersistentStageShaders },
+			{ "maximumAliasesPerStage", CSX::RenderMap::kMaximumEngineShaderAliasesPerStage },
+			{ "maximumRetainedDumpBytes", CSX::RenderMap::kMaximumRetainedShaderDumpBytes },
+			{ "includedInCaptureMaxBytes", false },
+			{ "failureCount", CSX::RenderMap::ShaderMetadataFailureCount() },
+		};
+	}
+
 	constexpr std::uint32_t kContractMajor = 1;
-	constexpr std::uint32_t kContractMinor = 22;
-	constexpr std::uint32_t kSchemaRevision = 24;
+	constexpr std::uint32_t kContractMinor = 23;
+	constexpr std::uint32_t kSchemaRevision = 25;
 	using namespace CSX::RenderMap::DevBenchBounds;
 	constexpr auto kPlannedEventKinds =
 		CSX::RenderMap::EventKindBit(CSX::RenderMap::EventKind::kFrameBegin) |
@@ -295,6 +308,7 @@ namespace
 				{ "schemaRevision", kSchemaRevision },
 				{ "actions", json::array({ "registry", "status", "start", "stop", "capture_events" }) },
 				{ "eventSchemas", json(CSX::RenderMap::PayloadSchemaNames::kAll) },
+				{ "shaderMetadata", BuildShaderMetadataStatus() },
 				{ "eventKinds", CSX::RenderMap::SerializeEventKindMask(kSelectableEventKinds) },
 				{ "plannedEventKinds", CSX::RenderMap::SerializeEventKindMask(kPlannedEventKinds) },
 				{ "eventSelection", {
@@ -391,6 +405,7 @@ namespace
 		if (action == "status") {
 			auto response = Foundation().MakeEnvelope(a_args, true);
 			response["result"] = CSX::RenderMap::SerializeControllerStatus(CSX::RenderMap::GetCaptureController().GetStatus());
+			response["result"]["shaderMetadata"] = BuildShaderMetadataStatus();
 			return response;
 		}
 
@@ -656,11 +671,11 @@ namespace CSX::RenderMap::DevBenchBridge
 			return;
 		}
 		const char* descriptor = R"({
-			"description":"Versioned, explicitly bounded CSX render-map diagnostic capture. Capture is off by default; start retains runtime provenance and its response before hook activation. Stop requires the original capture-start provenance; events are read only after stop. The VR-only main_post_processing selector arms with a bounded wait, bootstraps queried native state at the original main-target boundary and retains dependent late events through a same-frame accepted-eye pair with matching cycle/publication. Earlier history is explicitly unobserved. Main_PostProcessing observations retain native bindings, raster state, candidate command epochs and accepted eye publication; these do not prove pixel transfers.",
+			"description":"Versioned, explicitly bounded CSX render-map diagnostic capture. Capture is off by default; start retains runtime provenance and its response before hook activation. Registry/status expose independent persistent shader limits and diagnostic failureCount; post-success shader observations cannot change native results. Stop requires the original capture-start provenance; events are read only after stop. The VR-only main_post_processing selector arms with a bounded wait, bootstraps queried native state at the original main-target boundary and retains dependent late events through a same-frame accepted-eye pair with matching cycle/publication. Earlier history is explicitly unobserved. Main_PostProcessing observations retain native bindings, raster state, candidate command epochs and accepted eye publication; these do not prove pixel transfers.",
 			"inputSchema":{"type":"object","required":["contractMajor","clientId","commandId","action"],"properties":{
 				"contractMajor":{"type":"integer","const":1},"clientId":{"type":"string","minLength":1,"maxLength":128},
 				"commandId":{"type":"string","minLength":1,"maxLength":128},"expectedBuildId":{"type":"string"},
-				"action":{"type":"string","enum":["registry","status","start","stop","capture_events"],"description":"start rejects inconsistent runtime provenance before activation; stop reports capture_provenance_unavailable when start-time context is missing."},
+				"action":{"type":"string","enum":["registry","status","start","stop","capture_events"],"description":"registry/status include shaderMetadata identity/alias/dump limits, failureCount and includedInCaptureMaxBytes=false. start rejects inconsistent runtime provenance before activation; stop reports capture_provenance_unavailable when start-time context is missing."},
 				"captureId":{"type":"string","minLength":1},
 				"eventKinds":{"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"string"}},
 				"geometryShaderTypes":{"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"integer","minimum":0,"maximum":63}},
