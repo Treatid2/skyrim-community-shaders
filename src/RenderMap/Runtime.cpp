@@ -774,7 +774,7 @@ namespace CSX::RenderMap
 	void Runtime::RecordTransferResourceAccess(std::uintptr_t a_context,
 		const ResourceViewInput& a_view, ResourceStage a_stage, std::uint32_t a_slot, bool a_write) noexcept
 	{
-		if (!IsInsidePostProcessing() || !a_view.resource.d3dObject ||
+		if (!IsInsidePostProcessing() ||
 			a_context != immediateContext.load(std::memory_order_acquire))
 			return;
 		const auto generation = postProcessingGeneration;
@@ -783,8 +783,15 @@ namespace CSX::RenderMap
 		const auto resource = ObserveResource(a_view.resource, context, sequence);
 		const auto view = a_view.view.d3dObject ? ObserveResourceView(a_view, context, sequence) : TargetViewObservationResult{};
 		if (!context || !resource.observationId || resource.sessionGeneration != generation ||
-			(a_view.view.d3dObject && (!view.observationId || view.sessionGeneration != generation)))
+			(a_view.view.d3dObject && (!view.observationId || view.sessionGeneration != generation))) {
+			if (a_write) {
+				const std::lock_guard lock(transferVersionMutex);
+				// A completed write cannot retain an older positive command attribution.
+				if (collector.ActiveGeneration() == generation)
+					transferVersions.Invalidate();
+			}
 			return;
+		}
 		const auto frame = collector.GetThreadFrameContext().cpuFrame;
 		TransferVersions::Version version;
 		bool capacityAvailable = true;

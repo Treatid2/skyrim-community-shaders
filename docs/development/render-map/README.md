@@ -120,6 +120,9 @@ native calls. Command-stream order and operation IDs correlate these records.
 The version ledger holds at most 256 resource command epochs per capture.
 Epochs are admitted only after their defining event is recorded and are
 withheld across frames, captures, unobserved execution and failed admission.
+If a completed write cannot admit its resource or view observation, the
+bounded ledger is invalidated before that call returns. A later publication
+then reports a null command version and epoch, rather than an older write.
 Accepted per-eye publication records carry the actual current render-target
 lease generation and nullable same-frame command epoch alongside the existing
 OpenVR bounds. These are observed bindings and queued commands: they do not
