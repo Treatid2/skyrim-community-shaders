@@ -1052,6 +1052,9 @@ class WorkflowContractTests(unittest.TestCase):
                      "-C", str(directory), "init"],
                     capture_output=True, check=True, timeout=30,
                 )
+                self.assertTrue((directory / ".git").is_dir())
+                self.assertEqual(git(directory, "rev-parse", "--show-toplevel"),
+                                 directory.resolve().as_posix())
                 before = target.stat().st_mtime_ns
                 result = subprocess.run(
                     ["pwsh", "-NoProfile", "-File", str(adapter)],
