@@ -220,6 +220,22 @@ that a call did not arrive after the deadline. Older captures may omit this
 optional object; absence is not a zero-attempt observation. Build-specific
 allocation admission must use the new binary's structure sizes.
 
+## Capture generation ownership
+
+A producer retains the nonzero capture generation admitted at entry through
+observation allocation, catalogue admission, scope entry and event publication.
+Multi-step shader, geometry, resource/view and visibility chains use that same
+generation for every observation. A stopped producer cannot fall back to a
+successor generation or add its earlier observation IDs to successor catalogues.
+Visibility-result publication returns an ID only when its final event is recorded.
+Eye-window acceptance and geometry filtering also retain the producer generation.
+
+Deterministic host tests pause render-pass, visibility-candidate, cull-decision,
+technique, geometry, visibility-result, eye-submission and resource-flow producers
+before publication. They verify empty successor events and catalogues after
+stop/start, plus successful same-generation controls. These tests do not establish
+native hook coverage, GPU completion or live capture-turnover qualification.
+
 ## Persistent shader diagnostic storage
 
 Bridge-enabled shader provenance is retained independently of a live capture.
