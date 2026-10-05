@@ -1,9 +1,9 @@
 {
     "schemaVersion": "csx.testing-composition-audit.1",
-    "capturedUtc": "2026-10-04T23:39:27.231423+00:00",
+    "capturedUtc": "2026-10-05T02:39:18.4168393Z",
     "cleanAcceptanceHead": "2d68a11b6e58603945b1519b37da1875f230ed1a",
-    "testingSourceCommitBeforeManifest": "89b0f5e165ba0f9fac2186ada3376ef4882f1516",
-    "sourceTreeBeforeManifest": "e4ba52f67cd67902b62a6464d8f41e4873452395",
+    "testingSourceCommitBeforeManifest": "f9776441a43bc48ca616c3a37aafc45a2e3e47c4",
+    "sourceTreeBeforeManifest": "e297eda16afcc478e196fc24745e2610acf45943",
     "repository": "Treatid2/skyrim-community-shaders",
     "branch": "codex/testing-integration-VR",
     "includedCandidates": [
@@ -58,8 +58,10 @@
         },
         {
             "path": "src/RenderMap",
-            "gitObject": "60b1cecb8e11c3574a851fabb2e04377326b7b43",
-            "matchesMappingCandidate": true
+            "gitObject": "c95663b99e5709bffed6fd6fec310f47d2947d9a",
+            "matchesMappingCandidate": false,
+            "mappingCandidateGitObject": "60b1cecb8e11c3574a851fabb2e04377326b7b43",
+            "reason": "Focused activation-attempt, refusal-count and input diagnostics; admission guards and rendering remain unchanged."
         },
         {
             "path": "src/Hooks.cpp",
@@ -145,7 +147,8 @@
     ],
     "limitations": [
         "Experimental testing admission, not clean-head acceptance or review/runtime PASS.",
-        "Broker exact ON artifact and Mapping supported transition/loaded identity remain pending."
+        "The parent 76f354af ON build and complete package passed independent intake. The focused diagnostic followup requires its own Broker build, native assertions, complete package and Mapping admission.",
+        "The prior healthy ad8 runtime timed out before capture activation with zero events. These diagnostics preserve the eligibility guards and do not establish or fix the underlying cause."
     ],
     "authority": {
         "humanIntentTurn": "01a10935-c3b2-7881-b3ce-87759b52b803",
@@ -156,5 +159,18 @@
         "publishedHeadAtCapture": "2a719dfc489efd24acf7a848569df7adb0ba2465",
         "representation": "Reconciled mapping/capture implementation through current PR50, not ancestry inclusion of obsolete development branch",
         "handoff": "CLEAN-AND-TESTING-HEADS-20261005.md"
-    }
+    },
+    "focusedFollowups": [
+        {
+            "commit": "f9776441a43bc48ca616c3a37aafc45a2e3e47c4",
+            "parent": "76f354af81cde8f4689c0f98f850ed312b3b9592",
+            "scope": "Bounded late-window activation diagnostics",
+            "sourceContracts": "PASS",
+            "scopedHooks": "PASS",
+            "nativeCompilation": "PENDING",
+            "nativeAssertions": "PENDING",
+            "runtimeActivationCause": "UNRESOLVED",
+            "authorityHumanContinueTurn": "01a1099d-470b-7673-aef3-e1ac1e31c6bb"
+        }
+    ]
 }

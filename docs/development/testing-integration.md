@@ -21,6 +21,13 @@ conversions. Old published PR44/45 revisions and the obsolete PR47 branch
 are not merged again. NVIDIA/DLSS and FidelityFX implementations retain the
 starting mapping candidate's source and dependency pins.
 
+A focused followup to the initial combined build adds fixed-size late-window
+activation-attempt, refusal-count and last-input diagnostics. The composition
+manifest records the deliberate RenderMap tree change. Target, frame and
+publication eligibility guards and rendering behavior remain unchanged.
+Source contracts and scoped hooks passed; the followup needs its own native
+build, assertion results, package and Mapping admission. It does not establish
+or fix the cause of the earlier zero-event activation timeout.
 CSX Code Builder owns the committed composition and updates it deliberately
 as candidate revisions and the clean acceptance baseline change. Build
 Broker owns exact-source compilation and artifact verification. Mapping
