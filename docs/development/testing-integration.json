@@ -1,9 +1,9 @@
 {
     "schemaVersion": "csx.testing-composition-audit.1",
-    "capturedUtc": "2026-10-05T12:41:50.4676740Z",
+    "capturedUtc": "2026-10-05T19:24:39.6903667Z",
     "cleanAcceptanceHead": "2d68a11b6e58603945b1519b37da1875f230ed1a",
-    "testingSourceCommitBeforeManifest": "7b4f84c5645aed34fb84b2513da890a389f474ea",
-    "sourceTreeBeforeManifest": "58146315e2e3b90dfe8a343065ceaca56a1cd886",
+    "testingSourceCommitBeforeManifest": "2f19fe27e886068348d83d4ef0900e3eae52ede9",
+    "sourceTreeBeforeManifest": "70d64040f2fdf0adcde8db4c802bc13b0fc4d649",
     "repository": "Treatid2/skyrim-community-shaders",
     "branch": "codex/testing-integration-VR",
     "includedCandidates": [
@@ -58,10 +58,10 @@
         },
         {
             "path": "src/RenderMap",
-            "gitObject": "c708b407c58900ae1e25600f1a1424031c13188f",
+            "gitObject": "54bee722964f88b9c7966ca7d8b623ea8e268363",
             "matchesMappingCandidate": false,
             "mappingCandidateGitObject": "60b1cecb8e11c3574a851fabb2e04377326b7b43",
-            "reason": "Bounded activation diagnostics and named VR framebuffer destination selection; collector eligibility guards and rendering remain preserved."
+            "reason": "Generation-bound producers/catalogue chains with native host controls; native live turnover still unqualified."
         },
         {
             "path": "src/Hooks.cpp",
@@ -146,10 +146,14 @@
         }
     ],
     "limitations": [
-        "Experimental testing admission, not clean-head acceptance or review/runtime PASS.",
-        "Exact e03 ON build, complete package and allocation recipe passed independent intake and Mapping admission; this destination correction requires exact-candidate build, native assertions and complete package.",
-        "The e03 fresh live probe reached75 callbacks and refused75 native destination targets because the selector expected the source target. Live success after this source correction remains unverified.",
-        "The separately accepted capture-turnover provenance finding remains unresolved; build or byte admission does not discharge that limitation."
+        "Experimental testing composition; focused PR and clean-head acceptance remain separate.",
+        "Historical217 production package and first late CPU-call capture remain their exact delivery, not corrected-build evidence.",
+        "Exact572 four host assertions passed once; later preset and manifest changes require explicit content-equivalence attribution, not relabelled exact-head execution.",
+        "This final candidate still needs exact production DLL/PDB, complete package, fresh allocation recipe and runtime admission.",
+        "Corrected colour ten-slot capture and live successor capture remain unqualified.",
+        "PR50 hosted feature audit is blocked fetching unpublished CommonLib4c770e; no feature version bump repairs that acquisition gate.",
+        "Host projections did not use /WX; no hosted warning-gate pass is inferred.",
+        "Supplemental PR46/PR51 automation cases do not gate the first distinct corrected colour probe; retain their coverage gaps."
     ],
     "authority": {
         "humanIntentTurn": "01a10935-c3b2-7881-b3ce-87759b52b803",
@@ -183,6 +187,31 @@
             "nativeAssertions": "PENDING",
             "runtimeActivationCause": "SOURCE_DESTINATION_MISMATCH_CONFIRMED_LIVE_CORRECTION_NOT_YET_VALIDATED",
             "causalEvidence": "VR-DESTINATION-CAUSAL-EVIDENCE-20261005.json"
+        },
+        {
+            "commit": "021d14a65531d20d8ce9d483d739ecc7da49507c",
+            "parent": "217992d1e29e55a707d6e41c3ca111b2154904fa",
+            "scope": "VR colour destination capture and named stage-eye status",
+            "sourceContracts": "PASS",
+            "nativeAssertions": "PASS_POLICY_ON_EXACT_572",
+            "runtime": "PENDING_CORRECTED_PACKAGE"
+        },
+        {
+            "commit": "572fc16988a624c973b16f95da4b75dc3bb522a9",
+            "parent": "021d14a65531d20d8ce9d483d739ecc7da49507c",
+            "scope": "Generation-bound producers/catalogue chains and conditional controller failure injection",
+            "sourceContracts": "PASS",
+            "nativeAssertions": "PASS_FOUR_EXACT_TARGETS_ONCE",
+            "nativeEvidence": "TURNOVER-NATIVE-EXECUTION-20261005.json",
+            "runtime": "PENDING_SUCCESSOR_CAPTURE_ON_CORRECTED_BUILD"
+        },
+        {
+            "commit": "2f19fe27e886068348d83d4ef0900e3eae52ede9",
+            "parent": "572fc16988a624c973b16f95da4b75dc3bb522a9",
+            "scope": "Canonical LF source fingerprint and exact-source preset metadata",
+            "sourceContracts": "PASS_FULL_GENERATOR_REGRESSION_LF_CRLF",
+            "presetValues": "PRESERVED_EXCEPT_FINGERPRINT_METADATA",
+            "runtime": "NO_CPP_OR_SHADER_CHANGE"
         }
     ]
 }
