@@ -1250,10 +1250,11 @@ namespace CSX::RenderMap
 		return session && session->AcceptsCurrentThread();
 	}
 
-	void Collector::PollCaptureWindow(std::uint64_t a_frame) const noexcept
+	void Collector::PollCaptureWindow(std::uint64_t a_frame, std::uint64_t a_expectedGeneration) const noexcept
 	{
 		const auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->config.latePostProcessingWindow)
+		if (!session || !session->config.latePostProcessingWindow ||
+			(a_expectedGeneration != 0 && session->generation != a_expectedGeneration))
 			return;
 		const std::lock_guard lock(session->windowMutex);
 		auto& window = session->window;
@@ -1352,11 +1353,12 @@ namespace CSX::RenderMap
 	}
 
 	void Collector::AcceptWindowEye(Eye a_eye, std::uint64_t a_frame, std::uint64_t a_cycle,
-		std::uint64_t a_publicationGeneration) noexcept
+		std::uint64_t a_publicationGeneration, std::uint64_t a_expectedGeneration) noexcept
 	{
-		PollCaptureWindow(a_frame);
+		PollCaptureWindow(a_frame, a_expectedGeneration);
 		const auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->config.latePostProcessingWindow)
+		if (!session || !session->config.latePostProcessingWindow ||
+			(a_expectedGeneration != 0 && session->generation != a_expectedGeneration))
 			return;
 		const std::lock_guard lock(session->windowMutex);
 		auto& window = session->window;
@@ -1386,10 +1388,11 @@ namespace CSX::RenderMap
 		return session ? session->generation : 0;
 	}
 
-	bool Collector::IsGeometryShaderTypeSelected(std::uint32_t a_shaderType) const noexcept
+	bool Collector::IsGeometryShaderTypeSelected(std::uint32_t a_shaderType, std::uint64_t a_expectedGeneration) const noexcept
 	{
 		const auto session = activeSession.load(std::memory_order_acquire);
-		return session && session->accepting.load(std::memory_order_acquire) && a_shaderType < 64 &&
+		return session && session->accepting.load(std::memory_order_acquire) &&
+		       (a_expectedGeneration == 0 || session->generation == a_expectedGeneration) && a_shaderType < 64 &&
 		       (session->config.geometryShaderTypeMask & (std::uint64_t{ 1 } << a_shaderType)) != 0;
 	}
 
@@ -1406,10 +1409,11 @@ namespace CSX::RenderMap
 		       a_preparedGeometrySetupObservationId != 0;
 	}
 
-	void Collector::CountFiltered(std::uint64_t a_count) noexcept
+	void Collector::CountFiltered(std::uint64_t a_count, std::uint64_t a_expectedGeneration) noexcept
 	{
 		const auto session = activeSession.load(std::memory_order_acquire);
-		if (session && session->accepting.load(std::memory_order_acquire))
+		if (session && session->accepting.load(std::memory_order_acquire) &&
+			(a_expectedGeneration == 0 || session->generation == a_expectedGeneration))
 			session->filtered.fetch_add(a_count, std::memory_order_relaxed);
 	}
 
@@ -1600,10 +1604,11 @@ namespace CSX::RenderMap
 		           0;
 	}
 
-	ShaderObservationResult Collector::ObserveShader(const ShaderObservationInput& a_input) noexcept
+	ShaderObservationResult Collector::ObserveShader(const ShaderObservationInput& a_input, std::uint64_t a_expectedGeneration) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->AcceptsCurrentThread() || a_input.shader == 0)
+		if (!session || !session->AcceptsCurrentThread() ||
+			(a_expectedGeneration != 0 && session->generation != a_expectedGeneration) || a_input.shader == 0)
 			return {};
 
 		session->inFlight.fetch_add(1, std::memory_order_acq_rel);
@@ -1665,10 +1670,11 @@ namespace CSX::RenderMap
 		return result;
 	}
 
-	StageShaderObservationResult Collector::ObserveStageShader(const StageShaderObservationInput& a_input) noexcept
+	StageShaderObservationResult Collector::ObserveStageShader(const StageShaderObservationInput& a_input, std::uint64_t a_expectedGeneration) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->AcceptsCurrentThread() || a_input.d3dObject == 0)
+		if (!session || !session->AcceptsCurrentThread() ||
+			(a_expectedGeneration != 0 && session->generation != a_expectedGeneration) || a_input.d3dObject == 0)
 			return {};
 
 		session->inFlight.fetch_add(1, std::memory_order_acq_rel);
@@ -1783,10 +1789,11 @@ namespace CSX::RenderMap
 	}
 
 	ResourceObservationResult Collector::ObserveResource(
-		const ResourceObservationInput& a_input) noexcept
+		const ResourceObservationInput& a_input, std::uint64_t a_expectedGeneration) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->AcceptsCurrentThread() || a_input.d3dObject == 0)
+		if (!session || !session->AcceptsCurrentThread() ||
+			(a_expectedGeneration != 0 && session->generation != a_expectedGeneration) || a_input.d3dObject == 0)
 			return {};
 
 		session->inFlight.fetch_add(1, std::memory_order_acq_rel);
@@ -1840,10 +1847,11 @@ namespace CSX::RenderMap
 	}
 
 	TargetViewObservationResult Collector::ObserveTargetView(
-		const TargetViewObservationInput& a_input) noexcept
+		const TargetViewObservationInput& a_input, std::uint64_t a_expectedGeneration) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->AcceptsCurrentThread() || a_input.d3dObject == 0)
+		if (!session || !session->AcceptsCurrentThread() ||
+			(a_expectedGeneration != 0 && session->generation != a_expectedGeneration) || a_input.d3dObject == 0)
 			return {};
 
 		session->inFlight.fetch_add(1, std::memory_order_acq_rel);
@@ -1908,10 +1916,11 @@ namespace CSX::RenderMap
 	}
 
 	TargetBindingObservationResult Collector::ObserveTargetBinding(
-		const TargetBindingObservationInput& a_input) noexcept
+		const TargetBindingObservationInput& a_input, std::uint64_t a_expectedGeneration) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
 		if (!session || !session->AcceptsCurrentThread() ||
+			(a_expectedGeneration != 0 && session->generation != a_expectedGeneration) ||
 			a_input.renderTargetCount > kMaximumRenderTargets) {
 			return {};
 		}
@@ -1962,10 +1971,11 @@ namespace CSX::RenderMap
 	}
 
 	SceneObjectObservationResult Collector::ObserveSceneObject(
-		const SceneObjectObservationInput& a_input) noexcept
+		const SceneObjectObservationInput& a_input, std::uint64_t a_expectedGeneration) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->AcceptsCurrentThread() || a_input.reference == 0)
+		if (!session || !session->AcceptsCurrentThread() ||
+			(a_expectedGeneration != 0 && session->generation != a_expectedGeneration) || a_input.reference == 0)
 			return {};
 
 		session->inFlight.fetch_add(1, std::memory_order_acq_rel);
@@ -2025,10 +2035,11 @@ namespace CSX::RenderMap
 	}
 
 	GeometryObservationResult Collector::ObserveGeometry(
-		const GeometryObservationInput& a_input) noexcept
+		const GeometryObservationInput& a_input, std::uint64_t a_expectedGeneration) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->AcceptsCurrentThread() || a_input.geometry == 0)
+		if (!session || !session->AcceptsCurrentThread() ||
+			(a_expectedGeneration != 0 && session->generation != a_expectedGeneration) || a_input.geometry == 0)
 			return {};
 
 		session->inFlight.fetch_add(1, std::memory_order_acq_rel);
@@ -2091,10 +2102,11 @@ namespace CSX::RenderMap
 	}
 
 	MaterialStateObservationResult Collector::ObserveMaterialState(
-		const MaterialStateObservationInput& a_input) noexcept
+		const MaterialStateObservationInput& a_input, std::uint64_t a_expectedGeneration) noexcept
 	{
 		auto session = activeSession.load(std::memory_order_acquire);
 		if (!session || !session->AcceptsCurrentThread() ||
+			(a_expectedGeneration != 0 && session->generation != a_expectedGeneration) ||
 			(a_input.shaderProperty == 0 && a_input.material == 0)) {
 			return {};
 		}

@@ -90,7 +90,9 @@ namespace
 		Collector collector;
 		auto config = Config();
 		config.latePostProcessingWindow = true;
-		config.activationTarget = 9;
+		constexpr std::uint32_t mainSourceTarget = 1;
+		constexpr std::uint32_t vrFramebufferTarget = 114;
+		config.activationTarget = vrFramebufferTarget;
 		config.requestedEventKindMask = EventKindBit(EventKind::kEyeSubmitted);
 		config.maxActivationWait = std::chrono::seconds(1);
 		config.maxBytes = Collector::RequiredStorageBytes(config);
@@ -109,19 +111,19 @@ namespace
 			Check(collector.Record(EventKind::kDraw) == RecordResult::kFiltered, "collector admitted prefix events");
 		Check(collector.ObserveResource({ .d3dObject = 1 }).observationId == 0,
 			"collector admitted a prefix catalogue entry");
-		Check(!collector.ActivatePostProcessingWindow(8, 12, 77), "wrong target activated the window");
-		Check(!collector.ActivatePostProcessingWindow(9, 0, 77), "zero frame activated the window");
-		Check(!collector.ActivatePostProcessingWindow(9, kUnknownFrame, 0), "unknown frame activated the window");
-		Check(!collector.ActivatePostProcessingWindow(9, 12, 0), "missing publication activated the window");
+		Check(!collector.ActivatePostProcessingWindow(mainSourceTarget, 12, 77), "source target activated the destination window");
+		Check(!collector.ActivatePostProcessingWindow(vrFramebufferTarget, 0, 77), "zero frame activated the window");
+		Check(!collector.ActivatePostProcessingWindow(vrFramebufferTarget, kUnknownFrame, 0), "unknown frame activated the window");
+		Check(!collector.ActivatePostProcessingWindow(vrFramebufferTarget, 12, 0), "missing publication activated the window");
 		const auto refused = collector.GetCaptureWindow();
 		Check(refused.phase == CaptureWindowPhase::kArmed && refused.activationTick == 0 &&
 				  refused.activationBoundary.attemptCount == 4 && refused.activationBoundary.targetRejections == 1 &&
 				  refused.activationBoundary.frameRejections == 2 && refused.activationBoundary.publicationRejections == 2 &&
-				  refused.activationBoundary.lastTarget == 9 && refused.activationBoundary.lastCpuFrame == 12 &&
+				  refused.activationBoundary.lastTarget == vrFramebufferTarget && refused.activationBoundary.lastCpuFrame == 12 &&
 				  refused.activationBoundary.lastPublicationGeneration == 0,
 			"refused inputs were lost or changed activation eligibility");
-		Check(collector.ActivatePostProcessingWindow(9, 12, 77), "collector boundary did not activate");
-		Check(!collector.ActivatePostProcessingWindow(8, 0, 0), "bootstrap window reactivated");
+		Check(collector.ActivatePostProcessingWindow(vrFramebufferTarget, 12, 77), "VR destination boundary did not activate");
+		Check(!collector.ActivatePostProcessingWindow(mainSourceTarget, 0, 0), "bootstrap window reactivated");
 		const auto accepted = collector.GetCaptureWindow();
 		Check(accepted.activationBoundary.attemptCount == 5 && accepted.activationBoundary.lastCpuFrame == 12 &&
 				  accepted.activationBoundary.lastPublicationGeneration == 77 && accepted.activationBoundary.targetRejections == 1,
@@ -149,7 +151,7 @@ namespace
 		config.maxActivationWait = std::chrono::nanoseconds(1);
 		Check(collector.Start(config) == StartResult::kStarted, "deadline diagnostic capture did not arm");
 		std::this_thread::sleep_for(std::chrono::milliseconds(2));
-		Check(!collector.ActivatePostProcessingWindow(9, 12, 77), "expired armed window activated");
+		Check(!collector.ActivatePostProcessingWindow(vrFramebufferTarget, 12, 77), "expired armed window activated");
 		const auto expired = collector.Stop();
 		Check(expired && expired->window.failure == CaptureWindowFailure::kActivationTimeout &&
 				  expired->window.activationBoundary.attemptCount == 0 && expired->events.empty(),
@@ -483,6 +485,48 @@ namespace
 		Check(threadIds.size() == threadCount, "thread identity was not preserved");
 	}
 
+	void TestObservationChainsRetainCaptureGeneration()
+	{
+		Collector collector;
+		Check(collector.Start(Config()) == StartResult::kStarted, "observation source capture did not start");
+		const auto staleGeneration = collector.ActiveGeneration();
+		auto first = collector.Stop();
+		Check(first.has_value() && collector.Start(Config()) == StartResult::kStarted,
+			"observation capture turnover failed");
+		const auto generation = collector.ActiveGeneration();
+		const auto verify = [&](std::uint64_t expectedGeneration, bool admitted) {
+			Check((collector.ObserveShader({ .shader = 0xE100 }, expectedGeneration).observationId != 0) == admitted,
+				"shader observation ignored its generation");
+			Check((collector.ObserveStageShader({ .d3dObject = 0xE101 }, expectedGeneration).observationId != 0) == admitted,
+				"stage shader observation ignored its generation");
+			const auto resource = collector.ObserveResource({ .d3dObject = 0xE102 }, expectedGeneration);
+			Check((resource.observationId != 0) == admitted, "resource observation ignored its generation");
+			const auto view = collector.ObserveTargetView({ .d3dObject = 0xE103, .resourceObservationId = resource.observationId }, expectedGeneration);
+			Check((view.observationId != 0) == admitted, "view observation ignored its generation");
+			Check((collector.ObserveTargetBinding({ .renderTargetObservationIds = { view.observationId }, .renderTargetCount = 1 }, expectedGeneration).observationId != 0) == admitted,
+				"target binding observation ignored its generation");
+			const auto object = collector.ObserveSceneObject({ .reference = 0xE104 }, expectedGeneration);
+			Check((object.observationId != 0) == admitted, "scene object observation ignored its generation");
+			Check((collector.ObserveGeometry({ .geometry = 0xE105, .sceneObjectObservationId = object.observationId }, expectedGeneration).observationId != 0) == admitted,
+				"geometry observation ignored its generation");
+			Check((collector.ObserveMaterialState({ .material = 0xE106 }, expectedGeneration).observationId != 0) == admitted,
+				"material observation ignored its generation");
+		};
+		verify(staleGeneration, false);
+		collector.CountFiltered(3, staleGeneration);
+		Check(!collector.IsGeometryShaderTypeSelected(0, staleGeneration), "stale geometry filter used successor configuration");
+		verify(generation, true);
+		collector.CountFiltered(2, generation);
+		Check(collector.IsGeometryShaderTypeSelected(0, generation), "current geometry filter rejected its configuration");
+		auto snapshot = collector.Stop();
+		Check(snapshot && snapshot->shaderObservations.size() == 1 && snapshot->stageShaderObservations.size() == 1 &&
+				  snapshot->resourceObservations.size() == 1 && snapshot->targetViewObservations.size() == 1 &&
+				  snapshot->targetBindingObservations.size() == 1 && snapshot->sceneObjectObservations.size() == 1 &&
+				  snapshot->geometryObservations.size() == 1 && snapshot->materialStateObservations.size() == 1 &&
+				  snapshot->statistics.filtered == 2,
+			"stale observation chain changed the successor catalogues or filtered count");
+	}
+
 	void TestStoppedGuardDoesNotLeak()
 	{
 		Collector collector;
@@ -519,6 +563,7 @@ int main()
 		TestOutOfOrderScopeCleanup();
 		TestTimeLimit();
 		TestConcurrentRecording();
+		TestObservationChainsRetainCaptureGeneration();
 		TestStoppedGuardDoesNotLeak();
 		return 0;
 	} catch (const std::exception& error) {

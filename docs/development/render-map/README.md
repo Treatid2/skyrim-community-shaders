@@ -172,8 +172,13 @@ family; its existing dependency closure remains intact.
 
 The collector allocates its bounded catalogues and event buffer when armed,
 but admits no prefix events or catalogue entries. The armed wait is independent
-of `maxDurationMs`, which begins at the original main-target
-`Upscaling::Main_PostProcessing` call. At that boundary, the activation thread
+of `maxDurationMs`, which begins at the original
+`Upscaling::Main_PostProcessing` call from source `kMAIN` to destination
+`kVR_FRAMEBUFFER`. The callback target and reported `bounds.activation.target`
+identify the destination (114 in the pinned VR render-target enum), while
+`kMAIN` identifies the source texture (1). Admission compares the native
+destination without translating it to the source target or admitting unrelated
+targets. At that boundary, the activation thread
 queries the immediate context, native shaders, output targets, SRV/UAV bindings,
 viewport/scissor state and resource descriptors using the existing getters.
 This bounded bootstrap shares the active event/catalogue budget. Its dedicated
@@ -214,6 +219,22 @@ window. It does not prove that the hook is absent, that rendering stopped, or
 that a call did not arrive after the deadline. Older captures may omit this
 optional object; absence is not a zero-attempt observation. Build-specific
 allocation admission must use the new binary's structure sizes.
+
+## Capture generation ownership
+
+A producer retains the nonzero capture generation admitted at entry through
+observation allocation, catalogue admission, scope entry and event publication.
+Multi-step shader, geometry, resource/view and visibility chains use that same
+generation for every observation. A stopped producer cannot fall back to a
+successor generation or add its earlier observation IDs to successor catalogues.
+Visibility-result publication returns an ID only when its final event is recorded.
+Eye-window acceptance and geometry filtering also retain the producer generation.
+
+Deterministic host tests pause render-pass, visibility-candidate, cull-decision,
+technique, geometry, visibility-result, eye-submission and resource-flow producers
+before publication. They verify empty successor events and catalogues after
+stop/start, plus successful same-generation controls. These tests do not establish
+native hook coverage, GPU completion or live capture-turnover qualification.
 
 ## Persistent shader diagnostic storage
 
