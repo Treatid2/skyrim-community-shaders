@@ -660,22 +660,55 @@ namespace CSX::RenderMap
 
 	void Runtime::CompleteWindowBootstrap(bool a_success) noexcept
 	{
-		collector.CompleteWindowBootstrap(a_success);
+		std::scoped_lock lifecycleLock(captureLifecycleMutex);
+		const auto generation = postProcessingOwner == this ?
+		                            postProcessingGeneration :
+		                            collector.ActiveGeneration();
+		if (generation != 0 && collector.ActiveGeneration() == generation)
+			collector.CompleteWindowBootstrap(a_success, generation);
 	}
 
-	void Runtime::RecordPostProcessingBootstrap(const std::array<std::uintptr_t, 6>& a_shaders) noexcept
+	std::uint64_t Runtime::PostProcessingCaptureGeneration() const noexcept
 	{
-		if (!IsInsidePostProcessing())
+		return postProcessingOwner == this ? postProcessingGeneration : 0;
+	}
+
+	void Runtime::BindBootstrapStage(ShaderStage a_stage, std::uintptr_t a_d3dObject,
+		std::uint64_t a_expectedCaptureGeneration) noexcept
+	{
+#if defined(CSX_RENDER_MAP_TESTING)
+		PauseProducerPublicationForTesting();
+#endif
+		// Serialize diagnostic publication with capture reset, not native D3D queries.
+		std::scoped_lock lifecycleLock(captureLifecycleMutex);
+		if (collector.ActiveGeneration() != a_expectedCaptureGeneration)
 			return;
-		const auto context = immediateContext.load(std::memory_order_acquire);
-		BindStage(context, ShaderStage::kVertex, a_shaders[0]);
-		BindStage(context, ShaderStage::kPixel, a_shaders[4]);
-		BindStage(context, ShaderStage::kCompute, a_shaders[5]);
+		SetImmediateBoundStage(a_stage, a_d3dObject);
+		if (EnsureImmediateContextObservation(a_expectedCaptureGeneration) == 0)
+			return;
+		NextCommandStreamSequence();
+		PublishBoundStageObservation(a_stage, a_d3dObject,
+			ObserveBoundStage(a_stage, a_d3dObject, a_expectedCaptureGeneration));
+	}
+
+	void Runtime::RecordPostProcessingBootstrap(const std::array<std::uintptr_t, 6>& a_shaders,
+		std::uint64_t a_expectedCaptureGeneration) noexcept
+	{
+		if (a_expectedCaptureGeneration == 0 ||
+			PostProcessingCaptureGeneration() != a_expectedCaptureGeneration || !IsInsidePostProcessing())
+			return;
+		BindBootstrapStage(ShaderStage::kVertex, a_shaders[0], a_expectedCaptureGeneration);
+		BindBootstrapStage(ShaderStage::kPixel, a_shaders[4], a_expectedCaptureGeneration);
+		BindBootstrapStage(ShaderStage::kCompute, a_shaders[5], a_expectedCaptureGeneration);
+		std::scoped_lock lifecycleLock(captureLifecycleMutex);
+		if (collector.ActiveGeneration() != a_expectedCaptureGeneration)
+			return;
 		transferOperation = 0;
 		collector.RecordForGeneration(EventKind::kRasterStateObserved,
 			{ .schema = static_cast<std::uint16_t>(PayloadSchema::kNativePipelineSnapshot),
 				.words = { a_shaders[0], a_shaders[1], a_shaders[2], a_shaders[3], a_shaders[4], a_shaders[5] } },
-			EnsureImmediateContextObservation(postProcessingGeneration), postProcessingGeneration, NextCommandStreamSequence());
+			EnsureImmediateContextObservation(a_expectedCaptureGeneration),
+			a_expectedCaptureGeneration, NextCommandStreamSequence());
 	}
 
 	CaptureWindowSnapshot Runtime::GetCaptureWindow() const noexcept
@@ -1185,15 +1218,61 @@ namespace CSX::RenderMap
 		failNextCommandListCatalogueAdmission.store(true, std::memory_order_release);
 	}
 
-	void Runtime::PauseNextProducerPublicationForTesting() noexcept
+	void Runtime::PauseCommandListAdmissionsForTesting(std::uint32_t a_count) noexcept
+	{
+		resumeCommandListAdmissions.store(false, std::memory_order_release);
+		commandListAdmissionsToPause.store(a_count, std::memory_order_release);
+	}
+
+	std::uint32_t Runtime::PausedCommandListAdmissionsForTesting() const noexcept
+	{
+		return pausedCommandListAdmissions.load(std::memory_order_acquire);
+	}
+
+	void Runtime::ResumeCommandListAdmissionsForTesting() noexcept
+	{
+		resumeCommandListAdmissions.store(true, std::memory_order_release);
+	}
+
+	std::size_t Runtime::CommandListCatalogueSizeForTesting() noexcept
+	{
+		std::scoped_lock lock(commandListMutex);
+		return commandLists.size();
+	}
+
+	void Runtime::PauseCommandListAdmissionForTesting() noexcept
+	{
+		auto remaining = commandListAdmissionsToPause.load(std::memory_order_acquire);
+		while (remaining != 0) {
+			if (!commandListAdmissionsToPause.compare_exchange_weak(remaining, remaining - 1,
+					std::memory_order_acq_rel))
+				continue;
+			pausedCommandListAdmissions.fetch_add(1, std::memory_order_acq_rel);
+			while (!resumeCommandListAdmissions.load(std::memory_order_acquire))
+				std::this_thread::yield();
+			pausedCommandListAdmissions.fetch_sub(1, std::memory_order_acq_rel);
+			return;
+		}
+	}
+
+	void Runtime::PauseNextProducerPublicationForTesting(std::uint32_t a_skipPublications) noexcept
 	{
 		resumeDeferredPublication.store(false, std::memory_order_release);
 		deferredPublicationPaused.store(false, std::memory_order_release);
+		producerPublicationsToSkip.store(a_skipPublications, std::memory_order_release);
 		pauseNextProducerPublication.store(true, std::memory_order_release);
 	}
 
 	void Runtime::PauseProducerPublicationForTesting() noexcept
 	{
+		if (!pauseNextProducerPublication.load(std::memory_order_acquire))
+			return;
+		auto remaining = producerPublicationsToSkip.load(std::memory_order_acquire);
+		while (remaining != 0) {
+			if (producerPublicationsToSkip.compare_exchange_weak(remaining, remaining - 1,
+					std::memory_order_acq_rel))
+				return;
+		}
 		if (!pauseNextProducerPublication.exchange(false, std::memory_order_acq_rel))
 			return;
 		deferredPublicationPaused.store(true, std::memory_order_release);
@@ -1498,8 +1577,13 @@ namespace CSX::RenderMap
 
 		std::uint64_t commandListObservationId = 0;
 		if (a_result >= 0 && a_commandList != 0) {
+#if defined(CSX_RENDER_MAP_TESTING)
+			PauseCommandListAdmissionForTesting();
+#endif
 			try {
 				std::scoped_lock lock(commandListMutex);
+				if (collector.ActiveGeneration() != captureGeneration)
+					return;
 				if (commandLists.contains(a_commandList) ||
 					commandLists.size() < kMaximumTrackedCommandLists) {
 #if defined(CSX_RENDER_MAP_TESTING)
@@ -1624,8 +1708,13 @@ namespace CSX::RenderMap
 		const auto commandSequence = NextCommandStreamSequence();
 		std::uint64_t commandListObservationId = 0;
 		std::uint64_t sourceRecordingObservationId = 0;
+#if defined(CSX_RENDER_MAP_TESTING)
+		PauseCommandListAdmissionForTesting();
+#endif
 		try {
 			std::scoped_lock lock(commandListMutex);
+			if (collector.ActiveGeneration() != captureGeneration)
+				return;
 			if (!commandLists.contains(a_commandList) &&
 				commandLists.size() >= kMaximumTrackedCommandLists) {
 				return;
@@ -1764,18 +1853,31 @@ namespace CSX::RenderMap
 			bindingObservation.observationId);
 	}
 
-	std::uint64_t Runtime::ClaimRenderTargetStateSeed(std::uintptr_t a_context) noexcept
+	std::uint64_t Runtime::ClaimImmediateStateSeed(std::atomic_uint64_t& a_seed,
+		std::uintptr_t a_context, std::uint64_t a_expectedCaptureGeneration) noexcept
 	{
-		if (!collector.IsCapturing() || a_context == 0 ||
-			a_context != immediateContext.load(std::memory_order_acquire)) {
+		const auto generation = a_expectedCaptureGeneration != 0 ?
+		                            a_expectedCaptureGeneration :
+		                            collector.ActiveGeneration();
+		if (generation == 0 || collector.ActiveGeneration() != generation || !collector.IsCapturing() ||
+			a_context == 0 || a_context != immediateContext.load(std::memory_order_acquire) ||
+			a_seed.load(std::memory_order_acquire) == generation)
 			return 0;
-		}
-		const auto generation = collector.ActiveGeneration();
-		if (generation == 0)
+#if defined(CSX_RENDER_MAP_TESTING)
+		if (a_expectedCaptureGeneration != 0)
+			PauseProducerPublicationForTesting();
+#endif
+		std::scoped_lock lifecycleLock(captureLifecycleMutex);
+		if (collector.ActiveGeneration() != generation || !collector.IsCapturing() ||
+			a_context != immediateContext.load(std::memory_order_acquire))
 			return 0;
-		return targetStateObservationGeneration.exchange(generation, std::memory_order_acq_rel) == generation ?
-		           0 :
-		           generation;
+		return a_seed.exchange(generation, std::memory_order_acq_rel) == generation ? 0 : generation;
+	}
+
+	std::uint64_t Runtime::ClaimRenderTargetStateSeed(std::uintptr_t a_context,
+		std::uint64_t a_expectedCaptureGeneration) noexcept
+	{
+		return ClaimImmediateStateSeed(targetStateObservationGeneration, a_context, a_expectedCaptureGeneration);
 	}
 
 	ResourceObservationResult Runtime::ObserveResource(
@@ -1925,18 +2027,10 @@ namespace CSX::RenderMap
 		}
 	}
 
-	std::uint64_t Runtime::ClaimResourceViewStateSeed(std::uintptr_t a_context) noexcept
+	std::uint64_t Runtime::ClaimResourceViewStateSeed(std::uintptr_t a_context,
+		std::uint64_t a_expectedCaptureGeneration) noexcept
 	{
-		if (!collector.IsCapturing() || a_context == 0 ||
-			a_context != immediateContext.load(std::memory_order_acquire)) {
-			return 0;
-		}
-		const auto generation = collector.ActiveGeneration();
-		if (generation == 0)
-			return 0;
-		return resourceViewStateObservationGeneration.exchange(generation, std::memory_order_acq_rel) == generation ?
-		           0 :
-		           generation;
+		return ClaimImmediateStateSeed(resourceViewStateObservationGeneration, a_context, a_expectedCaptureGeneration);
 	}
 
 	void Runtime::RecordResourceFlow(

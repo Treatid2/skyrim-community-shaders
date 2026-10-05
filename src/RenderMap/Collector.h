@@ -755,7 +755,7 @@ namespace CSX::RenderMap
 		bool ActivatePostProcessingWindow(std::uint32_t a_target, std::uint64_t a_frame,
 			std::uint64_t a_publicationGeneration) noexcept;
 		/** Finish attributable bootstrap before accepting another thread's events. */
-		void CompleteWindowBootstrap(bool a_success) noexcept;
+		void CompleteWindowBootstrap(bool a_success, std::uint64_t a_expectedGeneration = 0) noexcept;
 		/** Called only after the accepted native eye and publication records succeed. */
 		void AcceptWindowEye(Eye a_eye, std::uint64_t a_frame, std::uint64_t a_cycle,
 			std::uint64_t a_publicationGeneration, std::uint64_t a_expectedGeneration = 0) noexcept;
