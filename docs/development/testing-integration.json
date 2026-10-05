@@ -1,9 +1,9 @@
 {
     "schemaVersion": "csx.testing-composition-audit.1",
-    "capturedUtc": "2026-10-05T02:39:18.4168393Z",
+    "capturedUtc": "2026-10-05T12:41:50.4676740Z",
     "cleanAcceptanceHead": "2d68a11b6e58603945b1519b37da1875f230ed1a",
-    "testingSourceCommitBeforeManifest": "f9776441a43bc48ca616c3a37aafc45a2e3e47c4",
-    "sourceTreeBeforeManifest": "e297eda16afcc478e196fc24745e2610acf45943",
+    "testingSourceCommitBeforeManifest": "7b4f84c5645aed34fb84b2513da890a389f474ea",
+    "sourceTreeBeforeManifest": "58146315e2e3b90dfe8a343065ceaca56a1cd886",
     "repository": "Treatid2/skyrim-community-shaders",
     "branch": "codex/testing-integration-VR",
     "includedCandidates": [
@@ -58,10 +58,10 @@
         },
         {
             "path": "src/RenderMap",
-            "gitObject": "c95663b99e5709bffed6fd6fec310f47d2947d9a",
+            "gitObject": "c708b407c58900ae1e25600f1a1424031c13188f",
             "matchesMappingCandidate": false,
             "mappingCandidateGitObject": "60b1cecb8e11c3574a851fabb2e04377326b7b43",
-            "reason": "Focused activation-attempt, refusal-count and input diagnostics; admission guards and rendering remain unchanged."
+            "reason": "Bounded activation diagnostics and named VR framebuffer destination selection; collector eligibility guards and rendering remain preserved."
         },
         {
             "path": "src/Hooks.cpp",
@@ -147,8 +147,9 @@
     ],
     "limitations": [
         "Experimental testing admission, not clean-head acceptance or review/runtime PASS.",
-        "The parent 76f354af ON build and complete package passed independent intake. The focused diagnostic followup requires its own Broker build, native assertions, complete package and Mapping admission.",
-        "The prior healthy ad8 runtime timed out before capture activation with zero events. These diagnostics preserve the eligibility guards and do not establish or fix the underlying cause."
+        "Exact e03 ON build, complete package and allocation recipe passed independent intake and Mapping admission; this destination correction requires exact-candidate build, native assertions and complete package.",
+        "The e03 fresh live probe reached75 callbacks and refused75 native destination targets because the selector expected the source target. Live success after this source correction remains unverified.",
+        "The separately accepted capture-turnover provenance finding remains unresolved; build or byte admission does not discharge that limitation."
     ],
     "authority": {
         "humanIntentTurn": "01a10935-c3b2-7881-b3ce-87759b52b803",
@@ -171,6 +172,17 @@
             "nativeAssertions": "PENDING",
             "runtimeActivationCause": "UNRESOLVED",
             "authorityHumanContinueTurn": "01a1099d-470b-7673-aef3-e1ac1e31c6bb"
+        },
+        {
+            "commit": "7b4f84c5645aed34fb84b2513da890a389f474ea",
+            "parent": "e03bd1fd4790795f9dd205d9458f34ce96092ca8",
+            "scope": "Match late activation to native VR framebuffer destination",
+            "sourceContracts": "PASS",
+            "scopedHooks": "PASS",
+            "nativeCompilation": "PENDING",
+            "nativeAssertions": "PENDING",
+            "runtimeActivationCause": "SOURCE_DESTINATION_MISMATCH_CONFIRMED_LIVE_CORRECTION_NOT_YET_VALIDATED",
+            "causalEvidence": "VR-DESTINATION-CAUSAL-EVIDENCE-20261005.json"
         }
     ]
 }
