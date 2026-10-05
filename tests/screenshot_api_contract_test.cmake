@@ -86,7 +86,8 @@ endforeach()
 foreach(_required_contract_text IN ITEMS
     runtime_session persistent_user settings_default file_reference
     maximumOutputsPerFrame retentionSeconds manifest_failed
-	DescribeCommittedArtifact BuildProvenance::GetProducer artifact_hash_failed
+	DescribeProducerArtifact BuildProvenance::GetProducer artifact_hash_failed
+	a_committed a_committed.bytes a_committed.sha256
 	terminalOutcome completedUtc fallbacksPresent cancelled manifestChildren
 	outstandingArtifacts outstandingCaptureJobs captureJobCapacity
 	commandAccepted finalizationCommitted sequence.abort_requested
@@ -221,5 +222,19 @@ foreach(_custody_contract
         message(FATAL_ERROR "Screenshot custody contract missing: ${_custody_contract}")
     endif()
 endforeach()
+
+
+foreach(_forbidden_custody_text IN ITEMS DescribeCommittedArtifact FileSha256 "file_size(a_path")
+    string(FIND "${_implementation}" "${_forbidden_custody_text}" _custody_position)
+    if(NOT _custody_position EQUAL -1)
+        message(FATAL_ERROR "Screenshot receipt reopens producer custody by pathname: ${_forbidden_custody_text}")
+    endif()
+endforeach()
+file(READ "${PROJECT_ROOT}/src/Features/ScreenshotFeature.cpp" _feature_implementation)
+string(REGEX MATCHALL "&\\*committed" _producer_forwardings "${_feature_implementation}")
+list(LENGTH _producer_forwardings _producer_forwarding_count)
+if(NOT _producer_forwarding_count EQUAL 2)
+    message(FATAL_ERROR "Both screenshot encoder paths must forward producer metadata")
+endif()
 
 message(STATUS "Screenshot API contract, schemas, goldens, migration, actions, and journal events are coherent")

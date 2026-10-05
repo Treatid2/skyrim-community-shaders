@@ -13,11 +13,9 @@
 
 #include <algorithm>
 #include <array>
-#include <bcrypt.h>
 #include <cmath>
 #include <ctime>
 #include <format>
-#include <fstream>
 #include <iomanip>
 #include <iterator>
 #include <sstream>
@@ -56,81 +54,27 @@ namespace
 		return resolved;
 	}
 
-	std::string FileSha256(const std::filesystem::path& a_path)
+	json DescribeProducerArtifact(const std::filesystem::path& a_path,
+		const CSX::ScreenshotStorage::CommittedArtifact& a_committed)
 	{
-		std::ifstream stream(a_path, std::ios::binary);
-		if (!stream)
-			throw std::runtime_error("could not open committed artifact for hashing");
-		BCRYPT_ALG_HANDLE algorithm = nullptr;
-		const auto openStatus = BCryptOpenAlgorithmProvider(
-			&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
-		if (openStatus < 0)
-			throw std::runtime_error(std::format("BCryptOpenAlgorithmProvider failed ({:#x})", static_cast<std::uint32_t>(openStatus)));
-		DWORD objectBytes = 0;
-		DWORD copiedBytes = 0;
-		const auto propertyStatus = BCryptGetProperty(
-			algorithm, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&objectBytes),
-			sizeof(objectBytes), &copiedBytes, 0);
-		if (propertyStatus < 0) {
-			BCryptCloseAlgorithmProvider(algorithm, 0);
-			throw std::runtime_error(std::format("BCryptGetProperty failed ({:#x})", static_cast<std::uint32_t>(propertyStatus)));
-		}
-		std::vector<UCHAR> hashObject(objectBytes);
-		BCRYPT_HASH_HANDLE hash = nullptr;
-		const auto createStatus = BCryptCreateHash(
-			algorithm, &hash, hashObject.data(), static_cast<ULONG>(hashObject.size()), nullptr, 0, 0);
-		if (createStatus < 0) {
-			BCryptCloseAlgorithmProvider(algorithm, 0);
-			throw std::runtime_error(std::format("BCryptCreateHash failed ({:#x})", static_cast<std::uint32_t>(createStatus)));
-		}
-		std::vector<UCHAR> buffer(1024 * 1024);
-		NTSTATUS hashStatus = 0;
-		while (stream && hashStatus >= 0) {
-			stream.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
-			const auto bytesRead = stream.gcount();
-			if (bytesRead > 0)
-				hashStatus = BCryptHashData(hash, buffer.data(), static_cast<ULONG>(bytesRead), 0);
-		}
-		if (!stream.eof() && hashStatus >= 0)
-			hashStatus = static_cast<NTSTATUS>(0xC0000185L);  // STATUS_IO_DEVICE_ERROR
-		std::array<UCHAR, 32> digest{};
-		const auto finishStatus = hashStatus < 0 ? hashStatus : BCryptFinishHash(hash, digest.data(), static_cast<ULONG>(digest.size()), 0);
-		BCryptDestroyHash(hash);
-		BCryptCloseAlgorithmProvider(algorithm, 0);
-		if (finishStatus < 0)
-			throw std::runtime_error(std::format("SHA-256 hashing failed ({:#x})", static_cast<std::uint32_t>(finishStatus)));
-
-		std::ostringstream result;
-		result << std::hex << std::setfill('0');
-		for (const auto value : digest)
-			result << std::setw(2) << static_cast<unsigned int>(value);
-		return result.str();
-	}
-
-	json DescribeCommittedArtifact(const std::filesystem::path& a_path)
-	{
-		std::error_code ec;
-		const auto size = std::filesystem::file_size(a_path, ec);
-		json artifact = {
+		if (a_committed.sha256.size() != 64 || !std::ranges::all_of(a_committed.sha256, [](char a_value) {
+				return (a_value >= '0' && a_value <= '9') || (a_value >= 'a' && a_value <= 'f');
+			}))
+			throw std::runtime_error("committed artifact producer digest is unavailable");
+		return {
 			{ "path", PathUtf8(a_path) },
-			{ "bytes", ec ? json(nullptr) : json(size) },
+			{ "bytes", a_committed.bytes },
+			{ "sha256", a_committed.sha256 },
 			{ "committed", true },
 		};
-		try {
-			artifact["sha256"] = FileSha256(a_path);
-		} catch (const std::exception& error) {
-			artifact["sha256"] = nullptr;
-			artifact["integrityError"] = error.what();
-		}
-		return artifact;
 	}
 
-	void WriteJsonAtomically(
+	CSX::ScreenshotStorage::CommittedArtifact WriteJsonAtomically(
 		const std::filesystem::path& a_destination,
 		const json& a_document)
 	{
 		const auto bytes = a_document.dump(2);
-		CSX::ScreenshotStorage::CommittedFile::WriteAtomically(
+		return CSX::ScreenshotStorage::CommittedFile::WriteAtomically(
 			a_destination.native() + L".tmp", a_destination, bytes.data(), bytes.size(), true);
 	}
 
@@ -426,12 +370,12 @@ void ScreenshotApi::ManifestWorkerLoop(std::shared_ptr<ManifestWorkerState> a_st
 				if (!job.directoryLease)
 					throw std::runtime_error("manifest directory ownership is unavailable");
 				job.directoryLease->VerifyDirectChild(job.destination);
-				WriteJsonAtomically(job.destination, document);
+				const auto committed = WriteJsonAtomically(job.destination, document);
 				job.directoryLease->VerifyDirectChild(job.destination);
 				if (job.final) {
 					std::error_code ec;
 					std::filesystem::remove(job.partialPath, ec);
-					result.artifact = DescribeCommittedArtifact(job.destination);
+					result.artifact = DescribeProducerArtifact(job.destination, committed);
 				}
 				result.success = true;
 			} catch (const std::exception& error) {
@@ -1545,12 +1489,15 @@ void ScreenshotApi::OnArtifactTerminal(
 	bool a_success,
 	const std::filesystem::path& a_path,
 	std::string_view a_error,
-	const json* a_actual) noexcept
+	const json* a_actual,
+	const CSX::ScreenshotStorage::CommittedArtifact* a_committed) noexcept
 {
 	try {
 		if (a_requestId.empty())
 			return;
-		const auto artifact = a_success ? DescribeCommittedArtifact(a_path) : json(nullptr);
+		if (a_success && !a_committed)
+			throw std::runtime_error("successful artifact publication requires producer metadata");
+		const auto artifact = a_success ? DescribeProducerArtifact(a_path, *a_committed) : json(nullptr);
 		std::lock_guard lock(mutex);
 		const auto found = requests.find(std::string(a_requestId));
 		if (found == requests.end() || IsTerminal(found->second.state))
@@ -1565,8 +1512,6 @@ void ScreenshotApi::OnArtifactTerminal(
 			record.artifacts.push_back(committedArtifact);
 			if (a_actual && !a_actual->empty())
 				record.actual["artifacts"].push_back(*a_actual);
-			if (artifact.contains("integrityError"))
-				record.warnings.push_back({ { "code", "artifact_hash_failed" }, { "message", artifact["integrityError"] } });
 			++record.successfulArtifacts;
 			++completedArtifacts;
 			AppendEventLocked(record, "artifact.written", committedArtifact);
