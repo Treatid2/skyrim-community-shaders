@@ -43,6 +43,10 @@ bindings, or compiler controls. Those values are inherited identically from
 the base/common layer. This prevents unnoticed divergence between tiers even
 though each MGO package must ultimately contain a complete settings file.
 
+The runtime source fingerprint uses UTF-8 text with CRLF normalized to LF, so
+Windows and Linux checkouts share the same identity. Other source-content changes
+still invalidate the contract and require a reviewed fingerprint refresh.
+
 The generator rejects:
 
 -   a base whose SHA-256 does not match the policy;
