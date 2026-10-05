@@ -48,8 +48,8 @@ namespace
 	}
 
 	constexpr std::uint32_t kContractMajor = 1;
-	constexpr std::uint32_t kContractMinor = 23;
-	constexpr std::uint32_t kSchemaRevision = 25;
+	constexpr std::uint32_t kContractMinor = 24;
+	constexpr std::uint32_t kSchemaRevision = 26;
 	using namespace CSX::RenderMap::DevBenchBounds;
 	constexpr auto kPlannedEventKinds =
 		CSX::RenderMap::EventKindBit(CSX::RenderMap::EventKind::kFrameBegin) |
@@ -361,7 +361,7 @@ namespace
 									  } },
 				{ "startAdmission", "provenance-and-response-before-hook-activation" },
 				{ "activationModes", json::array({ "immediate", "main_post_processing" }) },
-				{ "lateWindow", { { "runtime", "SkyrimVR" }, { "prefixHistory", "unobserved" }, { "bootstrap", "activation-getters" }, { "completion", "same-frame-cycle-and-publication-accepted-eye-pair" }, { "maximumActivationWaitMs", kMaximumDurationMs }, { "automaticFinalization", false } } },
+				{ "lateWindow", { { "runtime", "SkyrimVR" }, { "prefixHistory", "unobserved" }, { "bootstrap", "activation-getters" }, { "completion", "same-frame-cycle-and-publication-accepted-eye-pair" }, { "maximumActivationWaitMs", kMaximumDurationMs }, { "automaticFinalization", false }, { "activationDiagnostics", "captureWindow.activationBoundary retains armed calls, independent target/frame/publication rejection counts and last input values; zero calls does not prove hook installation or later reachability" } } },
 				{ "limits", {
 								{ "maximumFrames", kMaximumFrames },
 								{ "maximumDurationMs", kMaximumDurationMs },
@@ -665,7 +665,7 @@ namespace CSX::RenderMap::DevBenchBridge
 			return;
 		}
 		const char* descriptor = R"({
-			"description":"Versioned, explicitly bounded CSX render-map diagnostic capture. Capture is off by default; start retains runtime provenance and its response before hook activation. Registry/status expose independent persistent shader limits and diagnostic failureCount; post-success shader observations cannot change native results. Stop requires the original capture-start provenance; events are read only after stop. The VR-only main_post_processing selector arms with a bounded wait, bootstraps queried native state at the original main-target boundary and retains dependent late events through a same-frame accepted-eye pair with matching cycle/publication. Earlier history is explicitly unobserved. Main_PostProcessing observations retain native bindings, raster state, candidate command epochs and accepted eye publication; these do not prove pixel transfers.",
+			"description":"Versioned, explicitly bounded CSX render-map diagnostic capture. Capture is off by default; start retains runtime provenance and its response before hook activation. Status/manifest captureWindow.activationBoundary report armed input-validation attempts, independent target/frame/publication rejection counts and nullable last inputs; post-deadline calls are excluded and zero attempts does not prove hook absence. Registry/status expose independent persistent shader limits and diagnostic failureCount; post-success shader observations cannot change native results. Stop requires the original capture-start provenance; events are read only after stop. The VR-only main_post_processing selector arms with a bounded wait, bootstraps queried native state at the original main-target boundary and retains dependent late events through a same-frame accepted-eye pair with matching cycle/publication. Earlier history is explicitly unobserved. Main_PostProcessing observations retain native bindings, raster state, candidate command epochs and accepted eye publication; these do not prove pixel transfers.",
 			"inputSchema":{"type":"object","required":["contractMajor","clientId","commandId","action"],"properties":{
 				"contractMajor":{"type":"integer","const":1},"clientId":{"type":"string","minLength":1,"maxLength":128},
 				"commandId":{"type":"string","minLength":1,"maxLength":128},"expectedBuildId":{"type":"string"},

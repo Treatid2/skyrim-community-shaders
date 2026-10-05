@@ -1293,12 +1293,23 @@ namespace CSX::RenderMap
 		PollCaptureWindow();
 		const std::lock_guard stopLock(stopMutex);
 		const auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->config.latePostProcessingWindow ||
-			a_target != session->config.activationTarget || a_frame == kUnknownFrame || a_frame == 0 ||
-			a_publicationGeneration == 0)
+		if (!session || !session->config.latePostProcessingWindow)
 			return false;
 		const std::lock_guard lock(session->windowMutex);
 		if (session->window.phase != CaptureWindowPhase::kArmed)
+			return false;
+		auto& boundary = session->window.activationBoundary;
+		++boundary.attemptCount;
+		boundary.lastTarget = a_target;
+		boundary.lastCpuFrame = a_frame;
+		boundary.lastPublicationGeneration = a_publicationGeneration;
+		const bool rejectedTarget = a_target != session->config.activationTarget;
+		const bool rejectedFrame = a_frame == kUnknownFrame || a_frame == 0;
+		const bool rejectedPublication = a_publicationGeneration == 0;
+		boundary.targetRejections += rejectedTarget;
+		boundary.frameRejections += rejectedFrame;
+		boundary.publicationRejections += rejectedPublication;
+		if (rejectedTarget || rejectedFrame || rejectedPublication)
 			return false;
 		session->window.phase = CaptureWindowPhase::kBootstrap;
 		session->window.activationTick = ReadClockTicks();
