@@ -56,12 +56,14 @@ public:
 		std::string_view a_actualSourceKind = {});
 	void OnArtifactQueued(std::string_view a_requestId, const std::filesystem::path& a_path);
 	void OnArtifactEncoding(std::string_view a_requestId) noexcept;
+	/** Successful publication requires the metadata returned by the committing producer handle. */
 	void OnArtifactTerminal(
 		std::string_view a_requestId,
 		bool a_success,
 		const std::filesystem::path& a_path,
 		std::string_view a_error = {},
-		const json* a_actual = nullptr) noexcept;
+		const json* a_actual = nullptr,
+		const CSX::ScreenshotStorage::CommittedArtifact* a_committed = nullptr) noexcept;
 	void OnSourceTerminal(std::string_view a_requestId, std::string_view a_state, std::string_view a_error = {}) noexcept;
 	void OnFeatureDisabled(std::string_view a_reason);
 	void BeginShutdown(std::string_view a_reason);

@@ -2437,42 +2437,75 @@ if(BUILD_CONTROLLER_TESTS)
     add_test(NAME ScreenshotDispatch COMMAND screenshot_dispatch_test)
     set_tests_properties(ScreenshotDispatch PROPERTIES LABELS "ControllerTests")
 
-    set(_screenshot_worker_test_dir "${CMAKE_CURRENT_BINARY_DIR}/screenshot-worker-test")
+    set(_screenshot_worker_test_dir
+        "${CMAKE_CURRENT_BINARY_DIR}/screenshot-worker-test"
+    )
     set(_screenshot_worker_test_headers
         "${_screenshot_worker_test_dir}/screenshot_worker_types_under_test.h"
         "${_screenshot_worker_test_dir}/screenshot_worker_lanes_under_test.h"
+        "${_screenshot_worker_test_dir}/screenshot_artifact_helpers_under_test.h"
     )
     add_custom_command(
         OUTPUT ${_screenshot_worker_test_headers}
-        COMMAND "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}"
+        COMMAND
+            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}"
             "-DOUTPUT_DIRECTORY=${_screenshot_worker_test_dir}" -P
             "${PROJECT_SOURCE_DIR}/tests/extract_screenshot_worker_lanes.cmake"
-        DEPENDS src/Features/ScreenshotApi.cpp src/Features/ScreenshotApi.h
+        DEPENDS
+            src/Features/ScreenshotApi.cpp
+            src/Features/ScreenshotApi.h
             tests/extract_screenshot_worker_lanes.cmake
         VERBATIM
     )
-    add_executable(screenshot_storage_security_test EXCLUDE_FROM_ALL
+    add_executable(
+        screenshot_storage_security_test
+        EXCLUDE_FROM_ALL
         tests/screenshot_storage_security_test.cpp
     )
     target_compile_features(screenshot_storage_security_test PRIVATE cxx_std_23)
-    target_compile_definitions(screenshot_storage_security_test PRIVATE
-        CSX_SCREENSHOT_STORAGE_TESTING NOMINMAX WIN32_LEAN_AND_MEAN
+    target_compile_definitions(
+        screenshot_storage_security_test
+        PRIVATE CSX_SCREENSHOT_STORAGE_TESTING NOMINMAX WIN32_LEAN_AND_MEAN
     )
-    target_include_directories(screenshot_storage_security_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_include_directories(
+        screenshot_storage_security_test
+        PRIVATE "${PROJECT_SOURCE_DIR}/src"
+    )
     target_link_libraries(screenshot_storage_security_test PRIVATE bcrypt)
-    add_test(NAME ScreenshotStorageSecurity COMMAND screenshot_storage_security_test)
-    set_tests_properties(ScreenshotStorageSecurity PROPERTIES LABELS "ControllerTests")
+    add_test(
+        NAME ScreenshotStorageSecurity
+        COMMAND screenshot_storage_security_test
+    )
+    set_tests_properties(
+        ScreenshotStorageSecurity
+        PROPERTIES LABELS "ControllerTests"
+    )
 
-    add_executable(screenshot_worker_lanes_test EXCLUDE_FROM_ALL
-        tests/screenshot_worker_lanes_test.cpp ${_screenshot_worker_test_headers}
+    add_executable(
+        screenshot_worker_lanes_test
+        EXCLUDE_FROM_ALL
+        tests/screenshot_worker_lanes_test.cpp
+        src/Features/ScreenshotStorageSecurity.cpp
+        ${_screenshot_worker_test_headers}
     )
     target_compile_features(screenshot_worker_lanes_test PRIVATE cxx_std_23)
-    target_include_directories(screenshot_worker_lanes_test PRIVATE
-        "${PROJECT_SOURCE_DIR}/src" "${_screenshot_worker_test_dir}"
+    target_compile_definitions(
+        screenshot_worker_lanes_test
+        PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
     )
-    target_link_libraries(screenshot_worker_lanes_test PRIVATE nlohmann_json::nlohmann_json)
+    target_include_directories(
+        screenshot_worker_lanes_test
+        PRIVATE "${PROJECT_SOURCE_DIR}/src" "${_screenshot_worker_test_dir}"
+    )
+    target_link_libraries(
+        screenshot_worker_lanes_test
+        PRIVATE nlohmann_json::nlohmann_json bcrypt
+    )
     add_test(NAME ScreenshotWorkerLanes COMMAND screenshot_worker_lanes_test)
-    set_tests_properties(ScreenshotWorkerLanes PROPERTIES LABELS "ControllerTests")
+    set_tests_properties(
+        ScreenshotWorkerLanes
+        PROPERTIES LABELS "ControllerTests"
+    )
 
     add_executable(
         api_upscaling_contract_test

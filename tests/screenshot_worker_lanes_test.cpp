@@ -1,5 +1,6 @@
 #include "Features/ScreenshotApiPolicy.h"
 #include "Features/ScreenshotManifestSnapshot.h"
+#include "Features/ScreenshotStorageSecurity.h"
 #include "Features/ScreenshotWorkerThread.h"
 
 #include <algorithm>
@@ -7,6 +8,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <exception>
 #include <filesystem>
 #include <functional>
 #include <list>
@@ -50,16 +52,16 @@ std::string PathUtf8(const std::filesystem::path& path) { return path.string(); 
 
 namespace CSX::ScreenshotStorage
 {
-	struct DirectoryLease
+	struct TestDirectoryLease
 	{
 		std::filesystem::path destination;
 		std::filesystem::path directory;
-		static std::shared_ptr<DirectoryLease> CreateExclusive(
+		static std::shared_ptr<TestDirectoryLease> CreateExclusive(
 			const std::filesystem::path& path, std::string_view, const std::filesystem::path& root)
 		{
 			if (root != "fixture-approved-root")
 				throw std::runtime_error("preparation did not forward its approved root");
-			return std::make_shared<DirectoryLease>(DirectoryLease{ path / "actual-parent", path / "actual-parent" / "fixture-sequence" });
+			return std::make_shared<TestDirectoryLease>(TestDirectoryLease{ path / "actual-parent", path / "actual-parent" / "fixture-sequence" });
 		}
 		const std::filesystem::path& Destination() const { return destination; }
 		const std::filesystem::path& Path() const { return directory; }
@@ -99,16 +101,24 @@ struct BlockingIo
 		entered = released = false;
 	}
 };
-BlockingIo preparationIo, manifestIo;
+BlockingIo preparationIo, manifestIo, framePublicationIo, manifestPublicationIo;
 std::atomic<unsigned> preparationCalls = 0;
-void WriteJsonAtomically(const std::filesystem::path& path, const json&)
+CSX::ScreenshotStorage::CommittedArtifact manifestProducerReturn;
+#include "screenshot_artifact_helpers_under_test.h"
+CSX::ScreenshotStorage::CommittedArtifact WriteJsonAtomically(const std::filesystem::path& path, const json& document)
 {
 	if (path == "blocked-manifest")
 		manifestIo.Wait();
 	if (path == "denied-manifest")
 		throw std::runtime_error("controlled manifest failure");
+	if (path.filename() == "custody-manifest.json") {
+		const auto committed = WriteJsonAtomicallyUnderTest(path, document);
+		manifestProducerReturn = committed;
+		manifestPublicationIo.Wait();
+		return committed;
+	}
+	return { .bytes = 7, .sha256 = std::string(64, 'a') };
 }
-json DescribeCommittedArtifact(const std::filesystem::path&) { return { { "committed", true } }; }
 
 // Types, worker entry points and publication retries are extracted from the
 // production coordinator; only filesystem and journal boundaries are controlled.
@@ -117,12 +127,18 @@ struct ScreenshotApi
 	using json = nlohmann::json;
 #include "screenshot_worker_types_under_test.h"
 	std::atomic<bool> failTransition = false, failEvent = false;
+	json observedEvents = json::array();
 	explicit ScreenshotApi(std::shared_ptr<CSX::Api::ServiceFoundation>);
 	~ScreenshotApi();
 	bool CanAdmitPreparationLocked() const;
 	static void PreparationWorkerLoop(std::shared_ptr<PreparationWorkerState>);
 	static void ManifestWorkerLoop(std::shared_ptr<ManifestWorkerState>);
 	void ManifestResultLoop(std::stop_token);
+	void OnArtifactTerminal(std::string_view, bool, const std::filesystem::path&, std::string_view = {},
+		const json* = nullptr, const CSX::ScreenshotStorage::CommittedArtifact* = nullptr) noexcept;
+	void MarkPublicationUnresolved(std::string_view, bool) noexcept;
+	void FinishSequenceChildLocked(RequestRecord&);
+	void RequestSequenceAbortLocked(SequenceRecord&, std::string_view, std::string_view);
 	void DrainPreparationResultsLocked();
 	bool DrainManifestResultsLocked();
 	void QueueSequenceManifestLocked(SequenceRecord&, bool);
@@ -148,10 +164,11 @@ struct ScreenshotApi
 			throw std::runtime_error("controlled transition publication failure");
 		record.state = std::move(state);
 	}
-	void AppendEventLocked(RequestRecord&, std::string_view, json = json::object())
+	void AppendEventLocked(RequestRecord& record, std::string_view type, json data = json::object())
 	{
 		if (failEvent.exchange(false))
 			throw std::runtime_error("controlled event publication failure");
+		observedEvents.push_back({ { "requestId", record.requestId }, { "type", type }, { "data", std::move(data) } });
 	}
 	void TrimLocked() {}
 	void CancelQueuedDispatchesLocked(std::string_view, std::string_view) {}
@@ -208,7 +225,7 @@ struct ScreenshotApi
 		{
 			std::lock_guard workerLock(manifestWorkerState->mutex);
 			manifestWorkerState->jobs.push_back({
-				.job = { .requestId = id, .generation = 1, .final = true, .destination = path, .directoryLease = std::make_shared<CSX::ScreenshotStorage::DirectoryLease>() },
+				.job = { .requestId = id, .generation = 1, .final = true, .destination = path, .directoryLease = std::make_shared<CSX::ScreenshotStorage::TestDirectoryLease>() },
 				.result = { .requestId = id, .generation = 1, .final = true, .destination = path },
 			});
 			++manifestWorkerState->outstanding;
@@ -238,8 +255,123 @@ std::unique_ptr<ScreenshotApi> CreateApi()
 	return std::make_unique<ScreenshotApi>(std::make_shared<CSX::Api::ServiceFoundation>());
 }
 
+void TestProducerCustodySurvivesPathReplacement()
+{
+	using CSX::ScreenshotStorage::CommittedArtifact;
+	using CSX::ScreenshotStorage::CommittedFile;
+	const std::filesystem::path directory = "custody-worker";
+	std::filesystem::create_directory(directory);
+	const auto replaceDestination = [](const std::filesystem::path& path) {
+		constexpr std::string_view replacement = "replacement";
+		return CommittedFile::WriteAtomically(path.native() + L".replacement.tmp", path,
+			replacement.data(), replacement.size(), true);
+	};
+	for (const auto replace : { false, true }) {
+		auto api = CreateApi();
+		const auto framePath = directory / (replace ? "replaced-frame.bin" : "control-frame.bin");
+		{
+			std::lock_guard lock(api->mutex);
+			auto& record = api->requests["custody-frame"];
+			record.requestId = "custody-frame";
+			record.state = "encoding";
+			record.expectedArtifacts = 1;
+		}
+		framePublicationIo.Reset();
+		CommittedArtifact produced;
+		std::exception_ptr producerError;
+		std::thread producer([&] {
+			try {
+				constexpr std::string_view bytes = "committed frame bytes";
+				produced = CommittedFile::WriteAtomically(framePath.native() + L".tmp", framePath,
+					bytes.data(), bytes.size(), true);
+				framePublicationIo.Wait();
+				api->OnArtifactTerminal("custody-frame", true, framePath, {}, nullptr, &produced);
+			} catch (...) {
+				producerError = std::current_exception();
+			}
+		});
+		try {
+			framePublicationIo.AwaitEntry();
+			if (replace) {
+				const auto replacement = replaceDestination(framePath);
+				Require(replacement.bytes == 11 && replacement.sha256 == "95713e9cbdd1dfcb2d4080c2537f418d43ca0da25f0d7d6631f4f7c97b89dc47",
+					"frame replacement was not independently committed");
+			}
+		} catch (...) {
+			framePublicationIo.Release();
+			producer.join();
+			if (producerError)
+				std::rethrow_exception(producerError);
+			throw;
+		}
+		framePublicationIo.Release();
+		producer.join();
+		if (producerError)
+			std::rethrow_exception(producerError);
+		{
+			std::lock_guard lock(api->mutex);
+			const auto& record = api->requests.at("custody-frame");
+			Require(record.state == "completed" && record.successfulArtifacts == 1, "frame producer receipt did not complete");
+			const auto& artifact = record.artifacts.at(0);
+			Require(artifact.at("bytes") == 21 && artifact.at("sha256") == "7f4fe5fa3764ad5fe053ed90173cf966429578804dd381d6c9c24a3c705301c9",
+				"frame receipt describes a replacement instead of the producer bytes");
+			Require(artifact.at("path") == PathUtf8(framePath) && artifact.at("committed") == true,
+				"frame receipt lost its destination or committed state");
+			const auto written = std::find_if(api->observedEvents.begin(), api->observedEvents.end(), [](const json& event) {
+				return event.at("type") == "artifact.written";
+			});
+			Require(written != api->observedEvents.end() && written->at("data") == artifact,
+				"frame journal did not retain producer custody");
+		}
+		const auto manifestPath = directory / "custody-manifest.json";
+		manifestPublicationIo.Reset();
+		api->AdmitManifest("custody-manifest", manifestPath);
+		try {
+			manifestPublicationIo.AwaitEntry();
+			if (replace)
+				replaceDestination(manifestPath);
+		} catch (...) {
+			manifestPublicationIo.Release();
+			throw;
+		}
+		manifestPublicationIo.Release();
+		Require(api->DrainForShutdown(std::chrono::seconds(2)), "manifest custody publication did not drain");
+		{
+			std::lock_guard lock(api->mutex);
+			const auto& record = api->requests.at("custody-manifest");
+			Require(record.state == "completed" && record.successfulArtifacts == 1, "manifest producer receipt did not complete");
+			const auto& artifact = record.artifacts.at(0);
+			Require(manifestProducerReturn.bytes == 20 && artifact.at("bytes") == 20 &&
+						artifact.at("sha256") == "204e782f3cf81e61aa73718630a94358f966c378276ac24fac5c4c6f9c70af81",
+				"manifest receipt describes a replacement instead of the producer document");
+			Require(artifact.at("path") == PathUtf8(manifestPath) && artifact.at("committed") == true,
+				"manifest receipt lost its destination or committed state");
+		}
+	}
+	{
+		auto api = CreateApi();
+		for (const auto id : { "missing-custody", "invalid-custody" }) {
+			auto& record = api->requests[id];
+			record.requestId = id;
+			record.state = "encoding";
+			record.expectedArtifacts = 1;
+		}
+		api->OnArtifactTerminal("missing-custody", true, directory / "absent.bin");
+		const CommittedArtifact invalid{ .bytes = 21, .sha256 = "invalid" };
+		api->OnArtifactTerminal("invalid-custody", true, directory / "absent.bin", {}, nullptr, &invalid);
+		std::lock_guard lock(api->mutex);
+		for (const auto id : { "missing-custody", "invalid-custody" }) {
+			const auto& record = api->requests.at(id);
+			Require(record.publicationUnresolved && record.unresolvedArtifactCommitted && record.artifacts.empty() &&
+						record.successfulArtifacts == 0 && record.terminalArtifacts == 0,
+				"missing or invalid producer custody published an authoritative success");
+		}
+	}
+}
+
 int main()
 {
+	TestProducerCustodySurvivesPathReplacement();
 	{
 		auto api = CreateApi();
 		api->AdmitManifest("blocked", "blocked-manifest");
