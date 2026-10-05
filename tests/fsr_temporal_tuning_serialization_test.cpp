@@ -1,7 +1,9 @@
+#include "Features/Upscaling/FSRDispatchInputTelemetry.h"
 #include "Features/Upscaling/FSRTemporalTuningSerialization.h"
 
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 #include <string>
 
 namespace logger
@@ -39,8 +41,59 @@ namespace
 	}
 }
 
+namespace
+{
+	void Require(bool a_condition)
+	{
+		if (!a_condition)
+			throw std::runtime_error("FSR submitted input telemetry regression");
+	}
+
+	void RequireUnavailable(const nlohmann::json& a_result)
+	{
+		Require(a_result.size() == 5 && a_result.at("schemaVersion") == 1);
+		Require(a_result.at("available").is_boolean() && !a_result.at("available").get<bool>());
+		Require(a_result.at("reset").is_null() && a_result.at("jitterOffsetPixels").is_null() &&
+				a_result.at("frameTimeDeltaMilliseconds").is_null());
+		Require(nlohmann::json::parse(a_result.dump()) == a_result);
+	}
+}
+
+void TestSubmittedInputTelemetry()
+{
+	namespace Inputs = FSRDispatchInputTelemetry;
+	for (bool reset : { false, true }) {
+		const auto snapshot = Inputs::Capture(reset, -0.25f, 0.375f, 16.5f);
+		const auto result = Inputs::ToJson(snapshot, true);
+		Require(result.size() == 5 && result.at("schemaVersion") == 1);
+		Require(result.at("available").is_boolean() && result.at("available").get<bool>());
+		Require(result.at("reset").is_boolean() && result.at("reset").get<bool>() == reset);
+		Require(result.at("jitterOffsetPixels").is_array() && result.at("jitterOffsetPixels").size() == 2);
+		Require(result.at("jitterOffsetPixels").at(0) == -0.25f && result.at("jitterOffsetPixels").at(1) == 0.375f);
+		Require(result.at("frameTimeDeltaMilliseconds").is_number_float() &&
+				result.at("frameTimeDeltaMilliseconds") == 16.5f);
+		Require(nlohmann::json::parse(result.dump()) == result);
+		RequireUnavailable(Inputs::ToJson(snapshot, false));
+	}
+	RequireUnavailable(Inputs::ToJson({}, true));
+	for (float invalid : { std::numeric_limits<float>::quiet_NaN(),
+			 std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity() }) {
+		RequireUnavailable(Inputs::ToJson(Inputs::Capture(true, invalid, 0.0f, 10.0f), true));
+		RequireUnavailable(Inputs::ToJson(Inputs::Capture(true, 0.0f, invalid, 10.0f), true));
+		RequireUnavailable(Inputs::ToJson(Inputs::Capture(true, 0.0f, 0.0f, invalid), true));
+		RequireUnavailable(Inputs::ToJson({ true, true, invalid, 0.0f, 10.0f }, true));
+	}
+	RequireUnavailable(Inputs::ToJson(Inputs::Capture(false, 0.0f, 0.0f, -1.0f), true));
+	const auto zero = Inputs::ToJson(Inputs::Capture(false, 0.0f, -0.0f, 0.0f), true);
+	Require(zero.at("available") == true && zero.at("reset") == false &&
+			zero.at("frameTimeDeltaMilliseconds") == 0.0f);
+	const auto maximum = std::numeric_limits<float>::max();
+	Require(Inputs::ToJson(Inputs::Capture(true, maximum, -maximum, maximum), true).at("available") == true);
+}
+
 int main()
 {
+	TestSubmittedInputTelemetry();
 	const json malformed[]{ nullptr, false, 1, "invalid", json::array(),
 		{ { "enabled", 1 } }, { { "enabled", true }, { "velocityFactor", "bad" } },
 		{ { "enabled", true }, { "reactivenessScale", nullptr } },

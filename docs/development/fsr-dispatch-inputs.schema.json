@@ -1,0 +1,44 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "FSR submitted dispatch inputs version 1",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+        "schemaVersion",
+        "available",
+        "reset",
+        "jitterOffsetPixels",
+        "frameTimeDeltaMilliseconds"
+    ],
+    "properties": {
+        "schemaVersion": { "const": 1 },
+        "available": { "type": "boolean" },
+        "reset": { "type": ["boolean", "null"] },
+        "jitterOffsetPixels": {
+            "type": ["array", "null"],
+            "minItems": 2,
+            "maxItems": 2,
+            "items": { "type": "number" },
+            "description": "Exact submitted X/Y offsets in render-resolution pixels."
+        },
+        "frameTimeDeltaMilliseconds": {
+            "type": ["number", "null"],
+            "minimum": 0
+        }
+    },
+    "if": { "properties": { "available": { "const": true } } },
+    "then": {
+        "properties": {
+            "reset": { "type": "boolean" },
+            "jitterOffsetPixels": { "type": "array" },
+            "frameTimeDeltaMilliseconds": { "type": "number" }
+        }
+    },
+    "else": {
+        "properties": {
+            "reset": { "type": "null" },
+            "jitterOffsetPixels": { "type": "null" },
+            "frameTimeDeltaMilliseconds": { "type": "null" }
+        }
+    }
+}

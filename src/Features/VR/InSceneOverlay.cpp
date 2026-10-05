@@ -1025,6 +1025,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 					submitPacket.GetColorTexture()) {
 					const vr::VRTextureBounds_t fullBounds{ 0.0f, 0.0f, 1.0f, 1.0f };
 					const auto& bounds = retainedBounds ? *retainedBounds : fullBounds;
+					CSX::RenderMap::GetRuntime().SetCpuFrame(globals::state ? globals::state->frameCount : 0);
 					CSX::RenderMap::GetRuntime().RecordEyeSubmission(
 						DescribeSubmittedTexture(submitPacket.GetColorTexture()),
 						RenderMapEye(submitPacket.eye),
@@ -1034,7 +1035,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 						bounds.uMax,
 						bounds.vMax,
 						static_cast<std::uint32_t>(submitPacket.flags),
-						compositorCycleToken);
+						compositorCycleToken, submitPacket.publicationLease.generation);
 				}
 #endif
 				uint64_t completionScopeEpoch =

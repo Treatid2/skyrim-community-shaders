@@ -39,6 +39,22 @@ file(READ
     _fidelityfx_source
 )
 file(READ
+    "${PROJECT_ROOT}/src/Features/Upscaling/FidelityFX.h"
+    _fidelityfx_header
+)
+file(READ
+    "${PROJECT_ROOT}/src/Features/Upscaling/FSRColorContractDevBenchBridge.cpp"
+    _fsr_color_contract_bridge
+)
+file(READ
+    "${PROJECT_ROOT}/src/Features/Upscaling/FSRColorContractPolicy.h"
+    _fsr_color_contract_policy
+)
+file(READ
+    "${PROJECT_ROOT}/src/Features/Upscaling/FSRColorContractReceiptPolicy.h"
+    _fsr_color_contract_receipt_policy
+)
+file(READ
     "${PROJECT_ROOT}/docs/development/vr-render-scale-replacement-telemetry.md"
     _replacement_telemetry_documentation
 )
@@ -256,6 +272,204 @@ foreach(_fsr_failure_contract IN ITEMS
 			"FSR failure evidence is missing: ${_fsr_failure_contract}"
 		)
 	endif()
+endforeach()
+
+foreach(_fsr_color_contract IN ITEMS
+    "communityshaders.fsr_color_contract"
+    "expectedRevision"
+    "highDynamicRangeInput"
+    "autoExposure"
+    "sourceColorContractChanged"
+    "SetDevBenchFsrColorContract("
+    "GetDevBenchFsrColorContractStatusSnapshot()"
+    "FSRColorContractPolicy::PlanUpdate("
+    "FSRColorContractPolicy::ContextMatches("
+    "FSRColorContractDevBenchBridge::Install()"
+)
+    string(FIND
+        "${_fsr_color_contract_bridge}\n${_fsr_color_contract_policy}\n${_fsr_color_contract_receipt_policy}\n${_fidelityfx_source}\n${_upscaling_source}"
+        "${_fsr_color_contract}"
+        _fsr_color_contract_position
+    )
+    if(_fsr_color_contract_position EQUAL -1)
+        message(FATAL_ERROR
+            "FSR colour-contract control is missing: ${_fsr_color_contract}"
+        )
+    endif()
+endforeach()
+
+string(REGEX MATCHALL
+    "const std::lock_guard lock\\(devBenchFsrColorContractMutex\\);"
+    _fsr_color_contract_locks
+    "${_fidelityfx_source}\n${_fsr_color_contract_receipt_policy}"
+)
+list(LENGTH _fsr_color_contract_locks _fsr_color_contract_lock_count)
+if(_fsr_color_contract_lock_count LESS 6)
+    message(FATAL_ERROR
+        "FSR colour-contract request, context, and dispatch evidence is not serialized"
+    )
+endif()
+
+string(FIND "${_fsr_color_contract_bridge}"
+    "GetRuntimeUpscalerDispatchSnapshotForRenderThread()"
+    _split_fsr_status_position)
+if(NOT _split_fsr_status_position EQUAL -1)
+    message(FATAL_ERROR
+        "FSR colour-contract status still reads dispatch evidence separately"
+    )
+endif()
+
+foreach(_coherent_fsr_evidence IN ITEMS
+    "FsrColorContractStatusSnapshot"
+    "FsrColorContractSetResult"
+    "devBenchFsrColorContractMutex"
+    "PublishDevBenchFsrColorContext(false, colorContractFlags)"
+    "PublishDevBenchFsrColorContext(true, colorContractFlags)"
+    "GetDevBenchFsrColorContractReplacementState()"
+    "FSRColorContractPolicy::GetReplacementState("
+)
+    string(FIND
+        "${_fidelityfx_header}\n${_fidelityfx_source}"
+        "${_coherent_fsr_evidence}"
+        _coherent_fsr_evidence_position
+    )
+    if(_coherent_fsr_evidence_position EQUAL -1)
+        message(FATAL_ERROR
+            "FSR colour-contract coherent evidence is missing: ${_coherent_fsr_evidence}"
+        )
+    endif()
+endforeach()
+
+foreach(_fsr_set_receipt_contract IN ITEMS
+    "const std::lock_guard lock(a_mutex);"
+    "FSRColorContractReceiptPolicy::ApplySet<FsrColorContractStatusSnapshot>("
+    "GetDevBenchFsrColorContractStatusSnapshotLocked()"
+    "SnapshotJson(setResult.status)"
+    "result[\"accepted\"] = setResult.accepted"
+    "result[\"resultingRevision\"] = setResult.resultingRevision"
+)
+    string(FIND
+        "${_fidelityfx_source}\n${_fidelityfx_header}\n${_fsr_color_contract_bridge}\n${_fsr_color_contract_receipt_policy}"
+        "${_fsr_set_receipt_contract}"
+        _fsr_set_receipt_contract_position
+    )
+    if(_fsr_set_receipt_contract_position EQUAL -1)
+        message(FATAL_ERROR
+            "FSR set response is not one mutex-coherent receipt: ${_fsr_set_receipt_contract}"
+        )
+    endif()
+endforeach()
+
+foreach(_fsr_quarantine_case IN ITEMS "Host" "Runtime")
+    if(_fsr_quarantine_case STREQUAL "Host")
+        set(_fsr_quarantine_start "void FidelityFX::QuarantineHostFSRState")
+        set(_fsr_quarantine_end "void FidelityFX::QuarantineHostFSRContext")
+        set(_fsr_quarantine_clear "ClearDevBenchFsrColorContext(false)")
+        set(_fsr_quarantine_guard "if (fsrHostStateQuarantined)")
+    else()
+        set(_fsr_quarantine_start "void FidelityFX::QuarantineRuntimeUpscalerForSession")
+        set(_fsr_quarantine_end "FidelityFX::RuntimeUpscalerFramePath FidelityFX::GetRuntimeUpscalerProviderFramePath")
+        set(_fsr_quarantine_clear "ClearDevBenchFsrColorContext(true)")
+        set(_fsr_quarantine_guard "if (runtimeUpscalerSessionQuarantined)")
+    endif()
+
+    string(FIND "${_fidelityfx_source}" "${_fsr_quarantine_start}"
+        _fsr_quarantine_function_start)
+    string(FIND "${_fidelityfx_source}" "${_fsr_quarantine_end}"
+        _fsr_quarantine_function_end)
+    if(_fsr_quarantine_function_start EQUAL -1 OR
+        _fsr_quarantine_function_end EQUAL -1 OR
+        _fsr_quarantine_function_end LESS_EQUAL _fsr_quarantine_function_start)
+        message(FATAL_ERROR
+            "${_fsr_quarantine_case} FSR quarantine function boundaries were not found"
+        )
+    endif()
+    math(EXPR _fsr_quarantine_function_length
+        "${_fsr_quarantine_function_end} - ${_fsr_quarantine_function_start}")
+    string(SUBSTRING "${_fidelityfx_source}"
+        ${_fsr_quarantine_function_start}
+        ${_fsr_quarantine_function_length}
+        _fsr_quarantine_function)
+    string(FIND "${_fsr_quarantine_function}" "${_fsr_quarantine_clear}"
+        _fsr_quarantine_clear_position)
+    string(FIND "${_fsr_quarantine_function}" "${_fsr_quarantine_guard}"
+        _fsr_quarantine_guard_position)
+    if(_fsr_quarantine_clear_position EQUAL -1 OR
+        _fsr_quarantine_guard_position EQUAL -1 OR
+        _fsr_quarantine_clear_position GREATER _fsr_quarantine_guard_position)
+        message(FATAL_ERROR
+            "${_fsr_quarantine_case} FSR quarantine does not clear validity before its early return"
+        )
+    endif()
+endforeach()
+
+foreach(_fsr_color_lifecycle_contract IN ITEMS
+    "pendingFsrColorContractReplacement"
+    "fsrColorContractReplacementReady"
+    "colour-contract FSR resource teardown"
+    "colour-contract FSR resource creation"
+)
+    string(FIND "${_upscaling_source}" "${_fsr_color_lifecycle_contract}"
+        _fsr_color_lifecycle_contract_position)
+    if(_fsr_color_lifecycle_contract_position EQUAL -1)
+        message(FATAL_ERROR
+            "FSR colour-contract lifecycle trigger is missing: ${_fsr_color_lifecycle_contract}"
+        )
+    endif()
+endforeach()
+
+string(FIND "${_fidelityfx_source}"
+    "FidelityFX::LifecycleResult FidelityFX::EnsureRuntimeUpscalerContexts"
+    _fsr_runtime_context_function_start)
+string(FIND "${_fidelityfx_source}"
+    "FidelityFX::LifecycleResult FidelityFX::EnsureRuntimeUpscalerSharedResources"
+    _fsr_runtime_context_function_end)
+if(_fsr_runtime_context_function_start EQUAL -1 OR
+    _fsr_runtime_context_function_end EQUAL -1 OR
+    _fsr_runtime_context_function_end LESS_EQUAL _fsr_runtime_context_function_start)
+    message(FATAL_ERROR "Runtime FSR context function boundaries were not found")
+endif()
+math(EXPR _fsr_runtime_context_function_length
+    "${_fsr_runtime_context_function_end} - ${_fsr_runtime_context_function_start}")
+string(SUBSTRING "${_fidelityfx_source}"
+    ${_fsr_runtime_context_function_start}
+    ${_fsr_runtime_context_function_length}
+    _fsr_runtime_context_function)
+
+string(FIND "${_fsr_runtime_context_function}"
+    "const auto providerResult = RecordRuntimeProviderResult(true)"
+    _fsr_provider_admission_position)
+string(FIND "${_fsr_runtime_context_function}"
+    "const auto tuningResult = ConfigureTemporalTuningContexts"
+    _fsr_tuning_admission_position)
+string(FIND "${_fsr_runtime_context_function}"
+    "PublishDevBenchFsrColorContext(true, colorContractFlags)"
+    _fsr_runtime_publish_position)
+if(_fsr_provider_admission_position EQUAL -1 OR
+    _fsr_tuning_admission_position EQUAL -1 OR
+    _fsr_runtime_publish_position EQUAL -1 OR
+    _fsr_runtime_publish_position LESS _fsr_provider_admission_position OR
+    _fsr_runtime_publish_position LESS _fsr_tuning_admission_position)
+    message(FATAL_ERROR
+        "Runtime FSR validity is published before provider and tuning admission"
+    )
+endif()
+
+foreach(_forbidden_fsr_color_contract IN ITEMS
+    "\"persist\""
+    "SetDLSS"
+    "DLSSUsesHDR"
+)
+    string(FIND
+        "${_fsr_color_contract_bridge}"
+        "${_forbidden_fsr_color_contract}"
+        _forbidden_fsr_color_contract_position
+    )
+    if(NOT _forbidden_fsr_color_contract_position EQUAL -1)
+        message(FATAL_ERROR
+            "FSR colour-contract bridge crossed its boundary: ${_forbidden_fsr_color_contract}"
+        )
+    endif()
 endforeach()
 
 string(FIND "${_upscaling_source}" "admittedExistingDLSSProvider"

@@ -1798,6 +1798,11 @@ if(BUILD_CONTROLLER_TESTS)
         tests/main_thread_dispatch_policy_test.cpp
     )
     add_controller_test(
+        colour_pipeline_probe_policy_test
+        ColourPipelineProbePolicy
+        tests/colour_pipeline_probe_policy_test.cpp
+    )
+    add_controller_test(
         vr_render_scale_preparation_policy_test
         VRRenderScalePreparationPolicy
         tests/vr_render_scale_preparation_policy_test.cpp
@@ -2164,6 +2169,10 @@ if(BUILD_CONTROLLER_TESTS)
         src/RenderMap/Collector.cpp
     )
     target_compile_features(render_map_collector_test PRIVATE cxx_std_23)
+    target_link_libraries(
+        render_map_collector_test
+        PRIVATE nlohmann_json::nlohmann_json
+    )
     target_include_directories(
         render_map_collector_test
         PRIVATE "${PROJECT_SOURCE_DIR}/src"
@@ -2652,6 +2661,7 @@ if(BUILD_CONTROLLER_TESTS)
             vr_submit_color_contract_test
             vr_submit_stereo_batch_test
             main_thread_dispatch_policy_test
+            colour_pipeline_probe_policy_test
             vr_render_scale_preparation_policy_test
             vr_presentation_stretch_telemetry_policy_test
             reflex_policy_test

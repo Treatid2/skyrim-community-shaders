@@ -18,6 +18,27 @@ namespace
 int main()
 {
 	try {
+		Snapshot001 before;
+		before.stateRevision = 1;
+		before.capabilityRevision = 2;
+		auto after = before;
+		Check(CSX::Api::IsUpscalingSnapshotBracketStable(Status::kSuccess, before, Status::kSuccess, after),
+			"unchanged native API bracket was rejected");
+		after.stateRevision = 13;
+		Check(!CSX::Api::IsUpscalingSnapshotBracketStable(Status::kSuccess, before, Status::kSuccess, after),
+			"different revision authorities or a changed API revision were correlated");
+		after = before;
+		++after.capabilityRevision;
+		Check(!CSX::Api::IsUpscalingSnapshotBracketStable(Status::kSuccess, before, Status::kSuccess, after),
+			"changed capability revision was correlated");
+		Check(!CSX::Api::IsUpscalingSnapshotBracketStable(Status::kBusy, before, Status::kSuccess, before),
+			"unavailable before observation was correlated");
+		Check(!CSX::Api::IsUpscalingSnapshotBracketStable(Status::kSuccess, before, Status::kServiceUnavailable, before),
+			"unavailable after observation was correlated");
+		before.stateRevision = 0;
+		Check(!CSX::Api::IsUpscalingSnapshotBracketStable(Status::kSuccess, before, Status::kSuccess, before),
+			"uninitialized API revision was correlated");
+
 		const auto directLoading = CSX::Api::ResolveUpscalingAdmission(
 			kConditionLoadingTransition | kConditionTransitionPending,
 			RequestPurpose::kDirect,

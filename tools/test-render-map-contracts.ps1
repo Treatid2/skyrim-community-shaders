@@ -56,6 +56,26 @@ $eventSchemaPath = Join-Path $schemaRoot 'render-event.schema.json'
 $graphSchemaPath = Join-Path $schemaRoot 'render-graph.schema.json'
 $eventSchema = Get-Content -Raw -LiteralPath $eventSchemaPath | ConvertFrom-Json -Depth 100
 $null = Get-Content -Raw -LiteralPath $graphSchemaPath | ConvertFrom-Json -Depth 100
+$serializerSource = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src/RenderMap/Serialization.cpp')
+$bridgeSource = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src/RenderMap/DevBenchBridge.cpp')
+$catalogueSource = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src/RenderMap/PayloadSchemaNames.h')
+Assert-True ($bridgeSource.Contains('{ "eventSchemas", json(CSX::RenderMap::PayloadSchemaNames::kAll) }')) 'Registry must use the shared current schema catalogue'
+$definitions = @([regex]::Matches($catalogueSource, 'inline constexpr char (?<symbol>k\w+)\[\] = "(?<name>[a-z][a-z0-9-]*-v\d+)";'))
+$catalogue = [regex]::Match($catalogueSource, '(?s)kAll = std::to_array<const char\*>\(\{(?<symbols>.*?)\}\)')
+Assert-True $catalogue.Success 'Render-map payload catalogue is missing'
+$advertisedSymbols = @([regex]::Matches($catalogue.Groups['symbols'].Value, '\bk\w+\b') | ForEach-Object { $_.Value })
+$serializedSymbols = @([regex]::Matches($serializerSource, '\{\s*"schema",\s*PayloadSchemaNames::(?<symbol>k\w+)') | ForEach-Object { $_.Groups['symbol'].Value } | Sort-Object -Unique)
+Assert-True ($serializedSymbols.Count -gt 0) 'Render-map serializer has no named payload schema families'
+Assert-True ($advertisedSymbols.Count -eq @($advertisedSymbols | Sort-Object -Unique).Count) 'Registry advertises duplicate schema symbols'
+Assert-True ($definitions.Count -eq @($definitions | ForEach-Object { $_.Groups['name'].Value } | Sort-Object -Unique).Count) 'Catalogue defines duplicate schema names'
+foreach ($symbol in $serializedSymbols) {
+    Assert-True ($advertisedSymbols -contains $symbol) "Registry omits serialized payload schema $symbol"
+}
+foreach ($symbol in $advertisedSymbols) {
+    Assert-True ($serializedSymbols -contains $symbol) "Registry advertises unreachable payload schema $symbol"
+    Assert-True (@($definitions | Where-Object { $_.Groups['symbol'].Value -eq $symbol }).Count -eq 1) "Catalogue name is missing or ambiguous: $symbol"
+}
+Assert-True (-not [regex]::IsMatch($serializerSource, '\{\s*"schema",\s*"[a-z][a-z0-9-]*-v\d+"')) 'Serializer must use shared payload schema names'
 $fixtureRoot = Join-Path $repoRoot 'tests/fixtures/render-map'
 $fixtureEventsPath = Join-Path $fixtureRoot 'deferred-command-events.json'
 $fixtureEdgeCasesPath = Join-Path $fixtureRoot 'deferred-command-edge-cases.json'
@@ -140,7 +160,24 @@ foreach ($case in $fixtureEdgeCases.invalid) {
     $edgeCaseSequence++
 }
 
+$postProcessingCases = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'post-processing-edge-cases.json') | ConvertFrom-Json -Depth 100
+foreach ($case in $postProcessingCases.valid) {
+    $eventValid = Test-Json -Json ($case.event | ConvertTo-Json -Depth 100 -Compress) -SchemaFile $eventSchemaPath -ErrorAction Stop
+    Assert-True $eventValid "Valid post-processing case '$($case.name)' does not conform to the render-event schema"
+}
+foreach ($case in $postProcessingCases.invalid) {
+    $eventValid = Test-Json -Json ($case.event | ConvertTo-Json -Depth 100 -Compress) -SchemaFile $eventSchemaPath -ErrorAction SilentlyContinue
+    Assert-True (-not $eventValid) "Invalid post-processing case '$($case.name)' unexpectedly conforms to the render-event schema"
+}
+
 $hooksSource = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src/Hooks.cpp')
+$preservingShaderHooks = @([regex]::Matches($hooksSource, 'return Util::ObserveSuccessfulShaderCreation\(hr, pp(?<stage>Vertex|Pixel|Compute)Shader,') | ForEach-Object { $_.Groups['stage'].Value } | Sort-Object)
+Assert-True (($preservingShaderHooks -join ',') -eq 'Compute,Pixel,Vertex') 'Every native shader creation hook must preserve its native result across diagnostics'
+Assert-True ($bridgeSource.Contains('"shaderMetadata", BuildShaderMetadataStatus()') -and $bridgeSource.Contains('response["result"]["shaderMetadata"] = BuildShaderMetadataStatus();')) 'Registry/status must expose independent shader metadata limits and failure evidence'
+$publicationSource = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src/RenderMap/CapturePublication.h')
+Assert-True ($bridgeSource.Contains('CSX::RenderMap::WithPreparedCaptureArtifacts(g_artifactBundles, captureId,') -and -not $bridgeSource.Contains('g_artifactBundles.emplace(captureId, artifacts)')) 'Stop must reserve publication ownership through the shared prepared-cache path'
+Assert-True ($publicationSource.IndexOf('a_cache.try_emplace') -lt $publicationSource.IndexOf('auto artifacts = a_write();') -and $publicationSource.Contains('std::is_nothrow_move_assignable_v<CaptureArtifactBundle>') -and $publicationSource.IndexOf('entry->second.finished = true;') -lt $publicationSource.IndexOf('return a_response(')) 'Verified publication must be cached without allocation before response construction'
+Assert-True ($bridgeSource.IndexOf('PruneArtifactState(captureId);') -lt $bridgeSource.IndexOf('WithPreparedCaptureArtifacts(g_artifactBundles, captureId,')) 'Fallible stop cache pruning must precede publication'
 $contextHooksSource = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src/RenderMap/D3DContextHooks.cpp')
 Assert-True ($hooksSource.Contains('stl::detour_vfunc<27, ID3D11Device_CreateDeferredContext>')) 'CreateDeferredContext is not hooked at D3D11 device slot 27'
 Assert-True ($contextHooksSource.Contains('stl::detour_vfunc<58, ID3D11DeviceContext_ExecuteCommandList>')) 'ExecuteCommandList is not hooked at context slot 58'
@@ -185,4 +222,4 @@ try {
     }
 }
 
-Write-Output "Render-map contracts passed: 2 schemas, $($fixtureEvents.Count) baseline deferred-command fixtures, $($validEdgeCaseEvents.Count) valid edge cases, $($fixtureEdgeCases.invalid.Count) rejected edge cases, 13 cross-identity cases, 5 hook contracts, and the offline graph suite."
+Write-Output "Render-map contracts passed: 2 schemas, $($fixtureEvents.Count) baseline deferred-command fixtures, $($validEdgeCaseEvents.Count) valid edge cases, $($fixtureEdgeCases.invalid.Count) rejected edge cases, 13 cross-identity cases, $($postProcessingCases.valid.Count) valid and $($postProcessingCases.invalid.Count) rejected post-processing cases, 7 hook contracts, and the offline graph suite."

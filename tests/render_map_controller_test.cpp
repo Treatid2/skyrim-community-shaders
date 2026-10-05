@@ -1,5 +1,8 @@
 #include "RenderMap/Artifacts.h"
+#include "RenderMap/CapturePublication.h"
+#include "RenderMap/CaptureStart.h"
 #include "RenderMap/Controller.h"
+#include "RenderMap/PayloadSchemaNames.h"
 #include "RenderMap/Serialization.h"
 
 #include <algorithm>
@@ -8,9 +11,15 @@
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <memory>
+#include <new>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace
@@ -21,6 +30,65 @@ namespace
 	{
 		if (!a_condition)
 			throw std::runtime_error(std::string(a_message));
+	}
+
+	void TestPayloadSchemaCatalogue()
+	{
+		const std::set<std::string> advertised(
+			PayloadSchemaNames::kAll.begin(), PayloadSchemaNames::kAll.end());
+		Check(advertised.size() == PayloadSchemaNames::kAll.size(), "registry repeats payload schemas");
+		std::set<std::string> emitted;
+		for (std::uint16_t schema = 1; schema <= static_cast<std::uint16_t>(PayloadSchema::kNativePipelineSnapshot); ++schema) {
+			EventRecord event{};
+			event.payload.schema = schema;
+			const auto serialized = SerializeEvent(event, "catalogue-test", 42);
+			const auto name = serialized["payload"]["schema"].get<std::string>();
+			Check(advertised.contains(name), "serializer emits an unadvertised payload schema");
+			emitted.insert(name);
+		}
+		Check(emitted == advertised, "registry advertises an unreachable payload schema");
+	}
+
+	void TestResourceCpuAccessBoundaries()
+	{
+		struct Case
+		{
+			ResourceCpuAccessPhase phase;
+			std::uint32_t mapType;
+			std::uint32_t result;
+			std::uint64_t mapObservationId;
+			bool visible;
+			bool published;
+		};
+		const Case cases[] = {
+			{ ResourceCpuAccessPhase::kMap, 1, 0, 9, true, false },
+			{ ResourceCpuAccessPhase::kMap, 3, 0, 9, true, false },
+			{ ResourceCpuAccessPhase::kMap, 2, 0, 9, false, false },
+			{ ResourceCpuAccessPhase::kMap, 4, 0, 9, false, false },
+			{ ResourceCpuAccessPhase::kMap, 5, 0, 9, false, false },
+			{ ResourceCpuAccessPhase::kMap, 1, 0x80004005u, 0, false, false },
+			{ ResourceCpuAccessPhase::kUnmap, 1, 0, 9, false, false },
+			{ ResourceCpuAccessPhase::kUnmap, 2, 0, 9, false, true },
+			{ ResourceCpuAccessPhase::kUnmap, 3, 0, 9, false, true },
+			{ ResourceCpuAccessPhase::kUnmap, 4, 0, 9, false, true },
+			{ ResourceCpuAccessPhase::kUnmap, 5, 0, 9, false, true },
+			{ ResourceCpuAccessPhase::kUnmap, 2, 0, 0, false, false },
+		};
+		for (const auto& test : cases) {
+			EventRecord event{};
+			event.kind = EventKind::kResourceCpuAccess;
+			event.payload = {
+				.schema = static_cast<std::uint16_t>(PayloadSchema::kResourceCpuAccess),
+				.words = { static_cast<std::uint64_t>(test.phase), test.mapObservationId, 7, 0, test.mapType, 0, test.result, 0 },
+			};
+			const auto payload = SerializeEvent(event, "cpu-boundary-test", 42).at("payload");
+			Check(test.visible ? payload.at("visibilityBoundary") == "cpu-readable-after-map-return" :
+								 payload.at("visibilityBoundary").is_null(),
+				"CPU map visibility boundary has the wrong JSON value");
+			Check(test.published ? payload.at("publicationBoundary") == "gpu-visible-after-unmap-return" :
+								   payload.at("publicationBoundary").is_null(),
+				"CPU unmap publication boundary has the wrong JSON value");
+		}
 	}
 
 	CollectorConfig Config()
@@ -60,7 +128,7 @@ namespace
 				{ "csxBuildManifest", unavailable },
 			},
 			.environment = {
-				{ "skyrim", { { "name", "SkyrimVR.exe" }, { "version", "1.4.15" }, { "sha256", nullptr } } },
+				{ "skyrim", BuildSkyrimModuleIdentity(true, "1.4.15.0", true) },
 				{ "csx", { { "name", "CommunityShaders.dll" }, { "version", "test" }, { "sha256", nullptr } } },
 				{ "runtimeRoute", "unknown" },
 				{ "modEnvironment", {
@@ -152,6 +220,101 @@ namespace
 		Check(a_controller.Stop(descriptor.captureId, replay) == ControlStatus::kSuccess && replay == completed,
 			"completed stop was not idempotent");
 		return completed;
+	}
+
+	void TestRuntimeArtifactIdentity()
+	{
+		const auto vr = BuildSkyrimModuleIdentity(true, "1.4.15.0", true);
+		Check(vr["name"] == "SkyrimVR.exe" && vr["version"] == "1.4.15.0", "VR identity was not retained");
+		for (const auto version : { "1.5.97.0", "1.6.629.0" }) {
+			const auto flat = BuildSkyrimModuleIdentity(false, version, false);
+			Check(flat["name"] == "SkyrimSE.exe" && flat["version"] == version, "SE/AE identity was mislabeled");
+			Check(flat["sha256"].is_null(), "unobserved executable hash was invented");
+		}
+		Check(BuildSkyrimModuleIdentity(false, "")["version"].is_null(), "missing runtime version was substituted");
+		for (const auto vrRuntime : { false, true }) {
+			bool rejected = false;
+			try {
+				BuildSkyrimModuleIdentity(vrRuntime, "observed-version", !vrRuntime);
+			} catch (const std::invalid_argument&) {
+				rejected = true;
+			}
+			Check(rejected, "contradictory observed shader/runtime identity was accepted");
+		}
+	}
+
+	void TestPreparedStartFailures()
+	{
+		for (const auto failure : { CaptureStartPhase::kContext, CaptureStartPhase::kResponse }) {
+			CaptureController controller;
+			CaptureDescriptor descriptor;
+			CaptureStartPhase phase = CaptureStartPhase::kContext;
+			std::unordered_map<std::string, CaptureArtifactContext> contexts;
+			const auto root = std::filesystem::temp_directory_path() /
+			                  std::format("csx-render-map-start-failure-{}", std::chrono::steady_clock::now().time_since_epoch().count());
+			nlohmann::json response;
+			const auto status = StartPreparedCapture(controller, Config(), descriptor, phase, [&](const auto& a_capture) {
+					Check(!GetRuntime().IsCapturing(), "hooks activated before context retention");
+					if (failure == CaptureStartPhase::kContext)
+						throw std::bad_alloc();
+					contexts.emplace(a_capture.captureId, ArtifactContext(root)); }, [&](const auto& a_capture) {
+					Check(!GetRuntime().IsCapturing(), "hooks activated before response construction");
+					Check(contexts.contains(a_capture.captureId), "response preceded context retention");
+					response["captureId"] = a_capture.captureId;
+					if (failure == CaptureStartPhase::kResponse)
+						throw std::bad_alloc(); }, [&](const std::string& a_captureId) noexcept { contexts.erase(a_captureId); });
+			Check(status == ControlStatus::kAllocationFailed && phase == failure, "injected start failure was misclassified");
+			Check(!descriptor.captureId.empty(), "failure did not exercise a reserved capture identity");
+			Check(contexts.empty(), "failed start retained artifact context");
+			const auto state = controller.GetStatus();
+			Check(!state.active && !state.accepting && state.completedCaptureIds.empty(), "failed start published a capture");
+			Check(!controller.GetCompleted(descriptor.captureId), "failed start permits event paging");
+			std::shared_ptr<const CompletedCapture> stopped;
+			Check(controller.Stop(descriptor.captureId, stopped) == ControlStatus::kNotCapturing && !stopped,
+				"failed start permits completed stop or artifact serialization");
+			Check(!GetRuntime().IsCapturing() && !GetRuntime().IsCaptureDraining(), "failed start left hooks active or draining");
+			Check(!std::filesystem::exists(root), "failed start created an artifact directory");
+			CaptureDescriptor next;
+			Check(controller.Start(Config(), next) == ControlStatus::kSuccess, "failed preparation prevented a later capture");
+			Check(controller.Stop(next.captureId, stopped) == ControlStatus::kSuccess, "later capture could not complete");
+		}
+	}
+
+	void TestPreparedStartSuccess()
+	{
+		CaptureController controller;
+		CaptureDescriptor descriptor;
+		CaptureStartPhase phase = CaptureStartPhase::kContext;
+		std::unordered_map<std::string, std::string> contexts;
+		nlohmann::json response;
+		const auto status = StartPreparedCapture(controller, Config(), descriptor, phase, [&](const auto& a_capture) {
+				Check(!GetRuntime().IsCapturing(), "successful start activated before provenance");
+				contexts.emplace(a_capture.captureId, "capture-start"); }, [&](const auto& a_capture) {
+				Check(!GetRuntime().IsCapturing(), "successful start activated before response");
+				response["captureId"] = a_capture.captureId; }, [&](const std::string& a_captureId) noexcept { contexts.erase(a_captureId); });
+		Check(status == ControlStatus::kSuccess && phase == CaptureStartPhase::kRuntime, "prepared start failed");
+		Check(GetRuntime().IsCapturing(), "prepared start did not activate capture");
+		Check(response["captureId"] == descriptor.captureId && contexts.at(descriptor.captureId) == "capture-start",
+			"prepared response/context identity changed at activation");
+		std::shared_ptr<const CompletedCapture> capture;
+		Check(controller.Stop(descriptor.captureId, capture) == ControlStatus::kSuccess, "prepared capture could not stop");
+		Check(controller.GetCompleted(descriptor.captureId) == capture, "successful prepared capture was not retained");
+	}
+
+	void TestPreparedRuntimeFailure()
+	{
+		CaptureController controller;
+		CaptureDescriptor descriptor;
+		CaptureStartPhase phase = CaptureStartPhase::kContext;
+		std::unordered_map<std::string, std::string> contexts;
+		auto invalid = Config();
+		invalid.maxEvents = 0;
+		const auto status = StartPreparedCapture(controller, invalid, descriptor, phase, [&](const auto& a_capture) { contexts.emplace(a_capture.captureId, "capture-start"); }, [](const auto&) {}, [&](const std::string& a_captureId) noexcept { contexts.erase(a_captureId); });
+		Check(status == ControlStatus::kInvalidBounds && phase == CaptureStartPhase::kRuntime,
+			"runtime admission failure was not preserved");
+		Check(contexts.empty() && !controller.GetStatus().active && controller.GetStatus().completedCaptureIds.empty(),
+			"runtime admission failure retained prepared capture state");
+		Check(!GetRuntime().IsCapturing(), "invalid runtime admission activated hooks");
 	}
 
 	void TestControllerAndSerialization()
@@ -452,7 +615,7 @@ namespace
 		const auto& observedGeometry = page["events"][1];
 		const auto& material = page["events"][2];
 		const auto& setup = page["events"][3];
-		Check(object["schema"]["minor"] == 17 && object["payload"]["schema"] == "scene-object-observation-v1",
+		Check(object["schema"]["minor"] == 19 && object["payload"]["schema"] == "scene-object-observation-v1",
 			"scene-object declaration schema is wrong");
 		Check(observedGeometry["payload"]["schema"] == "geometry-observation-v1" &&
 				  observedGeometry["payload"]["sceneObjectObservationId"] == object["payload"]["sceneObjectObservationId"],
@@ -586,6 +749,117 @@ namespace
 			"failed FinishCommandList serialized a materialized list identity or pointer");
 	}
 
+	bool g_failPublicationAllocation{ false };
+
+	template <class T>
+	struct PublicationFaultAllocator
+	{
+		using value_type = T;
+		PublicationFaultAllocator() = default;
+		template <class U>
+		PublicationFaultAllocator(const PublicationFaultAllocator<U>&) noexcept
+		{}
+		T* allocate(std::size_t a_count)
+		{
+			if (std::exchange(g_failPublicationAllocation, false))
+				throw std::bad_alloc();
+			return std::allocator<T>{}.allocate(a_count);
+		}
+		void deallocate(T* a_pointer, std::size_t a_count) noexcept
+		{
+			std::allocator<T>{}.deallocate(a_pointer, a_count);
+		}
+		template <class U>
+		bool operator==(const PublicationFaultAllocator<U>&) const noexcept
+		{
+			return true;
+		}
+	};
+
+	void TestPreparedArtifactPublication()
+	{
+		const auto root = std::filesystem::temp_directory_path() /
+		                  std::format("csx-render-map-publication-test-{}", std::chrono::steady_clock::now().time_since_epoch().count());
+		CaptureController controller;
+		const auto capture = MakeCapture(controller);
+		using Entry = std::pair<const std::string, PreparedCapturePublication>;
+		std::unordered_map<std::string, PreparedCapturePublication, std::hash<std::string>,
+			std::equal_to<std::string>, PublicationFaultAllocator<Entry>>
+			cache;
+		std::size_t writes = 0;
+		auto write = [&] {
+			++writes;
+			return WriteCaptureArtifacts(*capture, ArtifactContext(root), 42);
+		};
+		auto respond = [](const CaptureArtifactBundle& a_bundle) { return SerializeArtifactBundle(a_bundle); };
+
+		g_failPublicationAllocation = true;
+		bool admissionFailed = false;
+		try {
+			WithPreparedCaptureArtifacts(cache, capture->descriptor.captureId, write, respond);
+		} catch (const std::bad_alloc&) {
+			admissionFailed = true;
+		}
+		Check(admissionFailed && !g_failPublicationAllocation && cache.empty() && writes == 0 &&
+				  !std::filesystem::exists(root),
+			"cache admission failure published artifacts or retained a placeholder");
+
+		bool writerFailed = false;
+		try {
+			WithPreparedCaptureArtifacts(cache, capture->descriptor.captureId, []() -> CaptureArtifactBundle { throw std::bad_alloc(); }, respond);
+		} catch (const std::bad_alloc&) {
+			writerFailed = true;
+		}
+		Check(writerFailed && cache.empty() && writes == 0 && !std::filesystem::exists(root),
+			"writer exception retained an unfinished publication");
+
+		bool responseFailed = false;
+		try {
+			WithPreparedCaptureArtifacts(cache, capture->descriptor.captureId, write,
+				[](const CaptureArtifactBundle&) -> nlohmann::json { throw std::bad_alloc(); });
+		} catch (const std::bad_alloc&) {
+			responseFailed = true;
+		}
+		Check(responseFailed && writes == 1 && cache.size() == 1,
+			"response failure lost the completed publication");
+		const auto& retained = cache.at(capture->descriptor.captureId);
+		Check(retained.finished && retained.artifacts.success, "verified publication was not committed before response construction");
+		const auto expected = SerializeArtifactBundle(retained.artifacts);
+		const auto eventsPath = retained.artifacts.directory / "events.jsonl";
+		const auto manifestPath = retained.artifacts.directory / "capture-manifest.json";
+		auto readBytes = [](const std::filesystem::path& a_path) {
+			std::ifstream stream(a_path, std::ios::binary);
+			Check(stream.is_open(), "published artifact cannot be read");
+			return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+		};
+		const auto events = readBytes(eventsPath);
+		const auto manifest = readBytes(manifestPath);
+		const auto eventsTime = std::filesystem::last_write_time(eventsPath);
+		const auto manifestTime = std::filesystem::last_write_time(manifestPath);
+		std::shared_ptr<const CompletedCapture> stoppedAgain;
+		Check(controller.Stop(capture->descriptor.captureId, stoppedAgain) == ControlStatus::kSuccess && stoppedAgain == capture,
+			"fresh stop did not recover the completed capture");
+		const auto recovered = WithPreparedCaptureArtifacts(cache, stoppedAgain->descriptor.captureId, write, respond);
+		Check(recovered == expected && writes == 1 && events == readBytes(eventsPath) && manifest == readBytes(manifestPath) &&
+				  eventsTime == std::filesystem::last_write_time(eventsPath) && manifestTime == std::filesystem::last_write_time(manifestPath),
+			"fresh stop rewrote artifacts or changed verified paths, hashes or byte counts");
+
+		const auto foreign = MakeCapture(controller);
+		const auto foreignDirectory = root / foreign->descriptor.captureId;
+		std::filesystem::create_directories(foreignDirectory);
+		{
+			std::ofstream stream(foreignDirectory / "events.jsonl", std::ios::binary);
+			stream << "unrelated-existing-file";
+		}
+		WithPreparedCaptureArtifacts(cache, foreign->descriptor.captureId, [&] { return WriteCaptureArtifacts(*foreign, ArtifactContext(root), 42); }, respond);
+		const auto& collision = cache.at(foreign->descriptor.captureId).artifacts;
+		Check(!collision.success && collision.error.find("already exists") != std::string::npos &&
+				  readBytes(foreignDirectory / "events.jsonl") == "unrelated-existing-file" &&
+				  !std::filesystem::exists(foreignDirectory / "capture-manifest.json"),
+			"prepared publication accepted or replaced an unrelated existing file");
+		std::filesystem::remove_all(root);
+	}
+
 	void TestDurableArtifacts()
 	{
 		const auto root = std::filesystem::temp_directory_path() /
@@ -602,7 +876,7 @@ namespace
 		manifestStream >> manifest;
 		Check(manifest["status"] == "complete", "complete capture manifest has the wrong status");
 		Check(manifest["completion"]["eventCount"] == 8, "manifest event count is wrong");
-		Check(manifest["schema"]["minor"] == 7, "capture manifest schema revision is wrong");
+		Check(manifest["schema"]["minor"] == 9, "capture manifest schema revision is wrong");
 		Check(manifest["bounds"]["requestedEventKinds"].is_array() &&
 				  manifest["bounds"]["resolvedEventKinds"].is_array() &&
 				  manifest["bounds"]["observedEventKinds"].is_array(),
@@ -657,17 +931,203 @@ namespace
 		eventsStream.close();
 		std::filesystem::remove_all(root);
 	}
+
+	void TestSummaryAndManifestCompleteness()
+	{
+		struct Case
+		{
+			std::uint64_t CaptureStatistics::* counter;
+			const char* reason;
+			bool eventLoss;
+		};
+		const Case cases[] = {
+			{ &CaptureStatistics::droppedStopped, "event-loss", true },
+			{ &CaptureStatistics::droppedEventLimit, "event-loss", true },
+			{ &CaptureStatistics::droppedByteLimit, "event-loss", true },
+			{ &CaptureStatistics::scopeOverflow, "scope-overflow", false },
+			{ &CaptureStatistics::scopeMismatch, "scope-mismatch", false },
+			{ &CaptureStatistics::droppedShaderObservations, "shader-observation-loss", false },
+			{ &CaptureStatistics::droppedStageShaderObservations, "stage-shader-observation-loss", false },
+			{ &CaptureStatistics::droppedResourceObservations, "resource-observation-loss", false },
+			{ &CaptureStatistics::droppedTargetViewObservations, "target-view-observation-loss", false },
+			{ &CaptureStatistics::droppedTargetBindingObservations, "target-binding-observation-loss", false },
+			{ &CaptureStatistics::droppedSceneObjectObservations, "scene-object-observation-loss", false },
+			{ &CaptureStatistics::droppedGeometryObservations, "geometry-observation-loss", false },
+			{ &CaptureStatistics::droppedMaterialStateObservations, "material-state-observation-loss", false },
+		};
+		const auto root = std::filesystem::temp_directory_path() /
+		                  std::format("csx-render-map-completeness-test-{}", std::chrono::steady_clock::now().time_since_epoch().count());
+		std::uint64_t index = 0;
+		const auto verify = [&](CompletedCapture a_capture, const char* a_reason, bool a_evidenceLoss, bool a_eventLoss) {
+			a_capture.descriptor.captureId = std::format("capture-completeness-{}", ++index);
+			a_capture.snapshot.config = Config();
+			const auto summary = SerializeCaptureSummary(a_capture);
+			const auto bundle = WriteCaptureArtifacts(a_capture, ArtifactContext(root), 42);
+			Check(bundle.success, "completeness fixture could not publish artifacts");
+			std::ifstream stream(bundle.directory / "capture-manifest.json");
+			nlohmann::json manifest;
+			stream >> manifest;
+			const auto expected = a_reason ? nlohmann::json::array({ a_reason }) : nlohmann::json::array();
+			Check(summary["completion"]["incompleteReasons"] == expected &&
+					  manifest["extensions"]["csx.captureIncompleteReasons"] == expected,
+				"summary and manifest disagree on the exact incompleteness reasons");
+			Check(summary["completion"]["incomplete"] == (a_reason != nullptr) &&
+					  manifest["status"] == (a_reason ? "incomplete" : "complete") &&
+					  manifest["artifacts"][0]["complete"] == (a_reason == nullptr),
+				"summary and durable artifact disagree on evidence completeness");
+			Check(summary["completion"]["truncated"] == a_evidenceLoss &&
+					  manifest["completion"]["truncated"] == a_eventLoss &&
+					  manifest["completion"]["droppedEventCount"] == (a_eventLoss ? 1 : 0),
+				"evidence truncation was conflated with event loss or lifecycle failure");
+		};
+		for (const auto& test : cases) {
+			CompletedCapture capture;
+			capture.snapshot.statistics.*test.counter = 1;
+			verify(std::move(capture), test.reason, true, test.eventLoss);
+		}
+		for (const auto reason : { StopReason::kShutdown, StopReason::kFailure }) {
+			CompletedCapture capture;
+			capture.snapshot.stopReason = reason;
+			verify(std::move(capture), "lifecycle-failure", false, false);
+		}
+		CompletedCapture bounded;
+		bounded.snapshot.stopReason = StopReason::kFrameLimit;
+		bounded.snapshot.statistics.droppedFrameLimit = 1;
+		bounded.snapshot.statistics.droppedTimeLimit = 1;
+		verify(std::move(bounded), nullptr, false, false);
+		std::filesystem::remove_all(root);
+	}
+
+	void TestTransferSerializationAndDurableAdmissionGap()
+	{
+		EventRecord bootstrap;
+		bootstrap.kind = EventKind::kRasterStateObserved;
+		bootstrap.payload = { .schema = static_cast<std::uint16_t>(PayloadSchema::kNativePipelineSnapshot),
+			.words = { 1, 2, 3, 4, 5, 6 } };
+		const auto nativeState = SerializeEvent(bootstrap, "capture-bootstrap-test", 42).at("payload");
+		Check(nativeState["schema"] == "native-pipeline-snapshot-v1" && nativeState["source"] == "activation-getters" &&
+				  !nativeState.contains("operationObservationId") && nativeState["nativeLifetimeJoinVerified"] == false,
+			"bootstrap invented execution or object lifetime evidence");
+		CaptureSnapshot windowSnapshot;
+		windowSnapshot.config.latePostProcessingWindow = true;
+		windowSnapshot.window = { .phase = CaptureWindowPhase::kActive, .armedTick = 10, .activationTick = 20, .cpuFrame = 12, .publicationGeneration = 77, .compositorCycle = 90, .bootstrapThreadId = 3, .bootstrapEventCount = 4, .acceptedEyeMask = 1, .bootstrapComplete = true };
+		Check(!EvaluateCaptureCompleteness(windowSnapshot).reasons.empty(), "missing eye pair claimed completeness");
+		windowSnapshot.window.phase = CaptureWindowPhase::kMatchedEyes;
+		windowSnapshot.window.acceptedEyeMask = 3;
+		Check(EvaluateCaptureCompleteness(windowSnapshot).reasons.empty(), "complete bounded window was rejected");
+		windowSnapshot.statistics.droppedTargetViewObservations = 1;
+		Check(!EvaluateCaptureCompleteness(windowSnapshot).reasons.empty(), "matched pair hid catalogue loss");
+		const auto window = SerializeCaptureWindow(windowSnapshot.window);
+		Check(window["activationBoundary"]["attemptCount"] == 0 &&
+				  window["activationBoundary"]["lastTarget"].is_null() &&
+				  window["activationBoundary"]["lastCpuFrame"].is_null() &&
+				  window["activationBoundary"]["lastPublicationGeneration"].is_null(),
+			"unobserved activation inputs invented default values");
+		windowSnapshot.window.activationBoundary = { .attemptCount = 4, .targetRejections = 1, .frameRejections = 2, .publicationRejections = 2, .lastCpuFrame = 0, .lastPublicationGeneration = 0, .lastTarget = 9 };
+		const auto refusedBoundary = SerializeCaptureWindow(windowSnapshot.window)["activationBoundary"];
+		Check(refusedBoundary["scope"] == "armed-window-input-validation" && refusedBoundary["attemptCount"] == 4 &&
+				  refusedBoundary["targetRejections"] == 1 && refusedBoundary["frameRejections"] == 2 &&
+				  refusedBoundary["publicationRejections"] == 2 && refusedBoundary["lastTarget"] == 9 &&
+				  refusedBoundary["lastCpuFrame"] == 0 && refusedBoundary["lastPublicationGeneration"] == 0,
+			"refused activation input serialization hid observed zero values");
+		Check(window["prefixEventCount"].is_null() && window["preWindowProducerHistory"] == "unobserved" &&
+				  window["fullPipelineEstablished"] == false && window["pixelTransferEstablished"] == false &&
+				  window["omittedPrefix"]["fromTickInclusive"] == 10 && window["omittedPrefix"]["toTickExclusive"] == 20,
+			"late window promoted unknown prefix history or changed half-open bounds");
+		const auto payload = [](PayloadSchema schema, std::array<std::uint64_t, 8> words) {
+			EventRecord event;
+			event.sessionGeneration = 77;
+			event.kind = EventKind::kTransferResourceAccess;
+			event.payload = { .schema = static_cast<std::uint16_t>(schema), .words = words };
+			return SerializeEvent(event, "capture-transfer-test", 42);
+		};
+		const auto boundary = payload(PayloadSchema::kPostProcessingBoundary, { 1, 2, 3, 4, 5 });
+		Check(!boundary["payload"]["actualSourceEstablishedByBoundary"].get<bool>() &&
+				  boundary["observationRefs"][1]["role"] == "destination-before",
+			"destination-before was relabeled as source");
+		const auto access = payload(PayloadSchema::kTransferResourceAccess, { 2, 0, 9, 12, 5, 0, 3, 7 });
+		Check(access["payload"]["commandVersionObservationId"] == 9 && access["payload"]["commandEpoch"] == 12 &&
+				  access["payload"]["operationObservationId"] == 7 && access["payload"]["pixelReadOrWriteEstablished"] == false,
+			"observed command epoch was omitted or promoted into pixel proof");
+		const auto missing = payload(PayloadSchema::kTransferResourceAccess, { 2, 0, 0, 0, 5, 0, 1, 7 });
+		Check(missing["payload"]["commandVersionObservationId"].is_null() &&
+				  missing["payload"]["versionCatalogueAdmissionAvailable"] == false,
+			"unavailable admission serialized a version");
+		const auto eye = payload(PayloadSchema::kEyePublication, { 2, 9, 12, 5, 90, 1, 1 });
+		Check(eye["payload"]["renderTargetPublicationGeneration"] == 5 &&
+				  eye["payload"]["acceptedWithCurrentPublicationLease"] == true &&
+				  eye["payload"]["causalPixelTransferEstablished"] == false,
+			"accepted publication overstated pixel lineage");
+		const auto copy = payload(PayloadSchema::kTransferCopyRegion, { 7, 2ull | (3ull << 32), 4ull | (5ull << 32), 6, 0, 0, 0, 0 });
+		Check(copy["payload"]["sourceSubresource"] == 2 && copy["payload"]["destinationSubresource"] == 3 &&
+				  copy["payload"]["sourceBox"].is_null() && copy["payload"]["nullBoxMeansEntireSourceSubresource"] == true,
+			"copy-subresource or null source-box semantics were lost");
+
+		CaptureController controller;
+		auto config = Config();
+		config.maxEvents = 2048;
+		config.maxBytes = Collector::RequiredStorageBytes(config);
+		CaptureDescriptor descriptor;
+		Check(controller.Start(config, descriptor) == ControlStatus::kSuccess, "capacity-gap capture did not start");
+		auto& runtime = GetRuntime();
+		runtime.SetImmediateContext(0xB000);
+		runtime.SetCpuFrame(12);
+		{
+			auto scope = runtime.EnterPostProcessing({}, {}, 9, 77);
+			Check(runtime.IsInsidePostProcessing(), "capacity-gap boundary did not enter");
+			runtime.BeginTransferOperation(0xB000, true, 0, {});
+			for (std::uint64_t index = 1; index <= TransferVersions::kCapacity + 1; ++index)
+				runtime.RecordTransferResourceAccess(0xB000,
+					{ .resource = { .d3dObject = 0xB100 + index, .dimension = ResourceDimension::kTexture2D, .widthOrBytes = 64, .height = 32, .depthOrArraySize = 1, .mipLevels = 1 } },
+					ResourceStage::kCompute, 0, true);
+		}
+		std::shared_ptr<const CompletedCapture> capture;
+		Check(controller.Stop(descriptor.captureId, capture) == ControlStatus::kSuccess && capture,
+			"capacity-gap capture did not stop");
+		const auto summary = SerializeCaptureSummary(*capture);
+		Check(summary["completion"]["observedTransferVersionAdmissionFailures"] == 1 &&
+				  summary["completion"]["maximumTransferVersionResources"] == 256 &&
+				  summary["completion"]["truncated"] == true && summary["completion"]["droppedEventCount"] == 0,
+			"version gap was conflated with event drops or hidden from summary");
+		const auto root = std::filesystem::temp_directory_path() /
+		                  std::format("csx-render-map-transfer-test-{}", std::chrono::steady_clock::now().time_since_epoch().count());
+		const auto bundle = WriteCaptureArtifacts(*capture, ArtifactContext(root), 42);
+		Check(bundle.success, "capacity-gap artifact write failed");
+		std::ifstream stream(bundle.directory / "capture-manifest.json");
+		nlohmann::json manifest;
+		stream >> manifest;
+		Check(manifest["status"] == "incomplete" && manifest["artifacts"][0]["complete"] == false &&
+				  manifest["extensions"]["csx.observedTransferVersionAdmissionFailures"] == 1 &&
+				  !manifest["completion"]["errors"].empty(),
+			"durable manifest concealed the version admission gap");
+		Check(manifest["extensions"]["csx.captureIncompleteReasons"] == summary["completion"]["incompleteReasons"] &&
+				  summary["completion"]["incompleteReasons"] == nlohmann::json::array({ "transfer-version-admission-failure" }) &&
+				  summary["completion"]["incomplete"] == true && manifest["completion"]["truncated"] == false,
+			"transfer admission failure diverged between summary and manifest projections");
+		stream.close();
+		std::filesystem::remove_all(root);
+	}
+
 }
 
 int main()
 {
 	try {
+		TestTransferSerializationAndDurableAdmissionGap();
+		TestSummaryAndManifestCompleteness();
+		TestPayloadSchemaCatalogue();
+		TestResourceCpuAccessBoundaries();
+		TestRuntimeArtifactIdentity();
+		TestPreparedStartFailures();
+		TestPreparedStartSuccess();
+		TestPreparedRuntimeFailure();
 		TestControllerAndSerialization();
 		TestStopActiveWithoutCaptureId();
 		TestCompletedHistoryBound();
 		TestResolvedStageSerialization();
 		TestSemanticIdentitySerialization();
 		TestDeferredCommandSerialization();
+		TestPreparedArtifactPublication();
 		TestDurableArtifacts();
 		TestGapArtifact();
 		return 0;
