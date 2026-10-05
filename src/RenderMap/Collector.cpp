@@ -1323,11 +1323,12 @@ namespace CSX::RenderMap
 		return true;
 	}
 
-	void Collector::CompleteWindowBootstrap(bool a_success) noexcept
+	void Collector::CompleteWindowBootstrap(bool a_success, std::uint64_t a_expectedGeneration) noexcept
 	{
-		PollCaptureWindow();
+		PollCaptureWindow(kUnknownFrame, a_expectedGeneration);
 		const auto session = activeSession.load(std::memory_order_acquire);
-		if (!session || !session->config.latePostProcessingWindow)
+		if (!session || !session->config.latePostProcessingWindow ||
+			(a_expectedGeneration != 0 && session->generation != a_expectedGeneration))
 			return;
 		const std::lock_guard lock(session->windowMutex);
 		if (session->window.bootstrapThreadId != CurrentThreadId())

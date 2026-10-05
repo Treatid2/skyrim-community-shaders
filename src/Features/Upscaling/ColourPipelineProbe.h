@@ -2,6 +2,8 @@
 
 #ifdef DEVBENCH_BRIDGE_ENABLED
 
+#	include "ColourPipelineProbePolicy.h"
+#	include "FSRDispatchInputTelemetry.h"
 #	include <d3d11.h>
 #	include <nlohmann/json_fwd.hpp>
 
@@ -10,15 +12,6 @@
 
 namespace CSX::Diagnostics::ColourPipelineProbe
 {
-	enum class Stage : std::uint8_t
-	{
-		FsrInput,
-		FsrOutput,
-		CombinedMain,
-		ImageSpaceInput,
-		ImageSpaceOutput
-	};
-
 	struct DispatchMetadata
 	{
 		std::uint64_t colourContractRevision = 0;
@@ -40,6 +33,7 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 		float effectiveSharpness = 0.0f;
 		bool sharpeningEnabled = false;
 		std::uint64_t dispatchQpc = 0;
+		FSRDispatchInputTelemetry::Snapshot submittedInputs{};
 		std::string path;
 	};
 
@@ -70,7 +64,7 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 		const DispatchMetadata& a_dispatch,
 		const char* a_symbol,
 		const char* a_callsite) noexcept;
-	/** Queue both eyes only from a supported, confirmed main-target layout. */
+	/** Queue main-source or VR destination eyes with their actual target identity. */
 	void CaptureImageSpaceStage(
 		Stage a_stage,
 		ID3D11Texture2D* a_texture,

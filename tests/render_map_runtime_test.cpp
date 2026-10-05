@@ -361,7 +361,7 @@ namespace
 		{
 			auto scope = runtime.EnterPostProcessing(resource, resource, 9, 77);
 			Check(runtime.IsInsidePostProcessing(), "activated boundary did not retain provenance");
-			runtime.RecordPostProcessingBootstrap({ 1, 2, 3, 4, 5, 6 });
+			runtime.RecordPostProcessingBootstrap({ 1, 2, 3, 4, 5, 6 }, runtime.PostProcessingCaptureGeneration());
 			runtime.RecordRasterState(0xA000, 0, { 0, 0, 64, 32, 0, 1 }, { 0, 0, 64, 32 }, 1, 1, false);
 			runtime.RecordTransferResourceAccess(0xA000, { .resource = resource }, ResourceStage::kPixel, 0, false);
 			runtime.CompleteWindowBootstrap(true);
@@ -413,7 +413,7 @@ namespace
 				if (lane >= 3) {
 					const ResourceObservationInput resource{ .d3dObject = 0xA100, .dimension = ResourceDimension::kTexture2D };
 					auto scope = runtime.EnterPostProcessing(resource, resource, 9, 77);
-					runtime.RecordPostProcessingBootstrap({ 1, 2, 3, 4, 5, 6 });
+					runtime.RecordPostProcessingBootstrap({ 1, 2, 3, 4, 5, 6 }, runtime.PostProcessingCaptureGeneration());
 					if (lane == 7) {
 						std::this_thread::sleep_for(std::chrono::milliseconds(120));
 						Check(!runtime.IsCapturing(), "bootstrap deadline did not stop admission");
@@ -2158,6 +2158,174 @@ namespace
 		}
 	}
 
+	void TestBootstrapPublicationRetainsCaptureGeneration()
+	{
+		constexpr std::uintptr_t context = 0xE800;
+		const std::array<std::uintptr_t, 6> sourceShaders{ 0xE810, 0, 0, 0, 0xE814, 0xE815 };
+		auto config = Config();
+		config.maxEvents = 128;
+		config.maxBytes = Collector::RequiredStorageBytes(config);
+		for (std::uint32_t publication = 0; publication < 5; ++publication) {
+			for (const auto turnOver : { false, true }) {
+				Runtime runtime;
+				runtime.SetImmediateContext(context);
+				Check(runtime.StartCapture(config) == StartResult::kStarted, "bootstrap source did not start");
+				const auto generation = runtime.ActiveCaptureGeneration();
+				runtime.PauseNextProducerPublicationForTesting(publication);
+				std::uint64_t targetSeed = 0;
+				std::uint64_t resourceSeed = 0;
+				bool retainedGeneration = false;
+				std::thread worker([&] {
+					auto scope = runtime.EnterPostProcessing({}, {}, 9, 77);
+					const auto expected = runtime.PostProcessingCaptureGeneration();
+					targetSeed = runtime.ClaimRenderTargetStateSeed(context, expected);
+					resourceSeed = runtime.ClaimResourceViewStateSeed(context, expected);
+					runtime.RecordPostProcessingBootstrap(sourceShaders, expected);
+					retainedGeneration = expected == generation && runtime.PostProcessingCaptureGeneration() == generation;
+				});
+				WaitForDeferredPublicationPause(runtime, worker);
+				bool successorStarted = true;
+				if (turnOver) {
+					const auto first = runtime.StopCapture();
+					successorStarted = first.has_value() && runtime.StartCapture(config) == StartResult::kStarted;
+					if (successorStarted) {
+						runtime.BindStage(context, ShaderStage::kVertex, 0xE820);
+						runtime.BindStage(context, ShaderStage::kPixel, 0xE824);
+						runtime.BindStage(context, ShaderStage::kCompute, 0xE825);
+					}
+				}
+				runtime.ResumeDeferredPublicationForTesting();
+				worker.join();
+				Check(successorStarted && retainedGeneration, "bootstrap lost its retained capture generation");
+				const auto current = runtime.ActiveCaptureGeneration();
+				Check(runtime.ClaimRenderTargetStateSeed(context, current) == (turnOver ? current : 0),
+					"stale bootstrap consumed successor target seeding");
+				Check(runtime.ClaimResourceViewStateSeed(context, current) == (turnOver ? current : 0),
+					"stale bootstrap consumed successor resource seeding");
+				if (!turnOver)
+					Check(targetSeed == generation && resourceSeed == generation, "valid bootstrap seeds were rejected");
+				runtime.RecordDraw(context, DrawOperation::kDraw, 5);
+				runtime.RecordDispatch(context, DispatchOperation::kDispatch, 1, 1, 1);
+				const auto capture = runtime.StopCapture();
+				Check(capture.has_value(), "bootstrap result did not stop");
+				std::size_t pipelineSnapshots = 0;
+				for (const auto& event : capture->events) {
+					if (event.payload.schema == static_cast<std::uint16_t>(PayloadSchema::kNativePipelineSnapshot))
+						++pipelineSnapshots;
+					if (turnOver && event.kind == EventKind::kStageShaderObserved)
+						Check(std::find(sourceShaders.begin(), sourceShaders.end(), event.payload.words[1]) == sourceShaders.end(),
+							"old bootstrap shader entered the successor catalogue");
+				}
+				Check(pipelineSnapshots == (turnOver ? 0u : 1u), "bootstrap pipeline snapshot crossed capture turnover");
+				for (const auto kind : { EventKind::kDraw, EventKind::kDispatch }) {
+					const auto execution = std::find_if(capture->events.begin(), capture->events.end(),
+						[kind](const EventRecord& event) { return event.kind == kind; });
+					Check(execution != capture->events.end() && execution->payload.words[2] != 0,
+						"bootstrap result lost the valid stage binding");
+					const auto stage = std::find_if(capture->events.begin(), capture->events.end(),
+						[execution](const EventRecord& event) {
+							return event.kind == EventKind::kStageShaderObserved && event.payload.words[0] == execution->payload.words[2];
+						});
+					const auto expectedShader = kind == EventKind::kDraw ?
+					                                (turnOver ? 0xE820u : 0xE810u) :
+					                                (turnOver ? 0xE825u : 0xE815u);
+					Check(stage != capture->events.end() && stage->payload.words[1] == expectedShader,
+						"old bootstrap overwrote the valid stage binding");
+				}
+			}
+		}
+	}
+
+	void TestBootstrapCompletionRetainsScopeGeneration()
+	{
+		Runtime runtime;
+		runtime.SetImmediateContext(0xE900);
+		Check(runtime.StartCapture(LateConfig()) == StartResult::kStarted, "bootstrap completion source did not arm");
+		runtime.SetCpuFrame(12);
+		Check(runtime.ActivatePostProcessingWindow(9, 12, 77), "bootstrap completion source did not activate");
+		auto oldScope = runtime.EnterPostProcessing({}, {}, 9, 77);
+		Check(runtime.IsInsidePostProcessing(), "bootstrap completion source scope did not enter");
+		Check(runtime.StopCapture().has_value(), "bootstrap completion source did not stop");
+		Check(runtime.StartCapture(LateConfig()) == StartResult::kStarted, "bootstrap completion successor did not arm");
+		runtime.SetCpuFrame(12);
+		Check(runtime.ActivatePostProcessingWindow(9, 12, 78), "bootstrap completion successor did not activate");
+		runtime.CompleteWindowBootstrap(false);
+		Check(runtime.GetCaptureWindow().phase == CaptureWindowPhase::kBootstrap,
+			"old scope completed or failed a successor bootstrap on the same thread");
+		{
+			auto newScope = runtime.EnterPostProcessing({}, {}, 9, 78);
+			runtime.RecordPostProcessingBootstrap({ 1, 2, 3, 4, 5, 6 }, runtime.PostProcessingCaptureGeneration());
+			runtime.CompleteWindowBootstrap(true);
+		}
+		Check(runtime.GetCaptureWindow().bootstrapComplete, "valid successor bootstrap completion was rejected");
+		Check(runtime.StopCapture().has_value(), "bootstrap completion successor did not stop");
+	}
+
+	void TestCommandListAdmissionRetainsCaptureGeneration()
+	{
+		constexpr std::uint32_t actorCount = 8;
+		constexpr std::uintptr_t immediate = 0xEA00;
+		constexpr std::uintptr_t deferred = 0xEB00;
+		constexpr std::uintptr_t firstList = 0x100000;
+		auto config = Config();
+		config.maxEvents = static_cast<std::uint32_t>(kMaximumTrackedCommandLists * 6 + 128);
+		config.maxBytes = Collector::RequiredStorageBytes(config);
+		for (const auto finish : { false, true }) {
+			for (const auto turnOver : { false, true }) {
+				Runtime runtime;
+				runtime.SetImmediateContext(immediate);
+				Check(runtime.StartCapture(config) == StartResult::kStarted, "command admission source did not start");
+				for (std::uint32_t actor = 0; actor < actorCount; ++actor)
+					runtime.RegisterDeferredContext(deferred + actor, 0);
+				runtime.PauseCommandListAdmissionsForTesting(actorCount);
+				std::vector<std::thread> workers;
+				for (std::uint32_t actor = 0; actor < actorCount; ++actor) {
+					workers.emplace_back([&, actor] {
+						if (finish)
+							runtime.RecordFinishCommandList(deferred + actor, firstList + actor, true, 0);
+						else
+							runtime.RecordExecuteCommandList(immediate, firstList + actor, true);
+					});
+				}
+				const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+				while (runtime.PausedCommandListAdmissionsForTesting() != actorCount && std::chrono::steady_clock::now() < deadline)
+					std::this_thread::yield();
+				const auto allPaused = runtime.PausedCommandListAdmissionsForTesting() == actorCount;
+				bool successorStarted = true;
+				if (allPaused && turnOver)
+					successorStarted = runtime.StopCapture().has_value() && runtime.StartCapture(config) == StartResult::kStarted;
+				runtime.ResumeCommandListAdmissionsForTesting();
+				for (auto& worker : workers)
+					worker.join();
+				Check(allPaused && successorStarted, "command admission turnover barrier failed");
+				Check(runtime.CommandListCatalogueSizeForTesting() == (turnOver ? 0u : actorCount),
+					"stale command admission consumed successor catalogue entries");
+				if (turnOver) {
+					for (std::size_t index = 0; index < kMaximumTrackedCommandLists; ++index)
+						runtime.RecordExecuteCommandList(immediate, firstList + index, true);
+					Check(runtime.CommandListCatalogueSizeForTesting() == kMaximumTrackedCommandLists,
+						"stale command admission consumed successor catalogue capacity");
+				}
+				const auto capture = runtime.StopCapture();
+				Check(capture.has_value(), "command admission result did not stop");
+				std::size_t declarations = 0;
+				for (const auto& event : capture->events) {
+					if (event.kind != EventKind::kCommandListObserved)
+						continue;
+					++declarations;
+					Check(event.payload.words[2] == 1, "first valid command list inherited a stale pointer generation");
+				}
+				Check(declarations == (turnOver ? kMaximumTrackedCommandLists : actorCount),
+					"command admission lost valid declarations or admitted stale work");
+				if (turnOver)
+					Check(std::none_of(capture->events.begin(), capture->events.end(), [](const EventRecord& event) {
+						return event.kind == EventKind::kFinishCommandList;
+					}),
+						"old finish event entered the successor capture");
+			}
+		}
+	}
+
 	void TestProducerPublicationRetainsCaptureGeneration()
 	{
 		enum class Producer
@@ -3055,6 +3223,9 @@ int main()
 		TestExecuteRestoreStateIsIndependentOfCaptureAdmission();
 		TestDeferredRecordingReportsPartialFilteredAndFailedFinishes();
 		TestDiagnosticCatalogueAdmissionFailuresFailOpen();
+		TestBootstrapPublicationRetainsCaptureGeneration();
+		TestBootstrapCompletionRetainsScopeGeneration();
+		TestCommandListAdmissionRetainsCaptureGeneration();
 		TestProducerPublicationRetainsCaptureGeneration();
 		TestImmediateStagePublicationRetainsCaptureGeneration();
 		TestImmediateDispatchRetainsCaptureGeneration();

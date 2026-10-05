@@ -286,8 +286,11 @@ namespace CSX::RenderMap
 		bool ActivatePostProcessingWindow(std::uint32_t a_target, std::uint64_t a_frame,
 			std::uint64_t a_publicationGeneration) noexcept;
 		void CompleteWindowBootstrap(bool a_success) noexcept;
-		/** Record queried shader pointers as state, without inventing a draw/dispatch. */
-		void RecordPostProcessingBootstrap(const std::array<std::uintptr_t, 6>& a_shaders) noexcept;
+		/** Record queried shader state only for the retained scope generation, without inventing execution. */
+		void RecordPostProcessingBootstrap(const std::array<std::uintptr_t, 6>& a_shaders,
+			std::uint64_t a_expectedCaptureGeneration) noexcept;
+		/** Retained scope generation; remains unchanged when the active capture turns over. */
+		std::uint64_t PostProcessingCaptureGeneration() const noexcept;
 		CaptureWindowSnapshot GetCaptureWindow() const noexcept;
 		bool IsCaptureDraining() const noexcept;
 		std::uint64_t ActiveCaptureGeneration() const noexcept;
@@ -331,7 +334,8 @@ namespace CSX::RenderMap
 			bool a_keepTargets = false,
 			TargetBindingSource a_source = TargetBindingSource::kObservedCall,
 			std::uint64_t a_expectedCaptureGeneration = 0) noexcept;
-		std::uint64_t ClaimRenderTargetStateSeed(std::uintptr_t a_context) noexcept;
+		std::uint64_t ClaimRenderTargetStateSeed(std::uintptr_t a_context,
+			std::uint64_t a_expectedCaptureGeneration = 0) noexcept;
 		void BindResourceViews(
 			std::uintptr_t a_context,
 			ResourceBindingKind a_bindingKind,
@@ -342,7 +346,8 @@ namespace CSX::RenderMap
 			bool a_keepViews = false,
 			ResourceBindingSource a_source = ResourceBindingSource::kRequestedCall,
 			std::uint64_t a_expectedCaptureGeneration = 0) noexcept;
-		std::uint64_t ClaimResourceViewStateSeed(std::uintptr_t a_context) noexcept;
+		std::uint64_t ClaimResourceViewStateSeed(std::uintptr_t a_context,
+			std::uint64_t a_expectedCaptureGeneration = 0) noexcept;
 		void RecordResourceFlow(
 			std::uintptr_t a_context,
 			ResourceFlowOperation a_operation,
@@ -434,7 +439,11 @@ namespace CSX::RenderMap
 #if defined(CSX_RENDER_MAP_TESTING)
 		void FailNextDeferredContextCatalogueAdmissionForTesting() noexcept;
 		void FailNextCommandListCatalogueAdmissionForTesting() noexcept;
-		void PauseNextProducerPublicationForTesting() noexcept;
+		void PauseCommandListAdmissionsForTesting(std::uint32_t a_count) noexcept;
+		std::uint32_t PausedCommandListAdmissionsForTesting() const noexcept;
+		void ResumeCommandListAdmissionsForTesting() noexcept;
+		std::size_t CommandListCatalogueSizeForTesting() noexcept;
+		void PauseNextProducerPublicationForTesting(std::uint32_t a_skipPublications = 0) noexcept;
 		void PauseNextDeferredPublicationForTesting() noexcept;
 		void PauseNextImmediateStagePublicationForTesting() noexcept;
 		void PauseNextImmediateDispatchAdmissionForTesting() noexcept;
@@ -565,6 +574,7 @@ namespace CSX::RenderMap
 			CommandRecordingIncompleteReason a_reason) noexcept;
 #if defined(CSX_RENDER_MAP_TESTING)
 		void PauseProducerPublicationForTesting() noexcept;
+		void PauseCommandListAdmissionForTesting() noexcept;
 		void PauseDeferredPublicationBeforeAppendForTesting() noexcept;
 		void PauseImmediateStagePublicationForTesting() noexcept;
 		void PauseImmediateDispatchBeforeAppendForTesting() noexcept;
@@ -573,6 +583,10 @@ namespace CSX::RenderMap
 		void ResetImmediatePipelineState() noexcept;
 		void ResetImmediateStageObservations(bool a_clearBindings) noexcept;
 		void SetImmediateBoundStage(ShaderStage a_stage, std::uintptr_t a_d3dObject) noexcept;
+		void BindBootstrapStage(ShaderStage a_stage, std::uintptr_t a_d3dObject,
+			std::uint64_t a_expectedCaptureGeneration) noexcept;
+		std::uint64_t ClaimImmediateStateSeed(std::atomic_uint64_t& a_seed,
+			std::uintptr_t a_context, std::uint64_t a_expectedCaptureGeneration) noexcept;
 		ImmediateStageObservation ReadImmediateStageObservation(ShaderStage a_stage) const noexcept;
 		void ApplyEffectiveResourceViewResetLocked() noexcept;
 		std::uint64_t NextCommandStreamSequence() noexcept;
@@ -641,6 +655,10 @@ namespace CSX::RenderMap
 		std::atomic_bool failNextDeferredContextCatalogueAdmission{ false };
 		std::atomic_bool failNextCommandListCatalogueAdmission{ false };
 		std::atomic_bool pauseNextProducerPublication{ false };
+		std::atomic_uint32_t producerPublicationsToSkip{ 0 };
+		std::atomic_uint32_t commandListAdmissionsToPause{ 0 };
+		std::atomic_uint32_t pausedCommandListAdmissions{ 0 };
+		std::atomic_bool resumeCommandListAdmissions{ false };
 		std::atomic_bool pauseNextDeferredPublication{ false };
 		std::atomic_bool pauseNextImmediateStagePublication{ false };
 		std::atomic_bool pauseNextImmediateDispatchAdmission{ false };

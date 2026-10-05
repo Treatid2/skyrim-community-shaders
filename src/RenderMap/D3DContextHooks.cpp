@@ -375,11 +375,12 @@ namespace CSX::RenderMap
 				GetRuntime().ClaimRenderTargetStateSeed(reinterpret_cast<std::uintptr_t>(a_context));
 		}
 
-		void ObserveEffectiveStateBeforeDraw(ID3D11DeviceContext* a_context);
+		void ObserveEffectiveStateBeforeDraw(ID3D11DeviceContext* a_context,
+			std::uint64_t a_expectedCaptureGeneration = 0);
 		void ObserveEffectiveStateBeforeDispatch(ID3D11DeviceContext* a_context);
 		void ObservePostProcessingState(ID3D11DeviceContext* a_context, bool a_compute, bool a_after);
 		void BeginPostProcessingOperation(ID3D11DeviceContext* a_context, bool a_compute, std::uint32_t a_operation,
-			bool a_bootstrap = false);
+			std::uint64_t a_bootstrapGeneration = 0);
 
 		template <class... Args>
 		void RecordDrawWithEffectiveState(
@@ -545,18 +546,19 @@ namespace CSX::RenderMap
 			}
 		}
 
-		void ObserveEffectiveStateBeforeDraw(ID3D11DeviceContext* a_context)
+		void ObserveEffectiveStateBeforeDraw(ID3D11DeviceContext* a_context,
+			std::uint64_t a_expectedCaptureGeneration)
 		{
 			if (!a_context)
 				return;
 			auto& runtime = GetRuntime();
 			const auto context = reinterpret_cast<std::uintptr_t>(a_context);
-			const auto targetGeneration = runtime.ClaimRenderTargetStateSeed(context);
+			const auto targetGeneration = runtime.ClaimRenderTargetStateSeed(context, a_expectedCaptureGeneration);
 			if (targetGeneration != 0) {
 				ObserveEffectiveRenderTargets(
 					a_context, TargetBindingSource::kCaptureStateSnapshot, targetGeneration);
 			}
-			const auto resourceGeneration = runtime.ClaimResourceViewStateSeed(context);
+			const auto resourceGeneration = runtime.ClaimResourceViewStateSeed(context, a_expectedCaptureGeneration);
 			if (resourceGeneration != 0) {
 				ObserveAllEffectiveShaderResources(
 					a_context, ResourceBindingSource::kCaptureStateSnapshot, resourceGeneration);
@@ -603,7 +605,7 @@ namespace CSX::RenderMap
 		}
 
 		void BeginPostProcessingOperation(ID3D11DeviceContext* a_context, bool a_compute, std::uint32_t a_operation,
-			bool a_bootstrap)
+			std::uint64_t a_bootstrapGeneration)
 		{
 			if (!a_context || !GetRuntime().IsInsidePostProcessing() ||
 				a_context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE)
@@ -624,8 +626,8 @@ namespace CSX::RenderMap
 			std::array<std::uintptr_t, 6> pointers{};
 			for (std::size_t index = 0; index < shaders.size(); ++index)
 				pointers[index] = reinterpret_cast<std::uintptr_t>(shaders[index]);
-			if (a_bootstrap)
-				GetRuntime().RecordPostProcessingBootstrap(pointers);
+			if (a_bootstrapGeneration != 0)
+				GetRuntime().RecordPostProcessingBootstrap(pointers, a_bootstrapGeneration);
 			else
 				GetRuntime().BeginTransferOperation(reinterpret_cast<std::uintptr_t>(a_context), a_compute, a_operation, pointers);
 		}
@@ -1199,11 +1201,14 @@ namespace CSX::RenderMap
 			!GetRuntime().IsInsidePostProcessing() || !GetRuntime().IsCapturing())
 			return false;
 		try {
-			ObserveEffectiveStateBeforeDraw(a_context);
-			BeginPostProcessingOperation(a_context, false, 0, true);
+			const auto generation = GetRuntime().PostProcessingCaptureGeneration();
+			if (generation == 0)
+				return false;
+			ObserveEffectiveStateBeforeDraw(a_context, generation);
+			BeginPostProcessingOperation(a_context, false, 0, generation);
 			ObservePostProcessingState(a_context, false, false);
 			ObservePostProcessingState(a_context, true, false);
-			return GetRuntime().IsCapturing();
+			return GetRuntime().IsInsidePostProcessing();
 		} catch (...) {
 			return false;
 		}

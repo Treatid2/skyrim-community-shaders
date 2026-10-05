@@ -12,6 +12,13 @@ gaps are represented explicitly. Stopping a capture produces an immutable
 completed-capture snapshot which the artifact layer can serialize without
 holding render-thread state.
 
+Post-processing bootstrap retains the capture generation from its entry scope.
+Target and resource seed claims, observed stage bindings, the pipeline snapshot,
+and window completion reject work from a stopped or replaced capture. Diagnostic
+publication is serialized with capture reset; native D3D queries remain outside
+that lock. Ordinary shader binds still preserve the physically bound state
+between captures.
+
 CPU-access payloads use JSON null for unavailable visibility and publication
 boundaries. Successful readable maps establish CPU visibility; only matched
 writable unmaps establish GPU publication.

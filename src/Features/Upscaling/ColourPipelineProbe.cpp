@@ -31,9 +31,9 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 		using json = nlohmann::json;
 		constexpr std::uint32_t kSchemaVersion = 3;
 		constexpr std::uint32_t kGridSize = 17;
-		constexpr std::uint32_t kEyeCount = 2;
-		constexpr std::uint32_t kStageCount = 5;
-		constexpr std::uint32_t kSlotCount = kStageCount * kEyeCount;
+		constexpr auto kEyeCount = Policy::kEyeCount;
+		constexpr auto kStageCount = Policy::kStageCount;
+		constexpr auto kSlotCount = Policy::kSlotCount;
 		constexpr std::uint32_t kCaptureTimeoutFrames = 120;
 
 		enum class ProbeState : std::uint8_t
@@ -702,16 +702,17 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 				{ "effectiveSharpness", a_dispatch.dispatchSerial ? json(a_dispatch.effectiveSharpness) : json(nullptr) },
 				{ "sharpeningEnabled", a_dispatch.dispatchSerial ? json(a_dispatch.sharpeningEnabled) : json(nullptr) },
 				{ "dispatchQpc", a_dispatch.dispatchQpc ? json(a_dispatch.dispatchQpc) : json(nullptr) },
+				{ "submittedInputs", FSRDispatchInputTelemetry::ToJson(a_dispatch.submittedInputs, a_dispatch.dispatchSerial != 0) },
 				{ "attribution", a_dispatch.dispatchSerial ? "observed-successful-dispatch" : "pending-successful-dispatch" },
 			};
 		}
 
-		json SlotResult(const Slot& a_slot)
+		json SlotResult(const Slot& a_slot, Stage a_stage, std::uint32_t a_eye)
 		{
 			json result{
-				{ "stage", StageName(a_slot.stage) },
-				{ "eye", a_slot.eye == 0 ? "left" : "right" },
-				{ "eyeMask", 1u << a_slot.eye },
+				{ "stage", StageName(a_stage) },
+				{ "eye", a_eye == 0 ? "left" : "right" },
+				{ "eyeMask", 1u << a_eye },
 				{ "queued", a_slot.queued },
 				{ "mapped", a_slot.mapped },
 			};
@@ -922,7 +923,10 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 			return;
 		try {
 			std::lock_guard lock(g_state.mutex);
-			if (g_state.state != ProbeState::Capturing || !a_texture || !a_matchesMainTarget)
+			if (g_state.state != ProbeState::Capturing || !a_texture ||
+				!Policy::ValidImageSpaceTarget(a_stage, a_engineTarget, a_matchesMainTarget,
+					static_cast<std::uint32_t>(RE::RENDER_TARGET::kMAIN),
+					static_cast<std::uint32_t>(RE::RENDER_TARGET::kVR_FRAMEBUFFER)))
 				return;
 			const std::uint32_t frame = globals::state ? globals::state->frameCount : 0;
 			if (frame != g_state.cpuFrame)
@@ -1087,6 +1091,16 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 		ExpireLocked();
 		const auto queued = std::ranges::count_if(g_state.slots, [](const Slot& a_slot) { return a_slot.queued; });
 		const auto mapped = std::ranges::count_if(g_state.slots, [](const Slot& a_slot) { return a_slot.mapped; });
+		auto stageEyeSlots = json::array();
+		auto missingStageEyeSlots = json::array();
+		for (const auto& slot : Policy::DescribeStageEyeSlots(g_state.slots)) {
+			json identity{ { "stage", StageName(slot.stage) }, { "eye", slot.eye },
+				{ "eyeName", slot.eye == 0 ? "left" : "right" } };
+			if (!slot.queued)
+				missingStageEyeSlots.push_back(identity);
+			identity.update({ { "queued", slot.queued }, { "mapped", slot.mapped } });
+			stageEyeSlots.push_back(std::move(identity));
+		}
 		return {
 			{ "schemaVersion", kSchemaVersion },
 			{ "state", StateName(g_state.state) },
@@ -1098,6 +1112,8 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 			{ "expectedStageEyeSlots", kSlotCount },
 			{ "queuedStageEyeSlots", queued },
 			{ "mappedStageEyeSlots", mapped },
+			{ "stageEyeSlots", std::move(stageEyeSlots) },
+			{ "missingStageEyeSlots", std::move(missingStageEyeSlots) },
 			{ "expectedColourContractRevision", g_state.expectedColourContractRevision },
 			{ "stagingPayloadBytes", g_state.stagingPayloadBytes },
 			{ "maximumStagingPayloadBytes", Policy::kMaximumCaptureBytes },
@@ -1134,7 +1150,7 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 			{ "metadata", g_state.metadata },
 			{ "samplingContract", { { "gridSize", kGridSize }, { "rawBytesRetainedPerSample", true }, { "fullResourceReadbackRetained", false }, { "implicitTransferConversion", false } } },
 			{ "resourceFlows", g_state.flows },
-			{ "stages", json::array({ SlotResult(g_state.slots[SlotIndex(a_stage, a_eye)]) }) },
+			{ "stages", json::array({ SlotResult(g_state.slots[SlotIndex(a_stage, a_eye)], a_stage, a_eye) }) },
 		};
 	}
 }
