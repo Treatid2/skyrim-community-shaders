@@ -172,8 +172,13 @@ family; its existing dependency closure remains intact.
 
 The collector allocates its bounded catalogues and event buffer when armed,
 but admits no prefix events or catalogue entries. The armed wait is independent
-of `maxDurationMs`, which begins at the original main-target
-`Upscaling::Main_PostProcessing` call. At that boundary, the activation thread
+of `maxDurationMs`, which begins at the original
+`Upscaling::Main_PostProcessing` call from source `kMAIN` to destination
+`kVR_FRAMEBUFFER`. The callback target and reported `bounds.activation.target`
+identify the destination (114 in the pinned VR render-target enum), while
+`kMAIN` identifies the source texture (1). Admission compares the native
+destination without translating it to the source target or admitting unrelated
+targets. At that boundary, the activation thread
 queries the immediate context, native shaders, output targets, SRV/UAV bindings,
 viewport/scissor state and resource descriptors using the existing getters.
 This bounded bootstrap shares the active event/catalogue budget. Its dedicated

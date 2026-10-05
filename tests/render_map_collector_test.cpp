@@ -90,7 +90,9 @@ namespace
 		Collector collector;
 		auto config = Config();
 		config.latePostProcessingWindow = true;
-		config.activationTarget = 9;
+		constexpr std::uint32_t mainSourceTarget = 1;
+		constexpr std::uint32_t vrFramebufferTarget = 114;
+		config.activationTarget = vrFramebufferTarget;
 		config.requestedEventKindMask = EventKindBit(EventKind::kEyeSubmitted);
 		config.maxActivationWait = std::chrono::seconds(1);
 		config.maxBytes = Collector::RequiredStorageBytes(config);
@@ -109,19 +111,19 @@ namespace
 			Check(collector.Record(EventKind::kDraw) == RecordResult::kFiltered, "collector admitted prefix events");
 		Check(collector.ObserveResource({ .d3dObject = 1 }).observationId == 0,
 			"collector admitted a prefix catalogue entry");
-		Check(!collector.ActivatePostProcessingWindow(8, 12, 77), "wrong target activated the window");
-		Check(!collector.ActivatePostProcessingWindow(9, 0, 77), "zero frame activated the window");
-		Check(!collector.ActivatePostProcessingWindow(9, kUnknownFrame, 0), "unknown frame activated the window");
-		Check(!collector.ActivatePostProcessingWindow(9, 12, 0), "missing publication activated the window");
+		Check(!collector.ActivatePostProcessingWindow(mainSourceTarget, 12, 77), "source target activated the destination window");
+		Check(!collector.ActivatePostProcessingWindow(vrFramebufferTarget, 0, 77), "zero frame activated the window");
+		Check(!collector.ActivatePostProcessingWindow(vrFramebufferTarget, kUnknownFrame, 0), "unknown frame activated the window");
+		Check(!collector.ActivatePostProcessingWindow(vrFramebufferTarget, 12, 0), "missing publication activated the window");
 		const auto refused = collector.GetCaptureWindow();
 		Check(refused.phase == CaptureWindowPhase::kArmed && refused.activationTick == 0 &&
 				  refused.activationBoundary.attemptCount == 4 && refused.activationBoundary.targetRejections == 1 &&
 				  refused.activationBoundary.frameRejections == 2 && refused.activationBoundary.publicationRejections == 2 &&
-				  refused.activationBoundary.lastTarget == 9 && refused.activationBoundary.lastCpuFrame == 12 &&
+				  refused.activationBoundary.lastTarget == vrFramebufferTarget && refused.activationBoundary.lastCpuFrame == 12 &&
 				  refused.activationBoundary.lastPublicationGeneration == 0,
 			"refused inputs were lost or changed activation eligibility");
-		Check(collector.ActivatePostProcessingWindow(9, 12, 77), "collector boundary did not activate");
-		Check(!collector.ActivatePostProcessingWindow(8, 0, 0), "bootstrap window reactivated");
+		Check(collector.ActivatePostProcessingWindow(vrFramebufferTarget, 12, 77), "VR destination boundary did not activate");
+		Check(!collector.ActivatePostProcessingWindow(mainSourceTarget, 0, 0), "bootstrap window reactivated");
 		const auto accepted = collector.GetCaptureWindow();
 		Check(accepted.activationBoundary.attemptCount == 5 && accepted.activationBoundary.lastCpuFrame == 12 &&
 				  accepted.activationBoundary.lastPublicationGeneration == 77 && accepted.activationBoundary.targetRejections == 1,
@@ -149,7 +151,7 @@ namespace
 		config.maxActivationWait = std::chrono::nanoseconds(1);
 		Check(collector.Start(config) == StartResult::kStarted, "deadline diagnostic capture did not arm");
 		std::this_thread::sleep_for(std::chrono::milliseconds(2));
-		Check(!collector.ActivatePostProcessingWindow(9, 12, 77), "expired armed window activated");
+		Check(!collector.ActivatePostProcessingWindow(vrFramebufferTarget, 12, 77), "expired armed window activated");
 		const auto expired = collector.Stop();
 		Check(expired && expired->window.failure == CaptureWindowFailure::kActivationTimeout &&
 				  expired->window.activationBoundary.attemptCount == 0 && expired->events.empty(),
