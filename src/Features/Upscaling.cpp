@@ -58883,16 +58883,18 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 		globals::d3d::context, globals::state ? globals::state->frameCount : 0);
 	const auto captureStage = [&](CSX::Diagnostics::ColourPipelineProbe::Stage a_stage) {
 		if (!CSX::Diagnostics::ColourPipelineProbe::WantsVendorCapture() ||
-			a_target != RE::RENDER_TARGET::kMAIN || upscaling.GetRuntimeUpscaleMethod() != UpscaleMethod::kFSR)
+			a_target != RE::RENDER_TARGET::kVR_FRAMEBUFFER || upscaling.GetRuntimeUpscaleMethod() != UpscaleMethod::kFSR)
 			return;
 		auto* renderer = globals::game::renderer;
 		if (!renderer)
 			return;
-		const auto& target = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN];
+		const auto& target = renderer->GetRuntimeData().renderTargets[a_target];
+		const bool matchesMain = REX::W32::AsReal(target.texture) == REX::W32::AsReal(
+																		 renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN].texture);
 		CSX::Diagnostics::ColourPipelineProbe::CaptureImageSpaceStage(a_stage,
 			REX::W32::AsReal(target.texture), REX::W32::AsReal(target.SRV),
 			REX::W32::AsReal(target.RTV), REX::W32::AsReal(target.UAV),
-			static_cast<std::uint32_t>(a_target), true,
+			static_cast<std::uint32_t>(a_target), matchesMain,
 			"Upscaling::Main_PostProcessing::thunk", "at the original ImageSpace call boundary");
 	};
 #endif

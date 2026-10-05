@@ -25,6 +25,13 @@ state separately. A capture starts only on the VR main-pass stereo FSR path.
 Submit-only/foveated paths, unsupported layouts or absent FSR work cannot
 produce a complete capture. SE and AE reject arm without graphics mutation.
 
+`combined_main` samples the confirmed `kMAIN` FSR copy-back source for
+ImageSpace. The original post-processing call names its VR destination,
+`kVR_FRAMEBUFFER`: `imagespace_input` samples that destination before the
+call and `imagespace_output` samples it afterwards. Their `engineTarget`
+reports the actual destination and its observed `matchesKMain` value; the
+destination is not relabeled as the main source.
+
 After status reports `complete`, call `read` for each of the ten stage/eye
 pages with the same `captureId` and `generation`, the stage name and eye 0
 or 1. Stage names are `fsr_input`, `fsr_output`, `combined_main`,
@@ -48,6 +55,12 @@ readback expires after 120 frames, and every active state also expires after
 15 wall-clock seconds. Status/read/reset/arm and render servicing enforce the
 wall deadline, including an armed request that never observes FSR. Failure
 releases graphics references and exposes partial queued/mapped evidence.
+Status includes all ten `stageEyeSlots`, each with its stage, numeric eye,
+eye name and queued/mapped flags. `missingStageEyeSlots` identifies the
+unqueued stage/eye pairs and survives terminal failure until reset or a new
+arm. Unqueued read pages retain the requested stage/eye identity. A count
+alone does not identify which seams were observed; missing entries are not
+substituted from a later engine frame.
 
 Numeric samples represent storage values without gamma conversion. Typeless
 textures require compatible typed view evidence; ambiguous/unsupported
