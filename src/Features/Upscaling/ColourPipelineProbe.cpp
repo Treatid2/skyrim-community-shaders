@@ -702,6 +702,7 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 				{ "effectiveSharpness", a_dispatch.dispatchSerial ? json(a_dispatch.effectiveSharpness) : json(nullptr) },
 				{ "sharpeningEnabled", a_dispatch.dispatchSerial ? json(a_dispatch.sharpeningEnabled) : json(nullptr) },
 				{ "dispatchQpc", a_dispatch.dispatchQpc ? json(a_dispatch.dispatchQpc) : json(nullptr) },
+				{ "submittedInputs", FSRDispatchInputTelemetry::ToJson(a_dispatch.submittedInputs, a_dispatch.dispatchSerial != 0) },
 				{ "attribution", a_dispatch.dispatchSerial ? "observed-successful-dispatch" : "pending-successful-dispatch" },
 			};
 		}

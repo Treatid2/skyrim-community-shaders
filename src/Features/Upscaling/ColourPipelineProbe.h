@@ -3,6 +3,7 @@
 #ifdef DEVBENCH_BRIDGE_ENABLED
 
 #	include "ColourPipelineProbePolicy.h"
+#	include "FSRDispatchInputTelemetry.h"
 #	include <d3d11.h>
 #	include <nlohmann/json_fwd.hpp>
 
@@ -32,6 +33,7 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 		float effectiveSharpness = 0.0f;
 		bool sharpeningEnabled = false;
 		std::uint64_t dispatchQpc = 0;
+		FSRDispatchInputTelemetry::Snapshot submittedInputs{};
 		std::string path;
 	};
 

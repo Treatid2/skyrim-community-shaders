@@ -76,6 +76,29 @@ evidence, not an established shader source. Headset pixel lineage remains
 unverified; the separate Render Map records accepted eye publication and
 nullable observed command epochs.
 
+Both colour-contract successful-dispatch status and page `dispatch` include
+an additive `submittedInputs` object with `schemaVersion: 1`, boolean
+`available`, nullable boolean `reset`, nullable two-number
+`jitterOffsetPixels` in X/Y order, and nullable numeric
+`frameTimeDeltaMilliseconds`. These are the exact SDK descriptor values,
+including the submitted jitter sign, captured before dispatch. All three
+inputs become null together for absent, unsuccessful or nonfinite evidence;
+a negative frame time is also unavailable. Existing schema 3 fields remain.
+The typed object contract is [submitted input schema](fsr-dispatch-inputs.schema.json).
+An older build may omit this object; clients must distinguish absence from a
+schema-1 object with `available: false` and reject unsupported versions.
+
+Status is explicitly the last successful dispatch. Availability certifies
+retained input evidence, not current-frame freshness: consumers must still
+qualify its frame, serial, eye and context generation. Failed SDK calls clear
+the affected diagnostic success record; runtime batch failure clears both
+attempted eyes. Context changes invalidate records through the existing
+colour-contract lifecycle. Probe input attribution binds the successful
+same-frame, revision and eye record and preserves it in immutable pages.
+No additional per-frame lock or non-atomic cross-thread frame read is added.
+The fields do not expose internal exposure, history age or convergence;
+neither successful submission nor a reset flag establishes vendor settling.
+
 Requests are limited to 64 KiB and responses to 128 KiB; reads return one
 stage/eye page. Native policy tests cover rectangle overflow, dimensions,
 pixel size, slot budget and aggregate-budget boundaries. Compilation and

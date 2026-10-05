@@ -69,15 +69,22 @@ int main()
 		float configuredSharpness = 0;
 		float effectiveSharpness = 0;
 		bool sharpeningEnabled = false;
+		bool reset = false;
+		float jitterX = 0;
+		float jitterY = 0;
+		float frameTimeDeltaMilliseconds = 0;
 	};
 	for (const auto* path : { "host", "runtime-fsr3", "runtime-fsr4", "runtime-to-host-fallback" }) {
 		for (std::uint32_t eye : { 0u, 1u }) {
 			Dispatch input{ 8, 3, eye, 0, 99, "previous-runtime-frame", 0.75f, 0, false };
-			const Dispatch actual{ 8, 3, eye, 123 + eye, 42, path, 0.75f, 0.5f, true };
+			const Dispatch actual{ 8, 3, eye, 123 + eye, 42, path, 0.75f, 0.5f, true,
+				eye == 0, -0.25f, 0.375f, 16.5f };
 			Require(Policy::BindInputDispatch(input, actual, 8, 3, eye));
 			Require(input.path == actual.path && input.contextGeneration == actual.contextGeneration);
 			Require(input.dispatchSerial == actual.dispatchSerial && input.contextIndex == eye);
 			Require(input.configuredSharpness == 0.75f && input.effectiveSharpness == 0.5f && input.sharpeningEnabled);
+			Require(input.reset == (eye == 0) && input.jitterX == -0.25f &&
+					input.jitterY == 0.375f && input.frameTimeDeltaMilliseconds == 16.5f);
 			Require(!Policy::BindInputDispatch(input, actual, 9, 3, eye));
 			Require(!Policy::BindInputDispatch(input, actual, 8, 4, eye));
 			Require(!Policy::BindInputDispatch(input, actual, 8, 3, 1u - eye));

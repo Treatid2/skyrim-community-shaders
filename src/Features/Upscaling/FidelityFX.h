@@ -19,6 +19,10 @@
 #include "FSRColorContractReceiptPolicy.h"
 #include "FSRSharedGuidePolicy.h"
 
+#ifdef DEVBENCH_BRIDGE_ENABLED
+#	include "FSRDispatchInputTelemetry.h"
+#endif
+
 #include <FidelityFX/host/backends/dx11/ffx_dx11.h>
 #include <FidelityFX/host/ffx_fsr3.h>
 #include <FidelityFX/host/ffx_interface.h>
@@ -133,6 +137,7 @@ public:
 		float effectiveSharpness = 0.0f;
 		bool sharpeningEnabled = false;
 		uint64_t dispatchQpc = 0;
+		FSRDispatchInputTelemetry::Snapshot submittedInputs{};
 	};
 
 	struct FsrColorContractStatusSnapshot
@@ -458,6 +463,7 @@ private:
 	[[nodiscard]] FsrColorContractStatusSnapshot GetDevBenchFsrColorContractStatusSnapshotLocked() const noexcept;
 	void PublishDevBenchFsrColorContext(bool a_runtime, uint64_t a_flags) noexcept;
 	void ClearDevBenchFsrColorContext(bool a_runtime) noexcept;
+	void InvalidateDevBenchSuccessfulDispatch(uint32_t a_contextIndex);
 	void RecordDevBenchSuccessfulDispatch(
 		RuntimeUpscalerFramePath a_path,
 		uint32_t a_contextIndex,
@@ -466,7 +472,8 @@ private:
 		uint32_t a_displayWidth,
 		uint32_t a_displayHeight,
 		float a_configuredSharpness, float a_effectiveSharpness,
-		bool a_sharpeningEnabled, uint64_t a_dispatchQpc);
+		bool a_sharpeningEnabled, uint64_t a_dispatchQpc,
+		const FSRDispatchInputTelemetry::Snapshot& a_submittedInputs);
 	std::atomic<uint64_t> devBenchFsrColorContractState{ FSRColorContractPolicy::kDefaultState };
 	std::atomic<uint64_t> devBenchHostContextColorContract{ 0 };
 	std::atomic<uint64_t> devBenchRuntimeContextColorContract{ 0 };

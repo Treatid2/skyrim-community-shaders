@@ -1445,6 +1445,15 @@ void FidelityFX::RecordRuntimeUpscalerFramePath(RuntimeUpscalerFramePath a_path)
 }
 
 #ifdef DEVBENCH_BRIDGE_ENABLED
+void FidelityFX::InvalidateDevBenchSuccessfulDispatch(uint32_t a_contextIndex)
+{
+	const std::lock_guard lock(devBenchFsrColorContractMutex);
+	if (devBenchSuccessfulDispatch.contextIndex == a_contextIndex)
+		devBenchSuccessfulDispatch = {};
+	if (a_contextIndex < devBenchSuccessfulEyeDispatches.size())
+		devBenchSuccessfulEyeDispatches[a_contextIndex] = {};
+}
+
 void FidelityFX::RecordDevBenchSuccessfulDispatch(
 	RuntimeUpscalerFramePath a_path,
 	uint32_t a_contextIndex,
@@ -1453,7 +1462,8 @@ void FidelityFX::RecordDevBenchSuccessfulDispatch(
 	uint32_t a_displayWidth,
 	uint32_t a_displayHeight,
 	float a_configuredSharpness, float a_effectiveSharpness,
-	bool a_sharpeningEnabled, uint64_t a_dispatchQpc)
+	bool a_sharpeningEnabled, uint64_t a_dispatchQpc,
+	const FSRDispatchInputTelemetry::Snapshot& a_submittedInputs)
 {
 	const std::lock_guard lock(devBenchFsrColorContractMutex);
 	const bool runtimePath = a_path == RuntimeUpscalerFramePath::kRuntimeFsr31 ||
@@ -1495,6 +1505,7 @@ void FidelityFX::RecordDevBenchSuccessfulDispatch(
 		a_effectiveSharpness,
 		a_sharpeningEnabled,
 		a_dispatchQpc,
+		a_submittedInputs,
 	};
 	if (a_contextIndex < devBenchSuccessfulEyeDispatches.size())
 		devBenchSuccessfulEyeDispatches[a_contextIndex] = devBenchSuccessfulDispatch;
@@ -4213,6 +4224,9 @@ FidelityFX::LifecycleResult FidelityFX::DispatchRuntimeUpscalerBatch(std::span<c
 			observedDispatches[contextIndex].effectiveSharpness = dispatchParameters.sharpness;
 			observedDispatches[contextIndex].sharpeningEnabled = dispatchParameters.enableSharpening;
 			observedDispatches[contextIndex].dispatchQpc = DispatchQpc();
+			observedDispatches[contextIndex].submittedInputs = FSRDispatchInputTelemetry::Capture(
+				dispatchParameters.reset, dispatchParameters.jitterOffset.x,
+				dispatchParameters.jitterOffset.y, dispatchParameters.frameTimeDelta);
 #endif
 			bool dispatchCrashed = false;
 			const auto dispatchResult = DispatchRuntimeUpscalerProtected(
@@ -4292,11 +4306,15 @@ FidelityFX::LifecycleResult FidelityFX::DispatchRuntimeUpscalerBatch(std::span<c
 			RecordDevBenchSuccessfulDispatch(a_path, region.contextIndex,
 				region.renderWidth, region.renderHeight, region.displayWidth, region.displayHeight,
 				observed.configuredSharpness, observed.effectiveSharpness,
-				observed.sharpeningEnabled, observed.dispatchQpc);
+				observed.sharpeningEnabled, observed.dispatchQpc, observed.submittedInputs);
 		}
 #endif
 		return LifecycleResult::Ready;
 	}
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	for (const auto& region : a_regions)
+		InvalidateDevBenchSuccessfulDispatch(region.contextIndex);
+#endif
 	if (std::ranges::any_of(a_regions, [&](const auto& a_region) {
 			return runtimeUpscalerContextIndeterminate[a_region.contextIndex];
 		})) {
@@ -4484,6 +4502,9 @@ FidelityFX::UpscaleResult FidelityFX::UpscaleRegion(uint32_t a_contextIndex, ID3
 
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	const auto dispatchQpc = DispatchQpc();
+	const auto submittedInputs = FSRDispatchInputTelemetry::Capture(dispatchParameters.reset,
+		dispatchParameters.jitterOffset.x, dispatchParameters.jitterOffset.y,
+		dispatchParameters.frameTimeDelta);
 #endif
 	bool hostDispatchCrashed = false;
 	const bool dispatchOK = DispatchHostFsr3UpscaleProtected(fsrContext[a_contextIndex], dispatchParameters, hostDispatchCrashed);
@@ -4497,7 +4518,9 @@ FidelityFX::UpscaleResult FidelityFX::UpscaleRegion(uint32_t a_contextIndex, ID3
 			a_displayWidth,
 			a_displayHeight,
 			a_sharpness, dispatchParameters.sharpness,
-			dispatchParameters.enableSharpening, dispatchQpc);
+			dispatchParameters.enableSharpening, dispatchQpc, submittedInputs);
+	else
+		InvalidateDevBenchSuccessfulDispatch(a_contextIndex);
 #endif
 	if (!dispatchOK && !hostDispatchCrashed) {
 		logger::critical("[FidelityFX] Failed to dispatch region upscaling for eye {}!", a_contextIndex);
@@ -4782,6 +4805,7 @@ FidelityFX::UpscaleResult FidelityFX::Upscale(ID3D11Resource* a_upscalingTexture
 						.effectiveSharpness = dispatch.effectiveSharpness,
 						.sharpeningEnabled = dispatch.sharpeningEnabled,
 						.dispatchQpc = dispatch.dispatchQpc,
+						.submittedInputs = dispatch.submittedInputs,
 						.path = GetRuntimeUpscalerFramePathLabel(dispatch.path),
 					};
 					const auto* output = upscaling.vrIntermediateColorOut[eye].get();
