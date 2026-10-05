@@ -109,7 +109,23 @@ namespace
 			Check(collector.Record(EventKind::kDraw) == RecordResult::kFiltered, "collector admitted prefix events");
 		Check(collector.ObserveResource({ .d3dObject = 1 }).observationId == 0,
 			"collector admitted a prefix catalogue entry");
+		Check(!collector.ActivatePostProcessingWindow(8, 12, 77), "wrong target activated the window");
+		Check(!collector.ActivatePostProcessingWindow(9, 0, 77), "zero frame activated the window");
+		Check(!collector.ActivatePostProcessingWindow(9, kUnknownFrame, 0), "unknown frame activated the window");
+		Check(!collector.ActivatePostProcessingWindow(9, 12, 0), "missing publication activated the window");
+		const auto refused = collector.GetCaptureWindow();
+		Check(refused.phase == CaptureWindowPhase::kArmed && refused.activationTick == 0 &&
+				  refused.activationBoundary.attemptCount == 4 && refused.activationBoundary.targetRejections == 1 &&
+				  refused.activationBoundary.frameRejections == 2 && refused.activationBoundary.publicationRejections == 2 &&
+				  refused.activationBoundary.lastTarget == 9 && refused.activationBoundary.lastCpuFrame == 12 &&
+				  refused.activationBoundary.lastPublicationGeneration == 0,
+			"refused inputs were lost or changed activation eligibility");
 		Check(collector.ActivatePostProcessingWindow(9, 12, 77), "collector boundary did not activate");
+		Check(!collector.ActivatePostProcessingWindow(8, 0, 0), "bootstrap window reactivated");
+		const auto accepted = collector.GetCaptureWindow();
+		Check(accepted.activationBoundary.attemptCount == 5 && accepted.activationBoundary.lastCpuFrame == 12 &&
+				  accepted.activationBoundary.lastPublicationGeneration == 77 && accepted.activationBoundary.targetRejections == 1,
+			"post-activation calls rewrote armed boundary diagnostics");
 		std::thread excluded([&] {
 			Check(collector.Record(EventKind::kDraw) == RecordResult::kFiltered,
 				"foreign thread populated bootstrap events");
@@ -123,11 +139,21 @@ namespace
 		auto snapshot = collector.Stop();
 		Check(snapshot && snapshot->events.size() == 1 && snapshot->resourceObservations.empty() &&
 				  snapshot->statistics.droppedStopped == 0 && snapshot->statistics.droppedEventLimit == 0 &&
-				  snapshot->window.phase == CaptureWindowPhase::kIncomplete,
+				  snapshot->window.phase == CaptureWindowPhase::kIncomplete &&
+				  snapshot->window.activationBoundary.attemptCount == 5,
 			"omitted prefix consumed capacity or was promoted to a complete window");
 		Check(collector.Start(Config()) == StartResult::kStarted && collector.ActiveGeneration() != generation,
 			"late window drain did not release single-owner admission");
 		Check(collector.Stop().has_value(), "successor collector could not drain");
+
+		config.maxActivationWait = std::chrono::nanoseconds(1);
+		Check(collector.Start(config) == StartResult::kStarted, "deadline diagnostic capture did not arm");
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		Check(!collector.ActivatePostProcessingWindow(9, 12, 77), "expired armed window activated");
+		const auto expired = collector.Stop();
+		Check(expired && expired->window.failure == CaptureWindowFailure::kActivationTimeout &&
+				  expired->window.activationBoundary.attemptCount == 0 && expired->events.empty(),
+			"expired boundary invented an in-window attempt or admitted events");
 	}
 
 	void TestStageShaderEnrichmentDoesNotAllocateLookupNodes()

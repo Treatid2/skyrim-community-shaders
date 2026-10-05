@@ -1846,12 +1846,21 @@ namespace CSX::RenderMap
 			{ "bootstrapThreadId", a_window.bootstrapThreadId },
 			{ "bootstrapComplete", a_window.bootstrapComplete },
 			{ "bootstrapEventCount", a_window.bootstrapEventCount },
+			{ "activationBoundary", {
+										{ "scope", "armed-window-input-validation" },
+										{ "attemptCount", a_window.activationBoundary.attemptCount },
+										{ "targetRejections", a_window.activationBoundary.targetRejections },
+										{ "frameRejections", a_window.activationBoundary.frameRejections },
+										{ "publicationRejections", a_window.activationBoundary.publicationRejections },
+										{ "lastTarget", a_window.activationBoundary.attemptCount ? json(a_window.activationBoundary.lastTarget) : json(nullptr) },
+										{ "lastCpuFrame", a_window.activationBoundary.lastCpuFrame == kUnknownFrame ? json(nullptr) : json(a_window.activationBoundary.lastCpuFrame) },
+										{ "lastPublicationGeneration", a_window.activationBoundary.attemptCount ? json(a_window.activationBoundary.lastPublicationGeneration) : json(nullptr) },
+									} },
 			{ "prefixEventCount", nullptr },
 			{ "preWindowProducerHistory", "unobserved" },
 			{ "fullPipelineEstablished", false },
 			{ "pixelTransferEstablished", false },
-			{ "omittedPrefix", { { "fromTickInclusive", a_window.armedTick },
-								   { "toTickExclusive", a_window.activationTick ? json(a_window.activationTick) : json(nullptr) } } },
+			{ "omittedPrefix", { { "fromTickInclusive", a_window.armedTick }, { "toTickExclusive", a_window.activationTick ? json(a_window.activationTick) : json(nullptr) } } },
 		};
 	}
 

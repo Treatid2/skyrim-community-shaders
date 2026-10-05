@@ -168,6 +168,18 @@ namespace CSX::RenderMap
 		kStopped,
 	};
 
+	/** Fixed-size input diagnostics for boundary calls observed while armed. */
+	struct ActivationBoundarySnapshot
+	{
+		std::uint64_t attemptCount{ 0 };
+		std::uint64_t targetRejections{ 0 };
+		std::uint64_t frameRejections{ 0 };
+		std::uint64_t publicationRejections{ 0 };
+		std::uint64_t lastCpuFrame{ kUnknownFrame };
+		std::uint64_t lastPublicationGeneration{ 0 };
+		std::uint32_t lastTarget{ 0 };
+	};
+
 	struct CaptureWindowSnapshot
 	{
 		CaptureWindowPhase phase{ CaptureWindowPhase::kDisabled };
@@ -182,6 +194,7 @@ namespace CSX::RenderMap
 		std::uint64_t bootstrapEventCount{ 0 };
 		std::uint8_t acceptedEyeMask{ 0 };
 		bool bootstrapComplete{ false };
+		ActivationBoundarySnapshot activationBoundary{};
 	};
 
 	struct CollectorConfig

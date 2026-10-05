@@ -533,6 +533,34 @@
                     "type": "integer",
                     "minimum": 0
                 },
+                "activationBoundary": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "scope",
+                        "attemptCount",
+                        "targetRejections",
+                        "frameRejections",
+                        "publicationRejections",
+                        "lastTarget",
+                        "lastCpuFrame",
+                        "lastPublicationGeneration"
+                    ],
+                    "properties": {
+                        "scope": { "const": "armed-window-input-validation" },
+                        "attemptCount": { "type": "integer", "minimum": 0 },
+                        "targetRejections": { "type": "integer", "minimum": 0 },
+                        "frameRejections": { "type": "integer", "minimum": 0 },
+                        "publicationRejections": { "type": "integer", "minimum": 0 },
+                        "lastTarget": {
+                            "type": ["integer", "null"],
+                            "minimum": 0,
+                            "maximum": 4294967295
+                        },
+                        "lastCpuFrame": { "type": ["integer", "null"], "minimum": 0 },
+                        "lastPublicationGeneration": { "type": ["integer", "null"], "minimum": 0 }
+                    }
+                },
                 "cpuFrame": {
                     "type": ["integer", "null"],
                     "minimum": 0

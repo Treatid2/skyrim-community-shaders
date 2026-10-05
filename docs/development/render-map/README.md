@@ -198,6 +198,23 @@ native object lifetime, pixel transfer or GPU completion. Historical
 `RequiredStorageBytes` coefficients from another binary must not be reused:
 the current binary recomputes admission from its compiled structure sizes.
 
+API minor 24/schema revision 26 adds `captureWindow.activationBoundary` to
+status, summary and manifest output. It records calls observed while armed,
+independent counts of target/frame/publication rejection, and the last actual
+input target, CPU frame and resource-publication generation. A call may fail
+more than one predicate; rejection counts therefore need not sum to attempts.
+Missing calls retain null input values. An observed zero frame or publication
+remains zero, while an unknown frame remains null. Calls after activation or
+after the armed deadline do not rewrite this evidence. These fixed-size
+diagnostics use the existing window lock and admit no prefix events or D3D
+state changes; all activation guards remain in force.
+
+Zero attempts means no input-validation call was observed during the armed
+window. It does not prove that the hook is absent, that rendering stopped, or
+that a call did not arrive after the deadline. Older captures may omit this
+optional object; absence is not a zero-attempt observation. Build-specific
+allocation admission must use the new binary's structure sizes.
+
 ## Persistent shader diagnostic storage
 
 Bridge-enabled shader provenance is retained independently of a live capture.

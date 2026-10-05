@@ -1017,6 +1017,18 @@ namespace
 		windowSnapshot.statistics.droppedTargetViewObservations = 1;
 		Check(!EvaluateCaptureCompleteness(windowSnapshot).reasons.empty(), "matched pair hid catalogue loss");
 		const auto window = SerializeCaptureWindow(windowSnapshot.window);
+		Check(window["activationBoundary"]["attemptCount"] == 0 &&
+				  window["activationBoundary"]["lastTarget"].is_null() &&
+				  window["activationBoundary"]["lastCpuFrame"].is_null() &&
+				  window["activationBoundary"]["lastPublicationGeneration"].is_null(),
+			"unobserved activation inputs invented default values");
+		windowSnapshot.window.activationBoundary = { .attemptCount = 4, .targetRejections = 1, .frameRejections = 2, .publicationRejections = 2, .lastCpuFrame = 0, .lastPublicationGeneration = 0, .lastTarget = 9 };
+		const auto refusedBoundary = SerializeCaptureWindow(windowSnapshot.window)["activationBoundary"];
+		Check(refusedBoundary["scope"] == "armed-window-input-validation" && refusedBoundary["attemptCount"] == 4 &&
+				  refusedBoundary["targetRejections"] == 1 && refusedBoundary["frameRejections"] == 2 &&
+				  refusedBoundary["publicationRejections"] == 2 && refusedBoundary["lastTarget"] == 9 &&
+				  refusedBoundary["lastCpuFrame"] == 0 && refusedBoundary["lastPublicationGeneration"] == 0,
+			"refused activation input serialization hid observed zero values");
 		Check(window["prefixEventCount"].is_null() && window["preWindowProducerHistory"] == "unobserved" &&
 				  window["fullPipelineEstablished"] == false && window["pixelTransferEstablished"] == false &&
 				  window["omittedPrefix"]["fromTickInclusive"] == 10 && window["omittedPrefix"]["toTickExclusive"] == 20,
