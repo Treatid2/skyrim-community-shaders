@@ -1,9 +1,13 @@
 #pragma once
 
 #include "RenderMap/Collector.h"
+#include "RenderMap/ShaderBytecodeCatalogue.h"
+#include "RenderMap/TransferVersionPolicy.h"
 
 #include <bitset>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -48,6 +52,13 @@ namespace CSX::RenderMap
 		kCommandListObservation = 28,
 		kFinishCommandList = 29,
 		kExecuteCommandList = 30,
+		kPostProcessingBoundary = 31,
+		kRasterState = 32,
+		kTransferResourceAccess = 33,
+		kEyePublication = 34,
+		kTransferOperation = 35,
+		kTransferCopyRegion = 36,
+		kNativePipelineSnapshot = 37,
 	};
 
 	enum class DeviceContextKind : std::uint8_t
@@ -229,11 +240,58 @@ namespace CSX::RenderMap
 	class Runtime
 	{
 	public:
+		class PostProcessingScope
+		{
+		public:
+			~PostProcessingScope();
+			PostProcessingScope(const PostProcessingScope&) = delete;
+			PostProcessingScope& operator=(const PostProcessingScope&) = delete;
+
+		private:
+			friend class Runtime;
+			PostProcessingScope(Runtime& a_owner, const ResourceObservationInput& a_source,
+				const ResourceObservationInput& a_destination, std::uint32_t a_target,
+				std::uint64_t a_publicationGeneration) noexcept;
+			const Runtime* previousOwner = nullptr;
+			std::uint64_t previousGeneration = 0;
+			std::uint64_t previousOperation = 0;
+			Collector::ScopeGuard scope;
+		};
+
+		/** Bound observations to the exact original engine post-processing call. */
+		PostProcessingScope EnterPostProcessing(const ResourceObservationInput& a_source,
+			const ResourceObservationInput& a_destination, std::uint32_t a_target,
+			std::uint64_t a_publicationGeneration) noexcept;
+		bool IsInsidePostProcessing() const noexcept;
+		/** Correlate one operation with its queried native shader-stage bindings. */
+		void BeginTransferOperation(std::uintptr_t a_context, bool a_compute,
+			std::uint32_t a_operation, const std::array<std::uintptr_t, 6>& a_shaders) noexcept;
+		/** Record a queried raster slot immediately before an observed operation. */
+		void RecordRasterState(std::uintptr_t a_context, std::uint32_t a_slot,
+			const std::array<float, 6>& a_viewport, const std::array<std::int32_t, 4>& a_scissor,
+			std::uint32_t a_viewportCount, std::uint32_t a_scissorCount, bool a_scissorEnabled) noexcept;
+		/** Record bound candidates and observed command epochs, never pixel identity. */
+		void RecordTransferResourceAccess(std::uintptr_t a_context, const ResourceViewInput& a_view,
+			ResourceStage a_stage, std::uint32_t a_slot, bool a_write) noexcept;
+		void RecordTransferCopyRegion(std::uintptr_t a_context, std::uint32_t a_sourceSubresource,
+			std::uint32_t a_destinationSubresource, const std::array<std::uint32_t, 3>& a_destination,
+			const std::array<std::uint32_t, 6>& a_sourceBox, bool a_hasSourceBox) noexcept;
+
 		StartResult StartCapture(const CollectorConfig& a_config);
 		std::optional<CaptureSnapshot> StopCapture(
 			StopReason a_reason = StopReason::kRequested,
 			std::chrono::milliseconds a_drainTimeout = std::chrono::milliseconds(100));
 		bool IsCapturing() const noexcept;
+		/** Start the opt-in late window before constructing its native boundary. */
+		bool ActivatePostProcessingWindow(std::uint32_t a_target, std::uint64_t a_frame,
+			std::uint64_t a_publicationGeneration) noexcept;
+		void CompleteWindowBootstrap(bool a_success) noexcept;
+		/** Record queried shader state only for the retained scope generation, without inventing execution. */
+		void RecordPostProcessingBootstrap(const std::array<std::uintptr_t, 6>& a_shaders,
+			std::uint64_t a_expectedCaptureGeneration) noexcept;
+		/** Retained scope generation; remains unchanged when the active capture turns over. */
+		std::uint64_t PostProcessingCaptureGeneration() const noexcept;
+		CaptureWindowSnapshot GetCaptureWindow() const noexcept;
 		bool IsCaptureDraining() const noexcept;
 		std::uint64_t ActiveCaptureGeneration() const noexcept;
 
@@ -276,7 +334,8 @@ namespace CSX::RenderMap
 			bool a_keepTargets = false,
 			TargetBindingSource a_source = TargetBindingSource::kObservedCall,
 			std::uint64_t a_expectedCaptureGeneration = 0) noexcept;
-		std::uint64_t ClaimRenderTargetStateSeed(std::uintptr_t a_context) noexcept;
+		std::uint64_t ClaimRenderTargetStateSeed(std::uintptr_t a_context,
+			std::uint64_t a_expectedCaptureGeneration = 0) noexcept;
 		void BindResourceViews(
 			std::uintptr_t a_context,
 			ResourceBindingKind a_bindingKind,
@@ -287,7 +346,8 @@ namespace CSX::RenderMap
 			bool a_keepViews = false,
 			ResourceBindingSource a_source = ResourceBindingSource::kRequestedCall,
 			std::uint64_t a_expectedCaptureGeneration = 0) noexcept;
-		std::uint64_t ClaimResourceViewStateSeed(std::uintptr_t a_context) noexcept;
+		std::uint64_t ClaimResourceViewStateSeed(std::uintptr_t a_context,
+			std::uint64_t a_expectedCaptureGeneration = 0) noexcept;
 		void RecordResourceFlow(
 			std::uintptr_t a_context,
 			ResourceFlowOperation a_operation,
@@ -345,7 +405,7 @@ namespace CSX::RenderMap
 			float a_uMax,
 			float a_vMax,
 			std::uint32_t a_submitFlags,
-			std::uint64_t a_compositorCycle) noexcept;
+			std::uint64_t a_compositorCycle, std::uint64_t a_publicationGeneration = 0) noexcept;
 		void RecordDraw(
 			std::uintptr_t a_context,
 			DrawOperation a_operation,
@@ -365,6 +425,9 @@ namespace CSX::RenderMap
 			std::uintptr_t a_d3dObject,
 			std::uint64_t a_bytecodeSize,
 			std::string_view a_bytecodeSha256) noexcept;
+		/** @brief Produce teardown-safe cleanup for an observed native shader's metadata. */
+		std::function<void()> MakeStageShaderRetirementCallback(
+			ShaderStage a_stage, std::uintptr_t a_d3dObject) const;
 		void RegisterEngineStageShader(
 			ShaderStage a_stage,
 			std::uintptr_t a_d3dObject,
@@ -376,6 +439,11 @@ namespace CSX::RenderMap
 #if defined(CSX_RENDER_MAP_TESTING)
 		void FailNextDeferredContextCatalogueAdmissionForTesting() noexcept;
 		void FailNextCommandListCatalogueAdmissionForTesting() noexcept;
+		void PauseCommandListAdmissionsForTesting(std::uint32_t a_count) noexcept;
+		std::uint32_t PausedCommandListAdmissionsForTesting() const noexcept;
+		void ResumeCommandListAdmissionsForTesting() noexcept;
+		std::size_t CommandListCatalogueSizeForTesting() noexcept;
+		void PauseNextProducerPublicationForTesting(std::uint32_t a_skipPublications = 0) noexcept;
 		void PauseNextDeferredPublicationForTesting() noexcept;
 		void PauseNextImmediateStagePublicationForTesting() noexcept;
 		void PauseNextImmediateDispatchAdmissionForTesting() noexcept;
@@ -412,6 +480,15 @@ namespace CSX::RenderMap
 			std::uint64_t bytecodeSize{ 0 };
 			std::array<char, kSha256HexLength + 1> bytecodeSha256{};
 			std::vector<EngineAlias> engineAliases;
+			bool engineAliasesOverflowed{ false };
+		};
+
+		struct PersistentStageShaderCatalogue
+		{
+			mutable std::shared_mutex mutex;
+			std::unordered_map<PersistentStageShaderKey, PersistentStageShaderIdentity,
+				PersistentStageShaderKeyHash>
+				records;
 		};
 
 		struct ActiveCpuMapKey
@@ -485,7 +562,7 @@ namespace CSX::RenderMap
 			std::uint64_t captureGeneration{ 0 };
 		};
 
-		std::uint64_t EnsureImmediateContextObservation() noexcept;
+		std::uint64_t EnsureImmediateContextObservation(std::uint64_t a_expectedCaptureGeneration) noexcept;
 		ContextObservation EnsureContextObservation(std::uintptr_t a_context) noexcept;
 		std::uint64_t StartDeferredRecording(
 			DeferredContextState& a_state,
@@ -496,6 +573,8 @@ namespace CSX::RenderMap
 			std::uint64_t a_recordingObservationId,
 			CommandRecordingIncompleteReason a_reason) noexcept;
 #if defined(CSX_RENDER_MAP_TESTING)
+		void PauseProducerPublicationForTesting() noexcept;
+		void PauseCommandListAdmissionForTesting() noexcept;
 		void PauseDeferredPublicationBeforeAppendForTesting() noexcept;
 		void PauseImmediateStagePublicationForTesting() noexcept;
 		void PauseImmediateDispatchBeforeAppendForTesting() noexcept;
@@ -504,18 +583,23 @@ namespace CSX::RenderMap
 		void ResetImmediatePipelineState() noexcept;
 		void ResetImmediateStageObservations(bool a_clearBindings) noexcept;
 		void SetImmediateBoundStage(ShaderStage a_stage, std::uintptr_t a_d3dObject) noexcept;
+		void BindBootstrapStage(ShaderStage a_stage, std::uintptr_t a_d3dObject,
+			std::uint64_t a_expectedCaptureGeneration) noexcept;
+		std::uint64_t ClaimImmediateStateSeed(std::atomic_uint64_t& a_seed,
+			std::uintptr_t a_context, std::uint64_t a_expectedCaptureGeneration) noexcept;
 		ImmediateStageObservation ReadImmediateStageObservation(ShaderStage a_stage) const noexcept;
 		void ApplyEffectiveResourceViewResetLocked() noexcept;
 		std::uint64_t NextCommandStreamSequence() noexcept;
-		ImmediateStageObservation EnsureBoundStageObservation(ShaderStage a_stage) noexcept;
+		ImmediateStageObservation EnsureBoundStageObservation(ShaderStage a_stage, std::uint64_t a_expectedCaptureGeneration) noexcept;
 		StageShaderObservationResult ObserveBoundStage(
 			ShaderStage a_stage,
-			std::uintptr_t a_d3dObject) noexcept;
+			std::uintptr_t a_d3dObject, std::uint64_t a_expectedCaptureGeneration) noexcept;
 		StageShaderObservationResult ObserveStageShaderWithPersistent(
-			const StageShaderObservationInput& a_input) noexcept;
+			const StageShaderObservationInput& a_input, std::uint64_t a_expectedCaptureGeneration) noexcept;
 		std::optional<PersistentStageShaderIdentity> FindCreatedStageShader(
 			ShaderStage a_stage,
 			std::uintptr_t a_d3dObject) const noexcept;
+		std::shared_ptr<PersistentStageShaderCatalogue> EnsurePersistentStageShaderCatalogue() const;
 		void PublishBoundStageObservation(
 			ShaderStage a_stage,
 			std::uintptr_t a_d3dObject,
@@ -523,13 +607,15 @@ namespace CSX::RenderMap
 		TargetViewObservationResult ObserveResourceView(
 			const ResourceViewInput& a_input,
 			std::uint64_t a_contextObservationId,
-			std::uint64_t a_commandStreamSequence) noexcept;
+			std::uint64_t a_commandStreamSequence, std::uint64_t a_expectedCaptureGeneration) noexcept;
 		ResourceObservationResult ObserveResource(
 			const ResourceObservationInput& a_input,
 			std::uint64_t a_contextObservationId,
-			std::uint64_t a_commandStreamSequence) noexcept;
+			std::uint64_t a_commandStreamSequence, std::uint64_t a_expectedCaptureGeneration) noexcept;
 
 		Collector collector;
+		std::mutex transferVersionMutex;
+		TransferVersions transferVersions;
 		// Serializes reset-before-publish capture transitions with shutdown.
 		std::mutex captureLifecycleMutex;
 		std::atomic_uintptr_t immediateContext{ 0 };
@@ -568,6 +654,11 @@ namespace CSX::RenderMap
 #if defined(CSX_RENDER_MAP_TESTING)
 		std::atomic_bool failNextDeferredContextCatalogueAdmission{ false };
 		std::atomic_bool failNextCommandListCatalogueAdmission{ false };
+		std::atomic_bool pauseNextProducerPublication{ false };
+		std::atomic_uint32_t producerPublicationsToSkip{ 0 };
+		std::atomic_uint32_t commandListAdmissionsToPause{ 0 };
+		std::atomic_uint32_t pausedCommandListAdmissions{ 0 };
+		std::atomic_bool resumeCommandListAdmissions{ false };
 		std::atomic_bool pauseNextDeferredPublication{ false };
 		std::atomic_bool pauseNextImmediateStagePublication{ false };
 		std::atomic_bool pauseNextImmediateDispatchAdmission{ false };
@@ -575,10 +666,7 @@ namespace CSX::RenderMap
 		std::atomic_bool deferredPublicationPaused{ false };
 		std::atomic_bool resumeDeferredPublication{ false };
 #endif
-		mutable std::shared_mutex persistentStageShaderMutex;
-		std::unordered_map<PersistentStageShaderKey, PersistentStageShaderIdentity,
-			PersistentStageShaderKeyHash>
-			persistentStageShaders;
+		mutable std::atomic<std::shared_ptr<PersistentStageShaderCatalogue>> persistentStageShaderCatalogue;
 	};
 
 	Runtime& GetRuntime() noexcept;

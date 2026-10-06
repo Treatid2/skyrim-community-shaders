@@ -77,6 +77,8 @@ namespace CSX::RenderMap
 		kResourceCpuAccess,
 		kResourceVersionObserved,
 		kEyeSubmitted,
+		kRasterStateObserved,
+		kTransferResourceAccess,
 		kCount,
 	};
 
@@ -147,6 +149,54 @@ namespace CSX::RenderMap
 		kFailure,
 	};
 
+	enum class CaptureWindowPhase : std::uint8_t
+	{
+		kDisabled,
+		kArmed,
+		kBootstrap,
+		kActive,
+		kMatchedEyes,
+		kIncomplete,
+	};
+	enum class CaptureWindowFailure : std::uint8_t
+	{
+		kNone,
+		kActivationTimeout,
+		kBootstrapFailed,
+		kFrameChanged,
+		kActiveTimeout,
+		kStopped,
+	};
+
+	/** Fixed-size input diagnostics for boundary calls observed while armed. */
+	struct ActivationBoundarySnapshot
+	{
+		std::uint64_t attemptCount{ 0 };
+		std::uint64_t targetRejections{ 0 };
+		std::uint64_t frameRejections{ 0 };
+		std::uint64_t publicationRejections{ 0 };
+		std::uint64_t lastCpuFrame{ kUnknownFrame };
+		std::uint64_t lastPublicationGeneration{ 0 };
+		std::uint32_t lastTarget{ 0 };
+	};
+
+	struct CaptureWindowSnapshot
+	{
+		CaptureWindowPhase phase{ CaptureWindowPhase::kDisabled };
+		CaptureWindowFailure failure{ CaptureWindowFailure::kNone };
+		std::uint64_t armedTick{ 0 };
+		std::uint64_t activationTick{ 0 };
+		std::uint64_t endTick{ 0 };
+		std::uint64_t cpuFrame{ kUnknownFrame };
+		std::uint64_t publicationGeneration{ 0 };
+		std::uint64_t compositorCycle{ 0 };
+		std::uint64_t bootstrapThreadId{ 0 };
+		std::uint64_t bootstrapEventCount{ 0 };
+		std::uint8_t acceptedEyeMask{ 0 };
+		bool bootstrapComplete{ false };
+		ActivationBoundarySnapshot activationBoundary{};
+	};
+
 	struct CollectorConfig
 	{
 		std::uint64_t captureNumericId{ 0 };
@@ -167,6 +217,9 @@ namespace CSX::RenderMap
 		bool executionWithinSelectedGeometry{ false };
 		EventKindMask requestedEventKindMask{ kAllEventKindsMask };
 		EventKindMask eventKindMask{ kAllEventKindsMask };
+		bool latePostProcessingWindow{ false };
+		std::uint32_t activationTarget{ 0 };
+		std::chrono::nanoseconds maxActivationWait{ std::chrono::seconds(2) };
 	};
 
 	struct FrameContext
@@ -201,7 +254,7 @@ namespace CSX::RenderMap
 	struct EventRecord
 	{
 		std::uint16_t schemaMajor{ 1 };
-		std::uint16_t schemaMinor{ 17 };
+		std::uint16_t schemaMinor{ 19 };
 		EventKind kind{ EventKind::kCaptureMarker };
 		std::uint16_t reserved{ 0 };
 		std::uint64_t captureNumericId{ 0 };
@@ -635,6 +688,7 @@ namespace CSX::RenderMap
 		std::uint64_t endTimestampTicks{ 0 };
 		StopReason stopReason{ StopReason::kRequested };
 		CaptureStatistics statistics;
+		CaptureWindowSnapshot window;
 		std::vector<EventRecord> events;
 		std::vector<ShaderObservationRecord> shaderObservations;
 		std::vector<StageShaderObservationRecord> stageShaderObservations;
@@ -697,10 +751,20 @@ namespace CSX::RenderMap
 		bool IsCapturing() const noexcept;
 		bool IsDraining() const noexcept;
 		std::uint64_t ActiveGeneration() const noexcept;
-		bool IsGeometryShaderTypeSelected(std::uint32_t a_shaderType) const noexcept;
+		/** Arm without collecting the prefix; activate only at the declared target. */
+		bool ActivatePostProcessingWindow(std::uint32_t a_target, std::uint64_t a_frame,
+			std::uint64_t a_publicationGeneration) noexcept;
+		/** Finish attributable bootstrap before accepting another thread's events. */
+		void CompleteWindowBootstrap(bool a_success, std::uint64_t a_expectedGeneration = 0) noexcept;
+		/** Called only after the accepted native eye and publication records succeed. */
+		void AcceptWindowEye(Eye a_eye, std::uint64_t a_frame, std::uint64_t a_cycle,
+			std::uint64_t a_publicationGeneration, std::uint64_t a_expectedGeneration = 0) noexcept;
+		CaptureWindowSnapshot GetCaptureWindow() const noexcept;
+		void PollCaptureWindow(std::uint64_t a_frame = kUnknownFrame, std::uint64_t a_expectedGeneration = 0) const noexcept;
+		bool IsGeometryShaderTypeSelected(std::uint32_t a_shaderType, std::uint64_t a_expectedGeneration = 0) const noexcept;
 		bool IsExecutionAllowedByGeometryScope(
 			std::uint64_t a_preparedGeometrySetupObservationId = 0) const noexcept;
-		void CountFiltered(std::uint64_t a_count = 1) noexcept;
+		void CountFiltered(std::uint64_t a_count = 1, std::uint64_t a_expectedGeneration = 0) noexcept;
 
 		RecordResult Record(
 			EventKind a_kind,
@@ -734,17 +798,18 @@ namespace CSX::RenderMap
 			std::uint64_t a_expectedGeneration = 0) noexcept;
 
 		std::uint64_t AllocateObservationId(std::uint64_t a_expectedGeneration = 0) noexcept;
-		ShaderObservationResult ObserveShader(const ShaderObservationInput& a_input) noexcept;
-		StageShaderObservationResult ObserveStageShader(const StageShaderObservationInput& a_input) noexcept;
+		/** A nonzero expected generation rejects observations from a different capture. */
+		ShaderObservationResult ObserveShader(const ShaderObservationInput& a_input, std::uint64_t a_expectedGeneration = 0) noexcept;
+		StageShaderObservationResult ObserveStageShader(const StageShaderObservationInput& a_input, std::uint64_t a_expectedGeneration = 0) noexcept;
 		StageShaderObservationResult FindStageShader(
 			ShaderStage a_stage,
 			std::uintptr_t a_d3dObject) noexcept;
-		ResourceObservationResult ObserveResource(const ResourceObservationInput& a_input) noexcept;
-		TargetViewObservationResult ObserveTargetView(const TargetViewObservationInput& a_input) noexcept;
-		TargetBindingObservationResult ObserveTargetBinding(const TargetBindingObservationInput& a_input) noexcept;
-		SceneObjectObservationResult ObserveSceneObject(const SceneObjectObservationInput& a_input) noexcept;
-		GeometryObservationResult ObserveGeometry(const GeometryObservationInput& a_input) noexcept;
-		MaterialStateObservationResult ObserveMaterialState(const MaterialStateObservationInput& a_input) noexcept;
+		ResourceObservationResult ObserveResource(const ResourceObservationInput& a_input, std::uint64_t a_expectedGeneration = 0) noexcept;
+		TargetViewObservationResult ObserveTargetView(const TargetViewObservationInput& a_input, std::uint64_t a_expectedGeneration = 0) noexcept;
+		TargetBindingObservationResult ObserveTargetBinding(const TargetBindingObservationInput& a_input, std::uint64_t a_expectedGeneration = 0) noexcept;
+		SceneObjectObservationResult ObserveSceneObject(const SceneObjectObservationInput& a_input, std::uint64_t a_expectedGeneration = 0) noexcept;
+		GeometryObservationResult ObserveGeometry(const GeometryObservationInput& a_input, std::uint64_t a_expectedGeneration = 0) noexcept;
+		MaterialStateObservationResult ObserveMaterialState(const MaterialStateObservationInput& a_input, std::uint64_t a_expectedGeneration = 0) noexcept;
 		void RetireShaderObservation(std::uintptr_t a_shader) noexcept;
 		void SetThreadFrameContext(const FrameContext& a_context) noexcept;
 		FrameContext GetThreadFrameContext() const noexcept;

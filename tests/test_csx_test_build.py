@@ -970,6 +970,115 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("path: dist/${{ inputs.expected-package-name }}", workflow)
         self.assertIn("if-no-files-found: error", workflow)
 
+    def test_render_scale_qualification_builds_exact_devbench_inputs(self) -> None:
+        shared = (
+            ROOT / ".github" / "workflows" / "_shared-build.yaml"
+        ).read_text(encoding="utf-8")
+        pull_request = (
+            ROOT / ".github" / "workflows" / "pr-checks.yaml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("devbench-bridge:", shared)
+        self.assertIn("devbench-qualification-compatibility:", shared)
+        self.assertIn(
+            "-DDEVBENCH_BRIDGE=${{ inputs.devbench-bridge && 'ON' || 'OFF' }}",
+            shared,
+        )
+        self.assertIn(
+            "-DCSX_REQUIRE_CLEAN_PROVENANCE=${{ inputs.devbench-qualification-compatibility && 'OFF' || 'ON' }}",
+            shared,
+        )
+        compatibility_step = shared.split(
+            "- name: Apply DevBench qualification compatibility", maxsplit=1
+        )[1].split("- name:", maxsplit=1)[0]
+        self.assertIn("if: inputs.devbench-qualification-compatibility", compatibility_step)
+        self.assertIn("}).response;", compatibility_step)
+        render_scale_filter = pull_request.split("render_scale:", maxsplit=1)[1].split(
+            "base_sha:", maxsplit=1
+        )[0]
+        self.assertIn("- 'src/Features/Upscaling.cpp'", render_scale_filter)
+        self.assertIn("- 'src/Features/Upscaling.h'", render_scale_filter)
+        self.assertIn("ref: ${{ github.event.pull_request.base.sha }}", pull_request)
+        self.assertIn("ref: ${{ github.event.pull_request.head.sha }}", pull_request)
+        self.assertEqual(pull_request.count("devbench-bridge: true"), 2)
+        self.assertEqual(
+            pull_request.count("devbench-qualification-compatibility: true"), 2
+        )
+        self.assertIn(
+            "artifact-name: render-scale-baseline-${{ github.event.pull_request.base.sha }}",
+            pull_request,
+        )
+        self.assertIn(
+            "artifact-name: render-scale-candidate-${{ github.event.pull_request.head.sha }}",
+            pull_request,
+        )
+        self.assertIn("name: dist-artifacts", pull_request)
+
+    def test_qualification_adapter_preserves_repaired_dispatch(self) -> None:
+        workflow = (ROOT / ".github/workflows/_shared-build.yaml").read_text(
+            encoding="utf-8"
+        )
+        step = workflow.split(
+            "- name: Apply DevBench qualification compatibility", maxsplit=1
+        )[1].split("- name:", maxsplit=1)[0]
+        script_lines = step.split("run: |", maxsplit=1)[1].splitlines()
+        script = "\n".join(line[18:] for line in script_lines if line.strip())
+        source_path = Path("src/Features/Upscaling/FSRTemporalTuningDevBenchBridge.cpp")
+        repaired = (ROOT / source_path).read_text(encoding="utf-8")
+        legacy = repaired.replace(
+            "auto dispatch = CSX::Api::RunDevBenchMainThreadTask(",
+            "return CSX::Api::RunDevBenchMainThreadTask(",
+            1,
+        ).replace("\t\treturn std::move(dispatch.response);\n", "", 1)
+        inline = legacy.replace("\t\t});", "\t\t}).response;", 1)
+        cases = (
+            ("legacy", legacy, inline),
+            ("repaired", repaired, repaired),
+            ("inline", inline, inline),
+            ("missing", legacy.replace("RunDevBenchMainThreadTask", "OtherTask"), None),
+            ("ambiguous", legacy + "\n\t\t});\n", None),
+            ("incomplete", repaired.replace("dispatch.response", "dispatch.other"), None),
+        )
+        for name, source, expected in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                target = directory / source_path
+                target.parent.mkdir(parents=True)
+                target.write_text(source, encoding="utf-8", newline="\n")
+                adapter = directory / "compatibility.ps1"
+                adapter.write_text(script, encoding="utf-8")
+                subprocess.run(
+                    ["pwsh", "-NoProfile", "-File", str(ROOT / "tools/git.ps1"),
+                     "-C", str(directory), "init"],
+                    capture_output=True, check=True, timeout=30,
+                )
+                self.assertTrue((directory / ".git").is_dir())
+                self.assertEqual(git(directory, "rev-parse", "--show-toplevel"),
+                                 directory.resolve().as_posix())
+                before = target.stat().st_mtime_ns
+                result = subprocess.run(
+                    ["pwsh", "-NoProfile", "-File", str(adapter)],
+                    cwd=directory, capture_output=True, text=True, timeout=30,
+                )
+                if expected is None:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("missing or ambiguous", result.stderr)
+                    self.assertEqual(target.read_text(encoding="utf-8"), source)
+                    self.assertEqual(target.stat().st_mtime_ns, before)
+                    continue
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(target.read_text(encoding="utf-8"), expected)
+                if source == expected:
+                    self.assertEqual(target.stat().st_mtime_ns, before)
+                after = target.stat().st_mtime_ns
+                repeated = subprocess.run(
+                    ["pwsh", "-NoProfile", "-File", str(adapter)],
+                    cwd=directory, capture_output=True, text=True, timeout=30,
+                )
+                self.assertEqual(repeated.returncode, 0, repeated.stderr)
+                self.assertEqual(target.read_text(encoding="utf-8"), expected)
+                self.assertEqual(target.stat().st_mtime_ns, after)
+
     def test_quiet_cancellation_cannot_interrupt_publication(self) -> None:
         workflow = (
             ROOT / ".github" / "workflows" / "test-build-allocate.yaml"

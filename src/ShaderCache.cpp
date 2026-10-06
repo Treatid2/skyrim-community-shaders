@@ -2284,7 +2284,7 @@ namespace SIE
 		template <size_t MaxOffsetsSize>
 		static void ReflectConstantBuffers(ID3D11ShaderReflection& reflector,
 			std::array<size_t, 3>& bufferSizes,
-			std::array<int8_t, MaxOffsetsSize>& constantOffsets,
+			std::array<uint8_t, MaxOffsetsSize>& constantOffsets,
 			uint64_t& vertexDesc,
 			ShaderClass shaderClass, uint32_t descriptor, const RE::BSShader& shader)
 		{
@@ -2386,7 +2386,7 @@ namespace SIE
 							GetVariableIndex(shaderClass, shader, varDesc.Name);
 						const bool variableFound = variableIndex != -1;
 						if (variableFound) {
-							constantOffsets[variableIndex] = (int8_t)(varDesc.StartOffset / 4);
+							constantOffsets[variableIndex] = static_cast<uint8_t>(varDesc.StartOffset / 4);
 						} else {
 							logger::trace("Unknown variable name {} in {} shader {}::{:X}",
 								varDesc.Name, magic_enum::enum_name(shaderClass),
@@ -2404,7 +2404,7 @@ namespace SIE
 									const auto variableArrayIndex =
 										GetVariableIndex(shaderClass, shader, arrayName.c_str());
 									if (variableArrayIndex != -1) {
-										constantOffsets[variableArrayIndex] = static_cast<int8_t>(varDesc.StartOffset / 4);
+										constantOffsets[variableArrayIndex] = static_cast<uint8_t>(varDesc.StartOffset / 4);
 									} else {
 										logger::debug("Unknown variable name {} in {} shader {}::{:X}",
 											arrayName, magic_enum::enum_name(shaderClass),
@@ -2420,7 +2420,7 @@ namespace SIE
 											GetVariableIndex(shaderClass, shader, varName.c_str());
 										if (variableArrayElementIndex != -1) {
 											constantOffsets[variableArrayElementIndex] =
-												static_cast<int8_t>((varDesc.StartOffset + elementSize * arrayIndex) / 4);
+												static_cast<uint8_t>((varDesc.StartOffset + elementSize * arrayIndex) / 4);
 										} else {
 											logger::debug(
 												"Unknown variable name {} in {} shader {}::{:X}", varName,
@@ -2921,7 +2921,7 @@ namespace SIE
 					descriptor);
 			} else {
 				std::array<size_t, 3> bufferSizes = { 0, 0, 0 };
-				std::ranges::fill(newShader->constantTable, (int8_t)0);
+				std::ranges::fill(newShader->constantTable, static_cast<uint8_t>(0));
 				uint64_t dummy;
 				ReflectConstantBuffers(*reflector.get(), bufferSizes, newShader->constantTable,
 					dummy,
@@ -3918,6 +3918,13 @@ namespace SIE
 
 	void ShaderCache::SetEnabled(bool value)
 	{
+		auto& upscaling = globals::features::upscaling;
+		std::unique_lock<std::recursive_mutex> renderScaleAuthorityLock(
+			upscaling.perfModeRenderTargetRecreateQueueMutex,
+			std::defer_lock);
+		if (globals::game::isVR)
+			renderScaleAuthorityLock.lock();
+
 		const auto action = ShaderCacheEnablePolicy::Resolve({
 			.enabled = IsEnabled(),
 			.enableRequested = IsEnableRequested(),
@@ -3934,7 +3941,6 @@ namespace SIE
 			isEnabled.store(true, std::memory_order_release);
 
 			if (globals::game::isVR) {
-				auto& upscaling = globals::features::upscaling;
 				if (ShaderCacheDisablePolicy::ShouldRequestRelatchOnEnable({
 						.enableAlreadyRequested = enableAlreadyRequested,
 						.vrRenderScaleRequested = upscaling.IsRenderScaleModeRequested(),
@@ -3975,33 +3981,19 @@ namespace SIE
 
 	void ShaderCache::ServicePendingDisable()
 	{
-		// Status resolution crosses render-scale controller state; stable frames
-		// must stop at the atomic pending flag.
-		const bool pendingDisable =
-			pendingDisableAfterVRNativeRestore.load(std::memory_order_acquire);
-		if (!pendingDisable)
-			return;
-
-		const bool enableStillRequested = IsEnableRequested();
-		const auto action = ShaderCacheDisablePolicy::ResolvePendingDisable({
-			.pendingDisable = pendingDisable,
-			.enableRequested = enableStillRequested,
-			.nativeTargetsRestored = false,
-		});
-		if (action == ShaderCacheDisablePolicy::PendingDisableAction::Cancel) {
-			pendingDisableAfterVRNativeRestore.store(false, std::memory_order_release);
-			return;
-		}
-
 		auto& upscaling = globals::features::upscaling;
-		if (upscaling.GetVRRenderScaleModeStatus() !=
-			Upscaling::VRRenderScaleStatus::Disabled) {
-			return;
+		const auto action = ShaderCacheDisablePolicy::ApplyPendingDisable(
+			upscaling.perfModeRenderTargetRecreateQueueMutex,
+			pendingDisableAfterVRNativeRestore,
+			enableRequested,
+			isEnabled,
+			[&upscaling] {
+				return upscaling.GetVRRenderScaleModeStatus() ==
+			           Upscaling::VRRenderScaleStatus::Disabled;
+			});
+		if (action == ShaderCacheDisablePolicy::PendingDisableAction::Complete) {
+			logger::info("Native VR render targets restored; custom shaders disabled");
 		}
-
-		pendingDisableAfterVRNativeRestore.store(false, std::memory_order_release);
-		isEnabled.store(false, std::memory_order_release);
-		logger::info("Native VR render targets restored; custom shaders disabled");
 	}
 
 	bool ShaderCache::IsAsync() const
@@ -4032,6 +4024,22 @@ namespace SIE
 	bool ShaderCache::IsDiskCache() const
 	{
 		return isDiskCache.load(std::memory_order_acquire);
+	}
+
+	ShaderCache::CompileContextSnapshot ShaderCache::GetCompileContextSnapshot() const
+	{
+		const auto state = CaptureGlobalCompileState();
+		return {
+			.developerMode = state.developerMode,
+			.virtualReality = state.isVR,
+			.partialPrecision = state.partialPrecision,
+			.avoidFlowControl = state.avoidFlowControl,
+			.shaderDefinesCanonical = state.shaderDefines->canonicalText,
+			.shaderDefinesSuffix = Util::GetShaderDefinesSuffix(state.shaderDefines->canonicalText),
+			.globalCompileStateDigest = state.digest.ToHex(),
+			.shaderCacheAbiId = std::string(BuildProvenance::GetShaderCacheAbiId()),
+			.shaderCompilerIdentity = BuildProvenance::GetShaderCompilerIdentity(),
+		};
 	}
 
 	void ShaderCache::SetDiskCache(bool value)

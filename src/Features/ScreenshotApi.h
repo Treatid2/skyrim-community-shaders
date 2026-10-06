@@ -3,6 +3,8 @@
 #include "Api/ServiceFoundation.h"
 #include "Features/ScreenshotApiPolicy.h"
 #include "ScreenshotManifestSnapshot.h"
+#include "ScreenshotStorageSecurity.h"
+#include "ScreenshotWorkerThread.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -54,12 +56,14 @@ public:
 		std::string_view a_actualSourceKind = {});
 	void OnArtifactQueued(std::string_view a_requestId, const std::filesystem::path& a_path);
 	void OnArtifactEncoding(std::string_view a_requestId) noexcept;
+	/** Successful publication requires the metadata returned by the committing producer handle. */
 	void OnArtifactTerminal(
 		std::string_view a_requestId,
 		bool a_success,
 		const std::filesystem::path& a_path,
 		std::string_view a_error = {},
-		const json* a_actual = nullptr) noexcept;
+		const json* a_actual = nullptr,
+		const CSX::ScreenshotStorage::CommittedArtifact* a_committed = nullptr) noexcept;
 	void OnSourceTerminal(std::string_view a_requestId, std::string_view a_state, std::string_view a_error = {}) noexcept;
 	void OnFeatureDisabled(std::string_view a_reason);
 	void BeginShutdown(std::string_view a_reason);
@@ -134,6 +138,7 @@ private:
 		std::string failurePolicy = "continue";
 		bool stopRequested = false;
 		bool cancelRequested = false;
+		bool preparationPending = false;
 		bool abortRequested = false;
 		std::string abortCode;
 		bool finalizing = false;
@@ -144,11 +149,39 @@ private:
 		uint64_t manifestGeneration = 0;
 		uint64_t finalManifestGeneration = 0;
 		std::filesystem::path directory;
+		std::shared_ptr<CSX::ScreenshotStorage::DirectoryLease> directoryLease;
 		std::filesystem::path partialManifestPath;
 		std::filesystem::path finalManifestPath;
 		std::shared_ptr<const ManifestChildNode> manifestChildren;
 		std::size_t childCount = 0;
 		json packaging = json::object();
+	};
+
+	struct DirectoryPreparationWork
+	{
+		std::string requestId;
+		json capture = json::object();
+		std::filesystem::path configuredDirectory;
+		std::filesystem::path directory;
+		std::shared_ptr<CSX::ScreenshotStorage::DirectoryLease> directoryLease;
+		bool success = false;
+		bool cancelled = false;
+		std::string error = "sequence destination preparation failed";
+		uint32_t applicationFailures = 0;
+		std::chrono::steady_clock::time_point nextApplicationAttempt{};
+	};
+
+	struct ManifestWorkerState;
+	struct PreparationWorkerState
+	{
+		std::mutex mutex;
+		std::condition_variable_any condition;
+		std::list<DirectoryPreparationWork> jobs;
+		std::list<DirectoryPreparationWork> results;
+		std::shared_ptr<ManifestWorkerState> publicationState;
+		std::size_t outstanding = 0;
+		bool stopRequested = false;
+		bool exited = false;
 	};
 
 	struct ManifestJob
@@ -158,6 +191,7 @@ private:
 		bool final = false;
 		std::filesystem::path destination;
 		std::filesystem::path partialPath;
+		std::shared_ptr<CSX::ScreenshotStorage::DirectoryLease> directoryLease;
 		json header = json::object();
 		std::shared_ptr<const ManifestChildNode> children;
 	};
@@ -189,6 +223,7 @@ private:
 		std::condition_variable_any condition;
 		std::list<ManifestWork> jobs;
 		std::deque<std::shared_ptr<const ManifestChildNode>> retiredChildren;
+		std::unordered_map<std::string, SequenceRecord> retiredSequences;
 		std::list<ManifestWork> results;
 		std::size_t outstanding = 0;
 		bool resultApplicationActive = false;
@@ -231,15 +266,17 @@ private:
 	uint64_t failedArtifacts = 0;
 	bool acceptingRequests = true;
 	std::shared_ptr<ManifestWorkerState> manifestWorkerState;
-	std::thread manifestWorker;
+	std::shared_ptr<PreparationWorkerState> preparationWorkerState;
+	std::unique_ptr<CSX::Screenshot::WorkerThread<ManifestWorkerState>> manifestWorker;
+	std::unique_ptr<CSX::Screenshot::WorkerThread<PreparationWorkerState>> preparationWorker;
 	// Both service loops are explicitly stopped and joined before coordinator
 	// state or the isolated manifest worker can be released.
 	std::jthread manifestResultDrainer;
 	std::jthread dispatchDeadlineWatchdog;
 
 	static constexpr uint32_t kContractMajor = 1;
-	static constexpr uint32_t kContractMinor = 0;
-	static constexpr uint32_t kSchemaRevision = 1;
+	static constexpr uint32_t kContractMinor = 1;
+	static constexpr uint32_t kSchemaRevision = 2;
 	static constexpr std::size_t kMaximumRequests = 256;
 	static constexpr std::size_t kMaximumEvents = 4096;
 	static constexpr std::size_t kMaximumCommands = 1024;
@@ -250,7 +287,8 @@ private:
 	json NormalizeCaptureDescriptor(
 		const ScreenshotFeature& a_feature,
 		const json& a_request,
-		bool a_addSeparateEyeOutputs = false) const;
+		bool a_addSeparateEyeOutputs = false,
+		bool a_deferDestination = false) const;
 	json ValidateSettingsPatch(const json& a_patch) const;
 	void ApplySettingsPatch(ScreenshotFeature& a_feature, const json& a_patch) const;
 	json BuildSettings(const ScreenshotFeature& a_feature) const;
@@ -288,6 +326,10 @@ private:
 	void FinalizeSequenceLocked(SequenceRecord& a_sequence, const ManifestResult* a_manifestResult);
 	void QueueSequenceManifestLocked(SequenceRecord& a_sequence, bool a_final);
 	bool DrainManifestResultsLocked();
+	void DrainPreparationResultsLocked();
+	bool CanAdmitPreparationLocked() const;
+	void CancelQueuedPreparationLocked(std::string_view a_requestId);
+	static void PreparationWorkerLoop(std::shared_ptr<PreparationWorkerState> a_state);
 	static void ManifestWorkerLoop(std::shared_ptr<ManifestWorkerState> a_state);
 	void ManifestResultLoop(std::stop_token a_stopToken);
 	std::optional<DueFrame> PrepareDueFrameLocked(uint64_t a_engineFrame);
@@ -300,7 +342,8 @@ private:
 	void CancelQueuedDispatchesLocked(std::string_view a_code, std::string_view a_reason);
 
 	static std::filesystem::path ResolveDestinationDirectory(
-		const ScreenshotFeature& a_feature,
+		const std::filesystem::path& a_configuredDirectory,
 		const json& a_capture,
-		bool a_sequence = false);
+		bool a_sequence = false,
+		std::filesystem::path* a_approvedRoot = nullptr);
 };

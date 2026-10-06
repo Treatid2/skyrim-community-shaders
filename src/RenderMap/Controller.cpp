@@ -23,7 +23,8 @@ namespace CSX::RenderMap
 		completedHistoryLimit(std::max<std::size_t>(a_completedHistoryLimit, 1))
 	{}
 
-	ControlStatus CaptureController::Start(CollectorConfig a_config, CaptureDescriptor& a_output)
+	ControlStatus CaptureController::Start(CollectorConfig a_config, CaptureDescriptor& a_output,
+		const std::function<void(const CaptureDescriptor&)>& a_prepare)
 	{
 		std::lock_guard lock(mutex);
 		if (active || GetRuntime().IsCapturing() || GetRuntime().IsCaptureDraining())
@@ -41,6 +42,8 @@ namespace CSX::RenderMap
 				.config = a_config,
 			};
 			a_output = *active;
+			if (a_prepare)
+				a_prepare(*active);
 		} catch (...) {
 			active.reset();
 			return ControlStatus::kAllocationFailed;
@@ -121,9 +124,11 @@ namespace CSX::RenderMap
 	ControllerSnapshot CaptureController::GetStatus() const
 	{
 		std::lock_guard lock(mutex);
+		const auto window = GetRuntime().GetCaptureWindow();
 		ControllerSnapshot output{
 			.active = active,
 			.accepting = active.has_value() && GetRuntime().IsCapturing(),
+			.window = window,
 		};
 		output.completedCaptureIds.reserve(completed.size());
 		for (const auto& capture : completed)

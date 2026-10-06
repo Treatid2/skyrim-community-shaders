@@ -1,3 +1,4 @@
+#include "Api/ColourPipelineProbeDevBenchBridge.h"
 #include "Api/EditorDevBenchBridge.h"
 #include "Api/EditorService.h"
 #include "Api/FeatureDevBenchBridge.h"
@@ -26,6 +27,7 @@
 #include "MenuDevBenchBridge.h"
 #include "PerformanceTuningDevBenchBridge.h"
 #include "ProfilerDevBenchBridge.h"
+#include "RenderMap/DevBenchBridge.h"
 #include "SceneSettingsManager.h"
 #include "ScreenshotDevBenchBridge.h"
 #include "ShaderCache.h"
@@ -36,8 +38,6 @@
 #include "ENB/ENBSeriesAPI.h"
 
 #include <atomic>
-
-#define DLLEXPORT __declspec(dllexport)
 
 std::list<std::string> errors;
 
@@ -122,7 +122,7 @@ void InitializeLog([[maybe_unused]] spdlog::level::level_enum a_level = spdlog::
 	spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [%t] [%s:%#] %v");
 }
 
-extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_skse)
+SKSE_PLUGIN_LOAD(const SKSE::LoadInterface* a_skse)
 {
 #ifndef NDEBUG
 	while (!REX::W32::IsDebuggerPresent()) {};
@@ -135,7 +135,7 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	return Load();
 }
 
-extern "C" DLLEXPORT constinit auto SKSEPlugin_Version = []() noexcept {
+SKSE_EXPORT constinit auto SKSEPlugin_Version = []() noexcept {
 	SKSE::PluginVersionData v;
 	v.PluginName(Plugin::NAME.data());
 	v.PluginVersion(Plugin::VERSION);
@@ -144,7 +144,7 @@ extern "C" DLLEXPORT constinit auto SKSEPlugin_Version = []() noexcept {
 	return v;
 }();
 
-extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Query(const SKSE::QueryInterface*, SKSE::PluginInfo* pluginInfo)
+SKSE_PLUGIN_QUERY(const SKSE::QueryInterface*, SKSE::PluginInfo* pluginInfo)
 {
 	pluginInfo->name = SKSEPlugin_Version.pluginName;
 	pluginInfo->infoVersion = SKSE::PluginInfo::kVersion;
@@ -170,10 +170,12 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 			CSX::Api::ProfilerApiDevBenchBridge::Install();
 			ScreenshotDevBenchBridge::Install();
 			CSX::Api::UpscalingDevBenchBridge::Install();
+			CSX::Api::ColourPipelineProbeDevBenchBridge::Install();
 			CSX::Api::WeatherDevBenchBridge::Install();
 			CSX::Api::EditorDevBenchBridge::Install();
 			CSX::Api::FeatureDevBenchBridge::Install();
 			CSX::Api::ShaderDevBenchBridge::Install();
+			CSX::RenderMap::DevBenchBridge::Install();
 			break;
 		}
 	case SKSE::MessagingInterface::kPostPostLoad:
@@ -185,10 +187,12 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 				// CSX's listener ran first, this is the first deterministic retry after
 				// all PostLoad listeners have completed.
 				CSX::Api::UpscalingDevBenchBridge::Install();
+				CSX::Api::ColourPipelineProbeDevBenchBridge::Install();
 				CSX::Api::WeatherDevBenchBridge::Install();
 				CSX::Api::EditorDevBenchBridge::Install();
 				CSX::Api::FeatureDevBenchBridge::Install();
 				CSX::Api::ShaderDevBenchBridge::Install();
+				CSX::RenderMap::DevBenchBridge::Install();
 				Deferred::Hooks::Install();
 				Hooks::Install();
 				EngineFix::InstallOnPostPostLoadFixes();
@@ -290,8 +294,10 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 				ScreenshotDevBenchBridge::Install();
 				CSX::Api::ProfilerApiDevBenchBridge::Install();
 				CSX::Api::UpscalingDevBenchBridge::Install();
+				CSX::Api::ColourPipelineProbeDevBenchBridge::Install();
 				CSX::Api::WeatherDevBenchBridge::Install();
 				CSX::Api::ShaderDevBenchBridge::Install();
+				CSX::RenderMap::DevBenchBridge::Install();
 				globals::state->startupMenuInitializationComplete.store(true, std::memory_order_release);
 			}
 

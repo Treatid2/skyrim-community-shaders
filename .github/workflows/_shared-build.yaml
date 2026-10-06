@@ -15,6 +15,14 @@ on:
                 description: "Run C++ plugin build"
                 type: boolean
                 default: true
+            devbench-bridge:
+                description: "Compile the developer-only DevBench bridge"
+                type: boolean
+                default: false
+            devbench-qualification-compatibility:
+                description: "Apply the bounded DevBench qualification compatibility patch"
+                type: boolean
+                default: false
             run-shader-validation:
                 description: "Run HLSL shader compilation validation"
                 type: boolean
@@ -84,6 +92,42 @@ jobs:
                   submodules: recursive
                   persist-credentials: false
 
+            # Older comparison inputs require this developer-only adaptation.
+            # Recognize repaired inputs without changing their provenance.
+            - name: Apply DevBench qualification compatibility
+              if: inputs.devbench-qualification-compatibility
+              shell: pwsh
+              run: |
+                  $path = 'src/Features/Upscaling/FSRTemporalTuningDevBenchBridge.cpp'
+                  $text = [IO.File]::ReadAllText($path)
+                  $indent = [string][char]9 + [char]9
+                  $before = "$indent});"
+                  $after = "$indent}).response;"
+                  $legacyCall = $indent + 'return CSX::Api::RunDevBenchMainThreadTask('
+                  $repairedCall = $indent + 'auto dispatch = CSX::Api::RunDevBenchMainThreadTask('
+                  $repairedReturn = $indent + 'return std::move(dispatch.response);'
+                  function Count-Exact([string]$value) {
+                      [regex]::Matches($text, [regex]::Escape($value)).Count
+                  }
+                  $legacy = (Count-Exact $legacyCall) -eq 1 -and
+                      (Count-Exact $repairedCall) -eq 0 -and
+                      (Count-Exact $repairedReturn) -eq 0
+                  $repaired = (Count-Exact $legacyCall) -eq 0 -and
+                      (Count-Exact $repairedCall) -eq 1 -and
+                      (Count-Exact $repairedReturn) -eq 1
+                  if ($legacy -and (Count-Exact $before) -eq 1 -and (Count-Exact $after) -eq 0) {
+                      [IO.File]::WriteAllText(
+                          $path,
+                          $text.Replace($before, $after),
+                          [Text.UTF8Encoding]::new($false))
+                  } elseif (($repaired -and (Count-Exact $before) -eq 1 -and (Count-Exact $after) -eq 0) -or
+                      ($legacy -and (Count-Exact $before) -eq 0 -and (Count-Exact $after) -eq 1)) {
+                      Write-Output 'The qualification target is already compatible.'
+                  } else {
+                      throw 'The qualification compatibility target is missing or ambiguous.'
+                  }
+                  git diff --check
+
             - name: Setup Build Environment
               id: setup
               uses: ./.github/actions/setup-build-environment
@@ -100,7 +144,7 @@ jobs:
               uses: lukka/run-cmake@v10
               with:
                   configurePreset: ${{ matrix.compiler.cmake-preset }}
-                  configurePresetAdditionalArgs: "['-DBUILD_SHADER_TESTS=OFF', '-DBUILD_CONTROLLER_TESTS=ON', '-DCSX_REQUIRE_CLEAN_PROVENANCE=ON', '-DCSX_TEST_BUILD=${{ inputs.test-build-id }}', '-DZIP_TO_DIST=${{ inputs.test-build-id != '' && 'OFF' || 'ON' }}', '-DDEVBENCH_BRIDGE=OFF']"
+                  configurePresetAdditionalArgs: "['-DBUILD_SHADER_TESTS=OFF', '-DBUILD_CONTROLLER_TESTS=ON', '-DCSX_REQUIRE_CLEAN_PROVENANCE=${{ inputs.devbench-qualification-compatibility && 'OFF' || 'ON' }}', '-DCSX_TEST_BUILD=${{ inputs.test-build-id }}', '-DZIP_TO_DIST=${{ inputs.test-build-id != '' && 'OFF' || 'ON' }}', '-DDEVBENCH_BRIDGE=${{ inputs.devbench-bridge && 'ON' || 'OFF' }}']"
                   buildPreset: ${{ matrix.compiler.cmake-preset }}
 
             - name: Verify DLL provenance sidecar

@@ -23,6 +23,14 @@ file(READ
     _upscaling_source
 )
 file(READ
+    "${PROJECT_ROOT}/src/Features/Upscaling/VRVendorRelatchPolicy.h"
+    _vendor_relatch_policy
+)
+file(READ
+    "${PROJECT_ROOT}/tests/vr_vendor_relatch_policy_test.cpp"
+    _vendor_relatch_test
+)
+file(READ
     "${PROJECT_ROOT}/src/State.cpp"
     _state_source
 )
@@ -37,6 +45,22 @@ file(READ
 file(READ
     "${PROJECT_ROOT}/src/Features/Upscaling/FidelityFX.cpp"
     _fidelityfx_source
+)
+file(READ
+    "${PROJECT_ROOT}/src/Features/Upscaling/FidelityFX.h"
+    _fidelityfx_header
+)
+file(READ
+    "${PROJECT_ROOT}/src/Features/Upscaling/FSRColorContractDevBenchBridge.cpp"
+    _fsr_color_contract_bridge
+)
+file(READ
+    "${PROJECT_ROOT}/src/Features/Upscaling/FSRColorContractPolicy.h"
+    _fsr_color_contract_policy
+)
+file(READ
+    "${PROJECT_ROOT}/src/Features/Upscaling/FSRColorContractReceiptPolicy.h"
+    _fsr_color_contract_receipt_policy
 )
 file(READ
     "${PROJECT_ROOT}/docs/development/vr-render-scale-replacement-telemetry.md"
@@ -195,6 +219,181 @@ foreach(_forbidden_watchdog_hot_path IN ITEMS
     endif()
 endforeach()
 
+file(READ
+    "${PROJECT_ROOT}/src/ShaderCache.cpp"
+    _shader_cache_source
+)
+
+string(FIND
+    "${_upscaling_source}"
+    "bool Upscaling::RecordVRRenderScaleTransitionRequested"
+    _fallback_transaction_start
+)
+string(FIND
+    "${_upscaling_source}"
+    "uint64_t Upscaling::AllocateVRRenderScaleTransitionEpoch"
+    _fallback_transaction_end
+)
+if(_fallback_transaction_start EQUAL -1 OR
+   _fallback_transaction_end EQUAL -1 OR
+   _fallback_transaction_end LESS_EQUAL _fallback_transaction_start)
+    message(FATAL_ERROR "Fallback publication transaction was not found")
+endif()
+math(EXPR _fallback_transaction_length
+    "${_fallback_transaction_end} - ${_fallback_transaction_start}"
+)
+string(SUBSTRING
+    "${_upscaling_source}"
+    ${_fallback_transaction_start}
+    ${_fallback_transaction_length}
+    _fallback_transaction
+)
+foreach(_required_fallback_transaction_contract IN ITEMS
+    "std::unique_lock queueLock("
+    "std::unique_lock requestLock("
+    "std::scoped_lock lock(vrRenderScaleTransitionControllerMutex)"
+    "TryResolveVRStartupNativeFallbackLocked(a_request)"
+    "requestLock.unlock()"
+    "queueLock.unlock()"
+)
+    string(FIND
+        "${_fallback_transaction}"
+        "${_required_fallback_transaction_contract}"
+        _fallback_transaction_contract_position
+    )
+    if(_fallback_transaction_contract_position EQUAL -1)
+        message(FATAL_ERROR
+            "Fallback publication is not one owned transaction: ${_required_fallback_transaction_contract}"
+        )
+    endif()
+endforeach()
+string(FIND
+    "${_fallback_transaction}"
+    "TryResolveVRStartupNativeFallbackLocked(a_request)"
+    _fallback_resolve_position
+)
+string(FIND
+    "${_fallback_transaction}"
+    "requestLock.unlock()"
+    _fallback_request_unlock_position
+)
+if(_fallback_resolve_position GREATER _fallback_request_unlock_position)
+    message(FATAL_ERROR
+        "Fallback resolution occurs after request ownership is released"
+    )
+endif()
+string(FIND
+    "${_upscaling_source}"
+    "ResolveVRStartupNativeFallbackAfterPublication"
+    _split_fallback_resolution_position
+)
+if(NOT _split_fallback_resolution_position EQUAL -1)
+    message(FATAL_ERROR
+        "Fallback proof and clear remain split from controller publication"
+    )
+endif()
+
+foreach(_atomic_fallback_contract IN ITEMS
+    "vrStartupRenderScaleNativeFallbackState"
+    "InvalidateStartupNativeFallbackRetry("
+    "TryResolveStartupNativeFallbackAtomic("
+    "CoversStartupNativeFallbackAtomicInvalidation()"
+)
+    string(FIND
+        "${_upscaling_header}\n${_upscaling_source}\n${_vendor_relatch_policy}\n${_vendor_relatch_test}"
+        "${_atomic_fallback_contract}"
+        _atomic_fallback_contract_position
+    )
+    if(_atomic_fallback_contract_position EQUAL -1)
+        message(FATAL_ERROR
+            "Atomic fallback invalidation contract is missing: ${_atomic_fallback_contract}"
+        )
+    endif()
+endforeach()
+string(FIND
+    "${_upscaling_header}\n${_upscaling_source}"
+    "vrStartupRenderScaleNativeFallbackRestartRequired"
+    _split_fallback_atomic_position
+)
+if(NOT _split_fallback_atomic_position EQUAL -1)
+    message(FATAL_ERROR
+        "Fallback activation and invalidation remain split across atomics"
+    )
+endif()
+
+string(FIND "${_shader_cache_source}" "void ShaderCache::SetEnabled" _shader_toggle_start)
+string(FIND "${_shader_cache_source}" "void ShaderCache::ServicePendingDisable" _shader_toggle_end)
+if(_shader_toggle_start EQUAL -1 OR _shader_toggle_end EQUAL -1 OR
+   _shader_toggle_end LESS_EQUAL _shader_toggle_start)
+    message(FATAL_ERROR "Shader enable transition boundary was not found")
+endif()
+math(EXPR _shader_toggle_length "${_shader_toggle_end} - ${_shader_toggle_start}")
+string(SUBSTRING
+    "${_shader_cache_source}"
+    ${_shader_toggle_start}
+    ${_shader_toggle_length}
+    _shader_toggle
+)
+string(FIND
+    "${_shader_toggle}"
+    "renderScaleAuthorityLock.lock()"
+    _shader_toggle_lock_position
+)
+string(FIND
+    "${_shader_toggle}"
+    "enableRequested.store(false"
+    _shader_disable_store_position
+)
+if(_shader_toggle_lock_position EQUAL -1 OR
+   _shader_disable_store_position EQUAL -1 OR
+   _shader_toggle_lock_position GREATER _shader_disable_store_position)
+    message(FATAL_ERROR
+        "Shader disable can invalidate Retry admission outside render-scale ownership"
+    )
+endif()
+
+string(FIND "${_shader_cache_source}" "bool ShaderCache::IsAsync" _shader_service_end)
+if(_shader_service_end LESS_EQUAL _shader_toggle_end)
+    message(FATAL_ERROR "Pending shader disable service boundary was not found")
+endif()
+math(EXPR _shader_service_length "${_shader_service_end} - ${_shader_toggle_end}")
+string(SUBSTRING "${_shader_cache_source}" ${_shader_toggle_end}
+    ${_shader_service_length} _shader_service)
+foreach(_service_contract IN ITEMS
+    "ShaderCacheDisablePolicy::ApplyPendingDisable("
+    "upscaling.perfModeRenderTargetRecreateQueueMutex"
+    "pendingDisableAfterVRNativeRestore,"
+    "enableRequested,"
+    "isEnabled,"
+)
+    string(FIND "${_shader_service}" "${_service_contract}" _service_position)
+    if(_service_position EQUAL -1)
+        message(FATAL_ERROR "Pending disable bypasses request authority: ${_service_contract}")
+    endif()
+endforeach()
+string(FIND "${_shader_service}" ".store(" _unowned_service_store)
+if(NOT _unowned_service_store EQUAL -1)
+    message(FATAL_ERROR "Pending disable commits state outside its authority transaction")
+endif()
+file(READ "${PROJECT_ROOT}/src/ShaderCacheDisablePolicy.h" _shader_disable_policy)
+set(_previous_disable_position -1)
+foreach(_transaction_contract IN ITEMS
+    "if (!a_pendingDisable.load("
+    "const std::scoped_lock authorityLock(a_authorityMutex)"
+    "const bool pendingDisable = a_pendingDisable.load("
+    "const bool enableRequested = a_enableRequested.load("
+    "a_nativeTargetsRestored()"
+    "a_pendingDisable.store(false"
+    "a_enabled.store(false"
+)
+    string(FIND "${_shader_disable_policy}" "${_transaction_contract}" _transaction_position)
+    if(_transaction_position EQUAL -1 OR
+       _transaction_position LESS_EQUAL _previous_disable_position)
+        message(FATAL_ERROR "Pending disable transaction ordering changed: ${_transaction_contract}")
+    endif()
+    set(_previous_disable_position ${_transaction_position})
+endforeach()
+
 foreach(_action IN ITEMS
     qualification_status
     qualification_begin
@@ -256,6 +455,204 @@ foreach(_fsr_failure_contract IN ITEMS
 			"FSR failure evidence is missing: ${_fsr_failure_contract}"
 		)
 	endif()
+endforeach()
+
+foreach(_fsr_color_contract IN ITEMS
+    "communityshaders.fsr_color_contract"
+    "expectedRevision"
+    "highDynamicRangeInput"
+    "autoExposure"
+    "sourceColorContractChanged"
+    "SetDevBenchFsrColorContract("
+    "GetDevBenchFsrColorContractStatusSnapshot()"
+    "FSRColorContractPolicy::PlanUpdate("
+    "FSRColorContractPolicy::ContextMatches("
+    "FSRColorContractDevBenchBridge::Install()"
+)
+    string(FIND
+        "${_fsr_color_contract_bridge}\n${_fsr_color_contract_policy}\n${_fsr_color_contract_receipt_policy}\n${_fidelityfx_source}\n${_upscaling_source}"
+        "${_fsr_color_contract}"
+        _fsr_color_contract_position
+    )
+    if(_fsr_color_contract_position EQUAL -1)
+        message(FATAL_ERROR
+            "FSR colour-contract control is missing: ${_fsr_color_contract}"
+        )
+    endif()
+endforeach()
+
+string(REGEX MATCHALL
+    "const std::lock_guard lock\\(devBenchFsrColorContractMutex\\);"
+    _fsr_color_contract_locks
+    "${_fidelityfx_source}\n${_fsr_color_contract_receipt_policy}"
+)
+list(LENGTH _fsr_color_contract_locks _fsr_color_contract_lock_count)
+if(_fsr_color_contract_lock_count LESS 6)
+    message(FATAL_ERROR
+        "FSR colour-contract request, context, and dispatch evidence is not serialized"
+    )
+endif()
+
+string(FIND "${_fsr_color_contract_bridge}"
+    "GetRuntimeUpscalerDispatchSnapshotForRenderThread()"
+    _split_fsr_status_position)
+if(NOT _split_fsr_status_position EQUAL -1)
+    message(FATAL_ERROR
+        "FSR colour-contract status still reads dispatch evidence separately"
+    )
+endif()
+
+foreach(_coherent_fsr_evidence IN ITEMS
+    "FsrColorContractStatusSnapshot"
+    "FsrColorContractSetResult"
+    "devBenchFsrColorContractMutex"
+    "PublishDevBenchFsrColorContext(false, colorContractFlags)"
+    "PublishDevBenchFsrColorContext(true, colorContractFlags)"
+    "GetDevBenchFsrColorContractReplacementState()"
+    "FSRColorContractPolicy::GetReplacementState("
+)
+    string(FIND
+        "${_fidelityfx_header}\n${_fidelityfx_source}"
+        "${_coherent_fsr_evidence}"
+        _coherent_fsr_evidence_position
+    )
+    if(_coherent_fsr_evidence_position EQUAL -1)
+        message(FATAL_ERROR
+            "FSR colour-contract coherent evidence is missing: ${_coherent_fsr_evidence}"
+        )
+    endif()
+endforeach()
+
+foreach(_fsr_set_receipt_contract IN ITEMS
+    "const std::lock_guard lock(a_mutex);"
+    "FSRColorContractReceiptPolicy::ApplySet<FsrColorContractStatusSnapshot>("
+    "GetDevBenchFsrColorContractStatusSnapshotLocked()"
+    "SnapshotJson(setResult.status)"
+    "result[\"accepted\"] = setResult.accepted"
+    "result[\"resultingRevision\"] = setResult.resultingRevision"
+)
+    string(FIND
+        "${_fidelityfx_source}\n${_fidelityfx_header}\n${_fsr_color_contract_bridge}\n${_fsr_color_contract_receipt_policy}"
+        "${_fsr_set_receipt_contract}"
+        _fsr_set_receipt_contract_position
+    )
+    if(_fsr_set_receipt_contract_position EQUAL -1)
+        message(FATAL_ERROR
+            "FSR set response is not one mutex-coherent receipt: ${_fsr_set_receipt_contract}"
+        )
+    endif()
+endforeach()
+
+foreach(_fsr_quarantine_case IN ITEMS "Host" "Runtime")
+    if(_fsr_quarantine_case STREQUAL "Host")
+        set(_fsr_quarantine_start "void FidelityFX::QuarantineHostFSRState")
+        set(_fsr_quarantine_end "void FidelityFX::QuarantineHostFSRContext")
+        set(_fsr_quarantine_clear "ClearDevBenchFsrColorContext(false)")
+        set(_fsr_quarantine_guard "if (fsrHostStateQuarantined)")
+    else()
+        set(_fsr_quarantine_start "void FidelityFX::QuarantineRuntimeUpscalerForSession")
+        set(_fsr_quarantine_end "FidelityFX::RuntimeUpscalerFramePath FidelityFX::GetRuntimeUpscalerProviderFramePath")
+        set(_fsr_quarantine_clear "ClearDevBenchFsrColorContext(true)")
+        set(_fsr_quarantine_guard "if (runtimeUpscalerSessionQuarantined)")
+    endif()
+
+    string(FIND "${_fidelityfx_source}" "${_fsr_quarantine_start}"
+        _fsr_quarantine_function_start)
+    string(FIND "${_fidelityfx_source}" "${_fsr_quarantine_end}"
+        _fsr_quarantine_function_end)
+    if(_fsr_quarantine_function_start EQUAL -1 OR
+        _fsr_quarantine_function_end EQUAL -1 OR
+        _fsr_quarantine_function_end LESS_EQUAL _fsr_quarantine_function_start)
+        message(FATAL_ERROR
+            "${_fsr_quarantine_case} FSR quarantine function boundaries were not found"
+        )
+    endif()
+    math(EXPR _fsr_quarantine_function_length
+        "${_fsr_quarantine_function_end} - ${_fsr_quarantine_function_start}")
+    string(SUBSTRING "${_fidelityfx_source}"
+        ${_fsr_quarantine_function_start}
+        ${_fsr_quarantine_function_length}
+        _fsr_quarantine_function)
+    string(FIND "${_fsr_quarantine_function}" "${_fsr_quarantine_clear}"
+        _fsr_quarantine_clear_position)
+    string(FIND "${_fsr_quarantine_function}" "${_fsr_quarantine_guard}"
+        _fsr_quarantine_guard_position)
+    if(_fsr_quarantine_clear_position EQUAL -1 OR
+        _fsr_quarantine_guard_position EQUAL -1 OR
+        _fsr_quarantine_clear_position GREATER _fsr_quarantine_guard_position)
+        message(FATAL_ERROR
+            "${_fsr_quarantine_case} FSR quarantine does not clear validity before its early return"
+        )
+    endif()
+endforeach()
+
+foreach(_fsr_color_lifecycle_contract IN ITEMS
+    "pendingFsrColorContractReplacement"
+    "fsrColorContractReplacementReady"
+    "colour-contract FSR resource teardown"
+    "colour-contract FSR resource creation"
+)
+    string(FIND "${_upscaling_source}" "${_fsr_color_lifecycle_contract}"
+        _fsr_color_lifecycle_contract_position)
+    if(_fsr_color_lifecycle_contract_position EQUAL -1)
+        message(FATAL_ERROR
+            "FSR colour-contract lifecycle trigger is missing: ${_fsr_color_lifecycle_contract}"
+        )
+    endif()
+endforeach()
+
+string(FIND "${_fidelityfx_source}"
+    "FidelityFX::LifecycleResult FidelityFX::EnsureRuntimeUpscalerContexts"
+    _fsr_runtime_context_function_start)
+string(FIND "${_fidelityfx_source}"
+    "FidelityFX::LifecycleResult FidelityFX::EnsureRuntimeUpscalerSharedResources"
+    _fsr_runtime_context_function_end)
+if(_fsr_runtime_context_function_start EQUAL -1 OR
+    _fsr_runtime_context_function_end EQUAL -1 OR
+    _fsr_runtime_context_function_end LESS_EQUAL _fsr_runtime_context_function_start)
+    message(FATAL_ERROR "Runtime FSR context function boundaries were not found")
+endif()
+math(EXPR _fsr_runtime_context_function_length
+    "${_fsr_runtime_context_function_end} - ${_fsr_runtime_context_function_start}")
+string(SUBSTRING "${_fidelityfx_source}"
+    ${_fsr_runtime_context_function_start}
+    ${_fsr_runtime_context_function_length}
+    _fsr_runtime_context_function)
+
+string(FIND "${_fsr_runtime_context_function}"
+    "const auto providerResult = RecordRuntimeProviderResult(true)"
+    _fsr_provider_admission_position)
+string(FIND "${_fsr_runtime_context_function}"
+    "const auto tuningResult = ConfigureTemporalTuningContexts"
+    _fsr_tuning_admission_position)
+string(FIND "${_fsr_runtime_context_function}"
+    "PublishDevBenchFsrColorContext(true, colorContractFlags)"
+    _fsr_runtime_publish_position)
+if(_fsr_provider_admission_position EQUAL -1 OR
+    _fsr_tuning_admission_position EQUAL -1 OR
+    _fsr_runtime_publish_position EQUAL -1 OR
+    _fsr_runtime_publish_position LESS _fsr_provider_admission_position OR
+    _fsr_runtime_publish_position LESS _fsr_tuning_admission_position)
+    message(FATAL_ERROR
+        "Runtime FSR validity is published before provider and tuning admission"
+    )
+endif()
+
+foreach(_forbidden_fsr_color_contract IN ITEMS
+    "\"persist\""
+    "SetDLSS"
+    "DLSSUsesHDR"
+)
+    string(FIND
+        "${_fsr_color_contract_bridge}"
+        "${_forbidden_fsr_color_contract}"
+        _forbidden_fsr_color_contract_position
+    )
+    if(NOT _forbidden_fsr_color_contract_position EQUAL -1)
+        message(FATAL_ERROR
+            "FSR colour-contract bridge crossed its boundary: ${_forbidden_fsr_color_contract}"
+        )
+    endif()
 endforeach()
 
 string(FIND "${_upscaling_source}" "admittedExistingDLSSProvider"

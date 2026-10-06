@@ -3,6 +3,7 @@
 #include "RenderMap/Runtime.h"
 
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -39,6 +40,7 @@ namespace CSX::RenderMap
 	{
 		std::optional<CaptureDescriptor> active;
 		bool accepting{ false };
+		CaptureWindowSnapshot window;
 		std::vector<std::string> completedCaptureIds;
 	};
 
@@ -47,7 +49,9 @@ namespace CSX::RenderMap
 	public:
 		explicit CaptureController(std::size_t a_completedHistoryLimit = 4);
 
-		ControlStatus Start(CollectorConfig a_config, CaptureDescriptor& a_output);
+		/// Prepares external capture state before activating hooks; preparation must not re-enter the controller.
+		ControlStatus Start(CollectorConfig a_config, CaptureDescriptor& a_output,
+			const std::function<void(const CaptureDescriptor&)>& a_prepare = {});
 		ControlStatus Stop(std::string_view a_captureId, std::shared_ptr<const CompletedCapture>& a_output);
 		ControllerSnapshot GetStatus() const;
 		std::shared_ptr<const CompletedCapture> GetCompleted(std::string_view a_captureId) const;
