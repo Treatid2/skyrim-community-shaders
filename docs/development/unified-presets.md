@@ -99,6 +99,8 @@ independent of command-line paths. Before writing, the generator resolves path
 aliases and proves that all outputs are distinct from the policy, base,
 generator, focused test, workflow, documentation, refresh source, and complete
 runtime-source inventory.
+Native identity queries use extended-length Windows paths so deeply nested
+outputs retain the same alias and publication checks.
 
 A normal generation records a durable transaction journal before staging,
 backs up every existing target, publishes all seven outputs, verifies their
