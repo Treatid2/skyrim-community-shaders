@@ -37,9 +37,9 @@ namespace
 	constexpr double kFeatureCostMeasurementSeconds = 5.0;
 	constexpr double kFeatureCostMeasurementMilliseconds = kFeatureCostMeasurementSeconds * 1000.0;
 	constexpr double kFeatureCostIntervalMilliseconds = 1000.0;
-	constexpr double kFeatureCostInitialWaitSeconds = 5.0;
-	constexpr double kFeatureCostComparisonWaitSeconds = 9.0;
-	constexpr double kFeatureCostRestoreWaitSeconds = 0.5;
+	constexpr double kFeatureCostInitialWaitSeconds = 10.0;
+	constexpr double kFeatureCostComparisonWaitSeconds = 10.0;
+	constexpr double kFeatureCostRestoreWaitSeconds = 1.0;
 	constexpr double kFeatureCostRestartCooldownSeconds = 10.0;
 	constexpr double kFeatureCostMaximumRunSeconds = 45.0;
 	constexpr std::size_t kFeatureCostMaximumMissingMetricSamples = 2;
@@ -57,7 +57,7 @@ namespace
 		return globals::game::isVR && globals::features::upscaling.IsVRRenderScaleModeActive();
 	}
 
-	constexpr std::array<std::string_view, 21> kPerformanceFeatureOrder = {
+	constexpr std::array<std::string_view, 22> kPerformanceFeatureOrder = {
 		"Upscaling",
 		"VR",
 		"AdaptiveBrightness",
@@ -77,6 +77,7 @@ namespace
 		"TruePBR",
 		"ExtendedMaterials",
 		"FoliageLighting",
+		"GrassOptimizations",
 		"GrassLighting",
 		"GrassCollision"
 	};
@@ -117,6 +118,7 @@ namespace
 		FeatureCostMetricSample gameGpu;
 		FeatureCostMetricSample gameCpu;
 		uint32_t lastFrameCount = 0;
+		std::deque<Util::FlatFrameTiming::PendingSample<kFeatureCostMeasurementBlockCount>> pendingFlatSamples;
 	};
 
 	struct FeatureCostMetricDelta
@@ -230,6 +232,9 @@ namespace
 		double runElapsedMs = 0.0;
 		double phaseElapsedMs = 0.0;
 		std::uint32_t frameCount = 0;
+		std::uint32_t sampleFrameCount = 0;
+		std::uint64_t samplePresentId = 0;
+		bool flatTiming = false;
 		float frameMs = 0.0f;
 		float gameGpuMs = 0.0f;
 		float gameCpuMs = 0.0f;
@@ -506,6 +511,9 @@ namespace
 		sample.runElapsedMs = std::max(0.0, currentTime - runStartTime) * 1000.0;
 		sample.phaseElapsedMs = std::max(0.0, currentTime - phaseStartTime) * 1000.0;
 		sample.frameCount = summary.frameCount;
+		sample.sampleFrameCount = summary.flatTiming ? summary.sampleFrameCount : summary.frameCount;
+		sample.samplePresentId = summary.samplePresentId;
+		sample.flatTiming = summary.flatTiming;
 		sample.hasFrame = summary.hasFrameSample && IsValidFeatureCostTiming(summary.frameSampleMs);
 		sample.hasGameGpu = summary.hasGameGpuSample && IsValidFeatureCostTiming(summary.gameGpuSampleMs);
 		sample.hasGameCpu = summary.hasGameCpuSample && IsValidFeatureCostTiming(summary.gameCpuSampleMs);
@@ -723,9 +731,10 @@ namespace
 		if (shortName == "VR") {
 			json mask = MakeJsonMask({ "EnableDepthBufferCullingExterior",
 				"EnableDepthBufferCullingInterior",
-				"DepthCullingPerformanceMode",
+				"DepthCullingMethod",
 				"DepthCullingLegacyMode",
-				"MinOccludeeBoxExtent",
+				"MinOccludeeBoxExtentExterior",
+				"MinOccludeeBoxExtentInterior",
 				"EnableStereoBlend",
 				"EnableLightingFoveation",
 				"EnableSSRFoveation",
@@ -902,9 +911,6 @@ namespace
 
 		if (feature->GetShortName() == "VR") {
 			feature->RestorePerformanceCostMeasurementState(restoredSettings);
-			if (globals::features::vr.gMinOccludeeBoxExtent) {
-				*globals::features::vr.gMinOccludeeBoxExtent = globals::features::vr.settings.MinOccludeeBoxExtent;
-			}
 		}
 	}
 
@@ -1002,6 +1008,27 @@ namespace
 		return PerformanceUserDefaultsRestoreResult::Restored;
 	}
 
+	void ResolveFlatFeatureCostSamples(FeatureCostSample& sample, const ProfilingRenderer::PerformanceTimingSummary& summary, bool finalize = false)
+	{
+		Util::FlatFrameTiming::ResolvePending(sample.pendingFlatSamples, summary.flatSamples,
+			summary.flatPresentId, summary.flatTimingEpoch, finalize, [&](const auto& pending, const auto* match) {
+				const bool hasGpu = match && match->resolved && match->hasGpu;
+				const bool hasCpu = match && match->hasCpu;
+				if (!hasGpu)
+					RecordMissingFeatureCostSample(sample.gameGpu);
+				if (!hasCpu)
+					RecordMissingFeatureCostSample(sample.gameCpu);
+				for (std::size_t block = 0; block < pending.weights.size(); ++block) {
+					if (pending.weights[block] <= 0.0)
+						continue;
+					if (hasGpu)
+						AddFeatureCostMoment(sample.gameGpu, block, match->gpuMs, pending.weights[block]);
+					if (hasCpu)
+						AddFeatureCostMoment(sample.gameCpu, block, match->cpuMs, pending.weights[block]);
+				}
+			});
+	}
+
 	FeatureCostSampleResult AddFeatureCostSample(
 		FeatureCostSample& sample,
 		const ProfilingRenderer::PerformanceTimingSummary& summary)
@@ -1042,10 +1069,12 @@ namespace
 			summary.hasGameGpuSample && IsValidFeatureCostTiming(summary.gameGpuSampleMs);
 		const bool validGameCpuSample =
 			summary.hasGameCpuSample && IsValidFeatureCostTiming(summary.gameCpuSampleMs);
-		if (!validGameGpuSample)
+		if (!summary.flatTiming && !validGameGpuSample)
 			RecordMissingFeatureCostSample(sample.gameGpu);
-		if (!validGameCpuSample)
+		if (!summary.flatTiming && !validGameCpuSample)
 			RecordMissingFeatureCostSample(sample.gameCpu);
+		if (summary.flatTiming)
+			sample.pendingFlatSamples.push_back({ summary.flatPresentId + 1, summary.flatTimingEpoch, {} });
 
 		double remainingSampleWeight = std::min(1.0, remainingDurationMs / frameMs);
 		while (remainingSampleWeight > 1.0e-9) {
@@ -1063,9 +1092,11 @@ namespace
 				break;
 
 			AddFeatureCostMoment(sample.frame, blockIndex, summary.frameSampleMs, chunkWeight);
-			if (validGameGpuSample)
+			if (summary.flatTiming)
+				sample.pendingFlatSamples.back().weights[blockIndex] += chunkWeight;
+			if (!summary.flatTiming && validGameGpuSample)
 				AddFeatureCostMoment(sample.gameGpu, blockIndex, summary.gameGpuSampleMs, chunkWeight);
-			if (validGameCpuSample)
+			if (!summary.flatTiming && validGameCpuSample)
 				AddFeatureCostMoment(sample.gameCpu, blockIndex, summary.gameCpuSampleMs, chunkWeight);
 
 			sample.sampledDurationMs = completesBlock ?
@@ -1390,6 +1421,10 @@ namespace
 		if (!feature || !IsFeatureCostMeasurementActive(state) ||
 			state.phase == FeatureCostMeasurementPhase::AwaitingMenuClose)
 			return;
+		if (current.flatTiming) {
+			ResolveFlatFeatureCostSamples(state.currentSample, current);
+			ResolveFlatFeatureCostSamples(state.testSample, current);
+		}
 
 		if (state.phase == FeatureCostMeasurementPhase::PreparingCurrent) {
 			if (currentTime < state.phaseDeadlineTime || !feature->IsPerformanceCostMeasurementReady())
@@ -1421,6 +1456,10 @@ namespace
 			if (currentTime < state.phaseDeadlineTime || !feature->IsPerformanceCostMeasurementReady())
 				return;
 
+			if (current.flatTiming) {
+				ResolveFlatFeatureCostSamples(state.currentSample, current, true);
+				ResolveFlatFeatureCostSamples(state.testSample, current, true);
+			}
 			FinalizeFeatureCostMeasurement(state);
 			state.phase = FeatureCostMeasurementPhase::Complete;
 			StartFeatureCostRestartCooldown(currentTime);
@@ -2009,6 +2048,8 @@ namespace
 			return "all Foliage Lighting contributions to tree foliage and grass are switched off.";
 		if (shortName == "GrassLighting")
 			return "the Grass Lighting runtime toggle is switched off, so grass uses the basic pixel-shading path; the installed shader permutation and vertex work remain the same in both windows.";
+		if (shortName == "GrassOptimizations")
+			return "grass uses native drawing, with optimized batching, density, mesh LOD and grass Hi-Z switched off. Other grass features keep their current settings.";
 		if (shortName == "GrassCollision")
 			return "Grass Collision is switched off.";
 
@@ -2050,8 +2091,8 @@ namespace
 		}
 		ImGui::EndDisabled();
 		if (auto _tt = Util::HoverTooltipWrapper()) {
-			ImGui::TextWrapped("CS closes automatically for the complete run. Keep the headset and scene still for about 25 seconds; a small overlay shows progress and CS reopens with the results.");
-			ImGui::TextWrapped("After a five-second cooldown following menu closure, current settings are measured as five one-second intervals. The feature then changes to Off/None, waits nine seconds, and measures five more one-second intervals before restoring the exact prior state.");
+			ImGui::TextWrapped("CS closes automatically for the complete run. Keep the headset and scene still for about 31 seconds; a small overlay shows progress and CS reopens with the results.");
+			ImGui::TextWrapped("After a ten-second cooldown following menu closure, current settings are measured as five one-second intervals. The feature then changes to Off/None, waits ten seconds, and measures five more one-second intervals before restoring the exact prior state for one second.");
 			ImGui::TextWrapped("If game-frame timing is interrupted during capture, only that five-second measurement restarts.");
 			ImGui::TextWrapped("GPU and CPU rows tolerate up to two missing raw samples across both states. Three or more make only that row unavailable; missing data never blocks Game or FPS.");
 			ImGui::TextWrapped("The automatic idle/vanity camera remains suppressed for the complete run and its previous delay is restored afterward.");
@@ -2452,6 +2493,14 @@ namespace
 		};
 	}
 
+	void AppendFlatTimingSource(json& timing, const FeatureCostTraceSample& sample)
+	{
+		if (!sample.flatTiming)
+			return;
+		timing["gpuCpuFrameCount"] = sample.samplePresentId != 0 ? json(sample.sampleFrameCount) : json(nullptr);
+		timing["gpuCpuPresentId"] = sample.samplePresentId != 0 ? json(sample.samplePresentId) : json(nullptr);
+	}
+
 	json FeatureCostTraceJson(std::uint64_t afterSequence, std::size_t maximumSamples)
 	{
 		maximumSamples = std::clamp<std::size_t>(maximumSamples, 1, kFeatureCostMaximumTracePageSize);
@@ -2483,6 +2532,7 @@ namespace
 				{ "gameGpuMs", sample.hasGameGpu ? json(sample.gameGpuMs) : json(nullptr) },
 				{ "gameCpuMs", sample.hasGameCpu ? json(sample.gameCpuMs) : json(nullptr) },
 			});
+			AppendFlatTimingSource(samples.back(), sample);
 			nextAfterSequence = sample.sequence;
 		}
 
@@ -2569,6 +2619,7 @@ namespace
 				{ "gameGpuMs", sample.hasGameGpu ? json(sample.gameGpuMs) : json(nullptr) },
 				{ "gameCpuMs", sample.hasGameCpu ? json(sample.gameCpuMs) : json(nullptr) },
 			};
+			AppendFlatTimingSource(latestTiming, sample);
 		}
 
 		const bool sweepKnown = g_upscalingCostSweep.phase != UpscalingCostSweepPhase::Idle;
@@ -2700,7 +2751,7 @@ void PerformanceTuningRenderer::Render()
 			const json settingsStateBefore = selectedFeature->CapturePerformanceSettingsState();
 			ImGui::BeginDisabled(anyMeasurementRunning);
 			ImGui::BeginGroup();
-			selectedFeature->DrawPerformanceSettings(true);
+			selectedFeature->DrawPerformanceSettings(!globals::menu || !globals::menu->IsEssentialsUiMode());
 			ImGui::EndGroup();
 			ImGui::EndDisabled();
 			RenderFeatureCostMeasurement(selectedFeature, selectedCostState);

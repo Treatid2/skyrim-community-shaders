@@ -1,20 +1,27 @@
 #include "VRDepthCullingTemporal.h"
 
-#include "VRDepthCullingTelemetryPolicy.h"
 #include "VRDepthCullingTemporalPolicy.h"
+#include "VRHybridCulling.h"
+#include "VRHybridCullingLifecycle.h"
 
 #include "RE/N/NiCamera.h"
 #include "RE/N/NiPoint3.h"
 
 #include <algorithm>
-#include <array>
 #include <atomic>
-#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <type_traits>
+
+#ifdef DEVBENCH_BRIDGE_ENABLED
+#	include "GpuPass.h"
+#	include "State.h"
+
+#	include <array>
+#	include <chrono>
+#endif
 
 namespace VRDepthCullingTemporal
 {
@@ -42,12 +49,23 @@ namespace VRDepthCullingTemporal
 		// Both hooks execute in order on the render-depth thread.
 		ProducerPose g_producerPose{};
 		std::atomic_bool g_installed{ false };
+		std::atomic_bool g_hybridInstalled{ false };
 		std::atomic_bool g_cullingEnabled{ false };
 		std::atomic_uint64_t g_cullingEpoch{ 1 };
 		std::atomic_uint64_t g_producerPoseEpoch{ 0 };
 		std::atomic<Mode> g_mode{ Mode::Balanced };
 		std::atomic_uint64_t g_policyEpoch{ 2 };
+		RE::BSSceneGraph* g_downscaleScene = nullptr;
+		bool g_suppressedDownscale = false;
+		bool g_replayNativeDownscale = false;
+		bool g_insideOwnedDownscale = false;
+#ifdef DEVBENCH_BRIDGE_ENABLED
 		VRDepthCullingTelemetryPolicy::WriterGate g_telemetryGate;
+		VRDepthCullingTelemetry::TimingCounters g_nativeReadbackTiming, g_outerDownscaleTiming, g_replayDownscaleTiming, g_nativeProducerTiming;
+		VRNativeVisibilityTelemetry::Counters g_nativeVisibility;
+		std::atomic_uint64_t g_measurementWindowId{ 0 }, g_measurementStartEpoch{ 0 };
+		std::atomic_uint32_t g_measurementStartFrame{ 0 };
+		std::atomic_bool g_measurementResetting{ false };
 		std::atomic_uint64_t g_envelopeMisses{ 0 };
 		std::atomic_uint64_t g_recoveryAttempts{ 0 };
 		std::atomic_uint64_t g_objectsInspected{ 0 };
@@ -70,19 +88,11 @@ namespace VRDepthCullingTemporal
 			g_lastPromotedCount.store(0, std::memory_order_relaxed);
 		}
 
-		void UpdateMaximum(std::atomic_uint64_t& a_target, std::uint64_t a_value)
-		{
-			auto current = a_target.load(std::memory_order_relaxed);
-			while (current < a_value &&
-				   !a_target.compare_exchange_weak(
-					   current, a_value, std::memory_order_relaxed, std::memory_order_relaxed)) {}
-		}
-
 		struct RecoveryTelemetryScope
 		{
-			RecoveryTelemetryScope()
+			RecoveryTelemetryScope() : writer(g_telemetryGate)
 			{
-				if (!g_telemetryGate.TryEnter())
+				if (!writer)
 					return;
 				active = true;
 				started = std::chrono::steady_clock::now();
@@ -106,11 +116,11 @@ namespace VRDepthCullingTemporal
 				g_totalEligible.fetch_add(eligible, std::memory_order_relaxed);
 				g_totalPromoted.fetch_add(promoted, std::memory_order_relaxed);
 				g_totalDurationNanoseconds.fetch_add(elapsed, std::memory_order_relaxed);
-				UpdateMaximum(g_maximumDurationNanoseconds, elapsed);
+				VRDepthCullingTelemetryPolicy::UpdateMaximum(g_maximumDurationNanoseconds, elapsed);
 				g_durationHistogram[VRDepthCullingTelemetryPolicy::DurationBin(elapsed)].fetch_add(1, std::memory_order_relaxed);
-				g_telemetryGate.Leave();
 			}
 
+			VRDepthCullingTelemetryPolicy::WriterScope writer;
 			bool active = false;
 			std::chrono::steady_clock::time_point started{};
 			std::uint64_t coherenceMisses = 1;
@@ -122,12 +132,13 @@ namespace VRDepthCullingTemporal
 			std::uint64_t eligible = 0;
 			std::uint64_t promoted = 0;
 		};
+#endif
 
 		bool IsBalancedRecoveryActive(std::uint64_t a_cullingEpoch, std::uint64_t a_policyEpoch)
 		{
 			return (a_policyEpoch & 1u) == 0 &&
 			       g_cullingEnabled.load(std::memory_order_acquire) &&
-			       g_mode.load(std::memory_order_acquire) == Mode::Balanced &&
+			       g_mode.load(std::memory_order_acquire) != Mode::Legacy &&
 			       g_cullingEpoch.load(std::memory_order_acquire) == a_cullingEpoch &&
 			       g_policyEpoch.load(std::memory_order_acquire) == a_policyEpoch;
 		}
@@ -168,7 +179,6 @@ namespace VRDepthCullingTemporal
 			}
 			const auto cullingEpoch = g_cullingEpoch.load(std::memory_order_acquire);
 
-			// Keep the pose warm so switching from Performance to Balanced is valid immediately.
 			const auto* camera = RE::Main::WorldRootCamera();
 			if (!camera) {
 				g_producerPose.valid = false;
@@ -188,7 +198,7 @@ namespace VRDepthCullingTemporal
 		void RecoverHighRiskObjects(void* a_culler)
 		{
 			if (!g_cullingEnabled.load(std::memory_order_acquire) ||
-				g_mode.load(std::memory_order_acquire) != Mode::Balanced) {
+				g_mode.load(std::memory_order_acquire) == Mode::Legacy) {
 				return;
 			}
 			const auto cullingEpoch = g_cullingEpoch.load(std::memory_order_acquire);
@@ -211,17 +221,23 @@ namespace VRDepthCullingTemporal
 				motion.translationSquared);
 			if (viewCoherent)
 				return;
+#ifdef DEVBENCH_BRIDGE_ENABLED
 			RecoveryTelemetryScope telemetry;
 			if (telemetry.active)
 				ClearLastRecoveryStatus();
+#endif
 			MotionEnvelope envelope{};
 			if (!TryBuildMotionEnvelope(motion.rotationCosine, motion.translationSquared, envelope)) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
 				if (telemetry.active)
 					++telemetry.invalidMotionEnvelopes;
+#endif
 				return;
 			}
+#ifdef DEVBENCH_BRIDGE_ENABLED
 			if (telemetry.active)
 				telemetry.recoveryAttempts = 1;
+#endif
 
 			auto* bytes = static_cast<std::byte*>(a_culler);
 			const auto objectCount = ReadCullerField<std::uint32_t>(bytes, kObjectCountOffset);
@@ -235,17 +251,23 @@ namespace VRDepthCullingTemporal
 				return;
 
 			CandidateSet<kBalancedPromotionBudget> candidates;
+#ifdef DEVBENCH_BRIDGE_ENABLED
 			std::uint32_t eligibleCount = 0;
+#endif
 			for (std::uint32_t index = 0; index < objectCount; ++index) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
 				if (telemetry.active)
 					++telemetry.objectsInspected;
+#endif
 				if (results[index] != 0)
 					continue;
 
 				BoundingSphere sphere{};
 				if (!TryBuildBoundingSphere(transforms[index], sphere)) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
 					if (telemetry.active)
 						++telemetry.invalidTransforms;
+#endif
 					continue;
 				}
 				const RE::NiPoint3 center{ sphere.center[0], sphere.center[1], sphere.center[2] };
@@ -256,34 +278,46 @@ namespace VRDepthCullingTemporal
 						distanceSquared,
 						envelope,
 						motionExpansion)) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
 					if (telemetry.active)
 						++telemetry.invalidMotionEnvelopes;
+#endif
 					continue;
 				}
 				const float expandedRadius = sphere.radius + motionExpansion;
 				if (!std::isfinite(expandedRadius) || expandedRadius < sphere.radius) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
 					if (telemetry.active)
 						++telemetry.invalidMotionEnvelopes;
+#endif
 					continue;
 				}
 
+#ifdef DEVBENCH_BRIDGE_ENABLED
 				if (telemetry.active)
 					++telemetry.frustumTests;
+#endif
 				const bool directlyVisible = camera->PointInFrustum(center, sphere.radius);
 				if (!directlyVisible) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
 					if (telemetry.active)
 						++telemetry.frustumTests;
+#endif
 					if (!camera->PointInFrustum(center, expandedRadius))
 						continue;
 				}
 
+#ifdef DEVBENCH_BRIDGE_ENABLED
 				++eligibleCount;
+#endif
 				candidates.Add({ index, CalculateRiskScore(sphere.radius, distanceSquared), directlyVisible });
 			}
 
+#ifdef DEVBENCH_BRIDGE_ENABLED
 			// Candidate discovery is measured even if a policy change cancels promotion.
 			if (telemetry.active)
 				telemetry.eligible = eligibleCount;
+#endif
 			if (!IsBalancedRecoveryActive(cullingEpoch, policyEpoch)) {
 				return;
 			}
@@ -291,6 +325,7 @@ namespace VRDepthCullingTemporal
 			for (std::size_t index = 0; index < candidates.Size(); ++index)
 				results[candidates[index].index] = 1;
 
+#ifdef DEVBENCH_BRIDGE_ENABLED
 			const auto promotedCount = static_cast<std::uint32_t>(candidates.Size());
 			if (telemetry.active) {
 				telemetry.promoted = promotedCount;
@@ -300,14 +335,85 @@ namespace VRDepthCullingTemporal
 			}
 			if (!IsBalancedRecoveryActive(cullingEpoch, policyEpoch))
 				ClearLastRecoveryStatus();
+#endif
 		}
 
 		struct DepthCullingReadback
 		{
 			static void thunk(void* a_culler)
 			{
-				func(a_culler);
-				RecoverHighRiskObjects(a_culler);
+				{
+#ifdef DEVBENCH_BRIDGE_ENABLED
+					const VRDepthCullingTelemetry::Scope telemetry(g_nativeReadbackTiming, g_telemetryGate);
+#endif
+					func(a_culler);
+				}
+				const bool hybridSelected = g_cullingEnabled.load(std::memory_order_acquire) &&
+				                            g_mode.load(std::memory_order_acquire) == Mode::Hybrid;
+				if (!VRHybridCulling::CompleteReadback(a_culler, g_cullingEpoch.load(std::memory_order_acquire), hybridSelected)) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
+					const VRNativeVisibilityTelemetry::Scope visibility(g_nativeVisibility, g_telemetryGate, [a_culler] {
+						VRNativeVisibilityTelemetry::Batch batch;
+						if (a_culler) {
+							auto* bytes = static_cast<std::byte*>(a_culler);
+							batch.count = ReadCullerField<std::uint32_t>(bytes, kObjectCountOffset);
+							batch.selector = ReadCullerField<std::uint32_t>(bytes, kResultSelectorOffset);
+							if (batch.count > 0 && batch.count <= kMaximumObjects && batch.selector <= 1)
+								batch.results = ReadCullerField<const std::uint32_t*>(bytes, kResultsOffset + batch.selector * sizeof(void*));
+						}
+						return batch;
+					});
+#endif
+					RecoverHighRiskObjects(a_culler);
+#ifdef DEVBENCH_BRIDGE_ENABLED
+					VRHybridCulling::CompleteMatchedRecovery(a_culler, g_cullingEpoch.load(std::memory_order_acquire));
+#endif
+				}
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		struct DepthCullingDownscale
+		{
+			static void thunk(RE::BSSceneGraph* a_scene)
+			{
+				g_downscaleScene = a_scene;
+				g_suppressedDownscale = false;
+				g_insideOwnedDownscale = true;
+				const SKSE::stl::scope_exit restore([]() noexcept { g_insideOwnedDownscale = false; });
+#ifdef DEVBENCH_BRIDGE_ENABLED
+				const VRDepthCullingTelemetry::Scope telemetry(g_outerDownscaleTiming, g_telemetryGate);
+#endif
+				func(a_scene);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		struct DepthCullingDownscaleDraw
+		{
+			static void thunk(RE::ImageSpaceManager* a_manager, std::uint32_t a_effect,
+				RE::RENDER_TARGET a_source, RE::RENDER_TARGET a_destination, RE::ImageSpaceEffectParam* a_parameters, bool a_depthSource)
+			{
+				if (g_insideOwnedDownscale && !g_replayNativeDownscale && a_effect == 100 && static_cast<std::uint32_t>(a_source) == 7 && a_depthSource &&
+					g_cullingEnabled.load(std::memory_order_acquire) && g_mode.load(std::memory_order_acquire) == Mode::Hybrid &&
+					(g_policyEpoch.load(std::memory_order_acquire) & 1u) == 0 &&
+					VRHybridCulling::Prepare(g_cullingEpoch.load(std::memory_order_acquire))) {
+					g_suppressedDownscale = true;
+					return;
+				}
+#ifdef DEVBENCH_BRIDGE_ENABLED
+				if (g_insideOwnedDownscale && !g_replayNativeDownscale && a_effect == 100 && static_cast<std::uint32_t>(a_source) == 7 && a_depthSource &&
+					g_cullingEnabled.load(std::memory_order_acquire) && (g_policyEpoch.load(std::memory_order_acquire) & 1u) == 0 &&
+					VRHybridCulling::IsMatchedDiagnosticsActive())
+					(void)VRHybridCulling::Prepare(g_cullingEpoch.load(std::memory_order_acquire));
+				const VRDepthCullingTelemetryPolicy::WriterScope telemetry(g_telemetryGate);
+				if (telemetry) {
+					CS_GPU_PASS_SELECT(g_replayNativeDownscale, "VRDepthCulling::ReplayDownscale", "VRDepthCulling::NativeDownscale");
+					func(a_manager, a_effect, a_source, a_destination, a_parameters, a_depthSource);
+					return;
+				}
+#endif
+				func(a_manager, a_effect, a_source, a_destination, a_parameters, a_depthSource);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -316,8 +422,38 @@ namespace VRDepthCullingTemporal
 		{
 			static void thunk(RE::BSImagespaceShader* a_shader, std::uint32_t a_param)
 			{
-				func(a_shader, a_param);
-				CaptureProducerPose();
+#ifdef DEVBENCH_BRIDGE_ENABLED
+				if (!g_suppressedDownscale && g_cullingEnabled.load(std::memory_order_acquire) && VRHybridCulling::IsMatchedDiagnosticsActive()) {
+					VRHybridCulling::DispatchMatched(a_shader, g_cullingEpoch.load(std::memory_order_acquire));
+					{
+						const VRDepthCullingTelemetry::Scope telemetry(g_nativeProducerTiming, g_telemetryGate);
+						CS_GPU_PASS("VRDepthCulling::NativeProducer");
+						func(a_shader, a_param);
+					}
+					VRHybridCulling::FinalizeMatchedSubmission(a_shader, g_cullingEpoch.load(std::memory_order_acquire));
+					CaptureProducerPose();
+					return;
+				}
+#endif
+				VRHybridCullingLifecycle::RunProducer(g_suppressedDownscale, [&] { return g_cullingEnabled.load(std::memory_order_acquire) && g_mode.load(std::memory_order_acquire) == Mode::Hybrid &&
+					                                                                      VRHybridCulling::Dispatch(a_shader, g_cullingEpoch.load(std::memory_order_acquire)); }, [] {
+						g_replayNativeDownscale = true;
+						const SKSE::stl::scope_exit restore([]() noexcept { g_replayNativeDownscale = false; });
+#ifdef DEVBENCH_BRIDGE_ENABLED
+						const VRDepthCullingTelemetry::Scope telemetry(g_replayDownscaleTiming, g_telemetryGate);
+#endif
+						DepthCullingDownscale::func(g_downscaleScene); }, [] { VRHybridCulling::CancelPreparation(g_mode.load(std::memory_order_acquire) == Mode::Hybrid &&
+																																																																																					g_cullingEnabled.load(std::memory_order_acquire),
+																																																																												 g_cullingEpoch.load(std::memory_order_acquire)); }, [&] {
+#ifdef DEVBENCH_BRIDGE_ENABLED
+						const VRDepthCullingTelemetry::Scope telemetry(g_nativeProducerTiming, g_telemetryGate);
+						if (telemetry) {
+							CS_GPU_PASS("VRDepthCulling::NativeProducer");
+							func(a_shader, a_param);
+							return;
+						}
+#endif
+						func(a_shader, a_param); }, [] { CaptureProducerPose(); });
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -344,6 +480,8 @@ namespace VRDepthCullingTemporal
 		const auto readbackCallsite = REL::Offset(0x132208B).address();
 		const auto renderCallsite =
 			REL::RelocationID(100421, 107139).address() + REL::Relocate(0x3B1, 0);
+		const auto downscaleCallsite = REL::RelocationID(100421, 107139).address() + REL::Relocate(0x37F, 0);
+		const auto downscaleDrawCallsite = REL::Offset(0x1322EC2).address();
 		if (!IsCallInstruction(readbackCallsite) || !IsCallInstruction(renderCallsite)) {
 			logger::error("VR: temporal depth-culling recovery not installed because a hook callsite was not recognized");
 			return;
@@ -352,6 +490,13 @@ namespace VRDepthCullingTemporal
 		stl::write_thunk_call<DepthCullingReadback>(readbackCallsite);
 		// Frame annotations may already wrap this call; preserve that current target in the thunk chain.
 		stl::write_thunk_call<DepthCullingRender>(renderCallsite);
+		if (IsCallInstruction(downscaleCallsite) && IsCallInstruction(downscaleDrawCallsite)) {
+			stl::write_thunk_call<DepthCullingDownscale>(downscaleCallsite);
+			stl::write_thunk_call<DepthCullingDownscaleDraw>(downscaleDrawCallsite);
+			g_hybridInstalled.store(true, std::memory_order_release);
+		} else {
+			logger::warn("VR: Hybrid Hi-Z hooks unavailable; retaining native testing with Advanced recovery");
+		}
 		g_installed.store(true, std::memory_order_release);
 		logger::info(
 			"VR: installed temporal depth-culling recovery (default balanced budget {})",
@@ -360,24 +505,22 @@ namespace VRDepthCullingTemporal
 
 	void SetMode(Mode a_mode)
 	{
-		a_mode = SelectMode(
-			a_mode == Mode::Performance,
-			a_mode == Mode::Legacy);
+		a_mode = NormalizeMode(a_mode);
 		const auto current = g_mode.load(std::memory_order_acquire);
 		if (current == a_mode)
 			return;
 		// The main-thread writer leaves an odd epoch while publishing a new policy.
 		g_policyEpoch.fetch_add(1, std::memory_order_acq_rel);
-		const auto previous = g_mode.exchange(a_mode, std::memory_order_acq_rel);
+		g_mode.store(a_mode, std::memory_order_release);
+#ifdef DEVBENCH_BRIDGE_ENABLED
 		if (a_mode != Mode::Balanced)
 			ClearLastRecoveryStatus();
-		if (previous == Mode::Legacy || a_mode == Mode::Legacy) {
-			// Legacy does not keep a producer pose warm. Require a new pose whenever
-			// crossing that boundary so Balanced cannot consume an arbitrarily old one.
-			g_cullingEpoch.fetch_add(1, std::memory_order_acq_rel);
-			g_producerPoseEpoch.store(0, std::memory_order_release);
-		}
+#endif
+		// A different backend or policy cannot inherit an earlier producer's validity.
+		g_cullingEpoch.fetch_add(1, std::memory_order_acq_rel);
+		g_producerPoseEpoch.store(0, std::memory_order_release);
 		g_policyEpoch.fetch_add(1, std::memory_order_release);
+		logger::info("VR: depth-culling method changed from {} to {}", GetModeName(current), GetModeName(a_mode));
 	}
 
 	void SetCullingEnabled(bool a_enabled)
@@ -388,8 +531,10 @@ namespace VRDepthCullingTemporal
 
 		g_cullingEpoch.fetch_add(1, std::memory_order_acq_rel);
 		g_cullingEnabled.store(a_enabled, std::memory_order_release);
+#ifdef DEVBENCH_BRIDGE_ENABLED
 		if (!a_enabled)
 			ClearLastRecoveryStatus();
+#endif
 	}
 
 	Mode GetMode()
@@ -397,16 +542,35 @@ namespace VRDepthCullingTemporal
 		return g_mode.load(std::memory_order_acquire);
 	}
 
+#ifdef DEVBENCH_BRIDGE_ENABLED
 	Status GetStatus()
 	{
+		const bool frozen = g_telemetryGate.IsFrozen();
+		const auto policyEpoch = g_policyEpoch.load(std::memory_order_acquire);
 		const auto mode = GetMode();
 		const bool cullingEnabled = g_cullingEnabled.load(std::memory_order_acquire);
-		const bool recoveryActive = cullingEnabled && mode == Mode::Balanced;
-		return {
+		const bool recoveryActive = cullingEnabled && mode != Mode::Legacy;
+		const bool resetting = g_measurementResetting.load(std::memory_order_acquire);
+		const auto windowId = g_measurementWindowId.load(std::memory_order_acquire);
+		const auto startEpoch = g_measurementStartEpoch.load(std::memory_order_relaxed);
+		const auto startFrame = g_measurementStartFrame.load(std::memory_order_relaxed);
+		const auto epoch = g_cullingEpoch.load(std::memory_order_acquire);
+		Status result{
 			.installed = g_installed.load(std::memory_order_acquire),
+			.hybridInstalled = g_hybridInstalled.load(std::memory_order_acquire),
 			.cullingEnabled = cullingEnabled,
 			.telemetryEnabled = g_telemetryGate.IsEnabled(),
+			.telemetryFrozen = frozen,
 			.mode = mode,
+			.cullingEpoch = epoch,
+			.measurementWindowId = windowId,
+			.measurementStartEpoch = startEpoch,
+			.measurementStartFrame = startFrame,
+			.nativeReadback = g_nativeReadbackTiming.Read(),
+			.outerDownscale = g_outerDownscaleTiming.Read(),
+			.replayDownscale = g_replayDownscaleTiming.Read(),
+			.nativeProducer = g_nativeProducerTiming.Read(),
+			.nativeVisibility = g_nativeVisibility.Read(),
 			.envelopeMisses = g_envelopeMisses.load(std::memory_order_relaxed),
 			.recoveryAttempts = g_recoveryAttempts.load(std::memory_order_relaxed),
 			.objectsInspected = g_objectsInspected.load(std::memory_order_relaxed),
@@ -427,6 +591,17 @@ namespace VRDepthCullingTemporal
 			.lastEligibleCount = recoveryActive ? g_lastEligibleCount.load(std::memory_order_relaxed) : 0,
 			.lastPromotedCount = recoveryActive ? g_lastPromotedCount.load(std::memory_order_relaxed) : 0,
 		};
+		result.measurementWindowCurrent = windowId != 0 && startEpoch == epoch && !resetting &&
+		                                  !g_measurementResetting.load(std::memory_order_acquire) &&
+		                                  windowId == g_measurementWindowId.load(std::memory_order_acquire) &&
+		                                  epoch == g_cullingEpoch.load(std::memory_order_acquire) &&
+		                                  (policyEpoch & 1u) == 0 && policyEpoch == g_policyEpoch.load(std::memory_order_acquire);
+		return result;
+	}
+
+	VRDepthCullingTelemetryPolicy::WriterGate& GetTelemetryGate() noexcept
+	{
+		return g_telemetryGate;
 	}
 
 	void SetTelemetryEnabled(bool a_enabled)
@@ -436,22 +611,32 @@ namespace VRDepthCullingTemporal
 
 	bool TryResetStatus()
 	{
-		if (!g_telemetryGate.TryLockForReset())
-			return false;
-		g_envelopeMisses.store(0, std::memory_order_relaxed);
-		g_recoveryAttempts.store(0, std::memory_order_relaxed);
-		g_objectsInspected.store(0, std::memory_order_relaxed);
-		g_invalidTransforms.store(0, std::memory_order_relaxed);
-		g_invalidMotionEnvelopes.store(0, std::memory_order_relaxed);
-		g_frustumTests.store(0, std::memory_order_relaxed);
-		g_totalEligible.store(0, std::memory_order_relaxed);
-		g_totalPromoted.store(0, std::memory_order_relaxed);
-		g_totalDurationNanoseconds.store(0, std::memory_order_relaxed);
-		g_maximumDurationNanoseconds.store(0, std::memory_order_relaxed);
-		for (auto& bin : g_durationHistogram)
-			bin.store(0, std::memory_order_relaxed);
-		ClearLastRecoveryStatus();
-		g_telemetryGate.UnlockAfterReset();
-		return true;
+		return VRDepthCullingTelemetryPolicy::TryReset(g_telemetryGate, []() noexcept {
+			g_measurementResetting.store(true, std::memory_order_release);
+			g_nativeReadbackTiming.Reset();
+			g_outerDownscaleTiming.Reset();
+			g_replayDownscaleTiming.Reset();
+			g_nativeProducerTiming.Reset();
+			g_nativeVisibility.Reset();
+			g_envelopeMisses.store(0, std::memory_order_relaxed);
+			g_recoveryAttempts.store(0, std::memory_order_relaxed);
+			g_objectsInspected.store(0, std::memory_order_relaxed);
+			g_invalidTransforms.store(0, std::memory_order_relaxed);
+			g_invalidMotionEnvelopes.store(0, std::memory_order_relaxed);
+			g_frustumTests.store(0, std::memory_order_relaxed);
+			g_totalEligible.store(0, std::memory_order_relaxed);
+			g_totalPromoted.store(0, std::memory_order_relaxed);
+			g_totalDurationNanoseconds.store(0, std::memory_order_relaxed);
+			g_maximumDurationNanoseconds.store(0, std::memory_order_relaxed);
+			for (auto& bin : g_durationHistogram)
+				bin.store(0, std::memory_order_relaxed);
+			ClearLastRecoveryStatus();
+			VRHybridCulling::ResetTelemetryUnderLock();
+			g_measurementStartEpoch.store(g_cullingEpoch.load(std::memory_order_acquire), std::memory_order_relaxed);
+			g_measurementStartFrame.store(globals::state ? globals::state->frameCount : 0, std::memory_order_relaxed);
+			g_measurementWindowId.fetch_add(1, std::memory_order_release);
+			g_measurementResetting.store(false, std::memory_order_release);
+		});
 	}
+#endif
 }

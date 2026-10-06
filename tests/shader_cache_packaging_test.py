@@ -8,12 +8,15 @@ import copy
 import importlib.util
 import json
 import shutil
+import struct
 import sys
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 from unittest import mock
+
+from dxbc_fixtures import make_container, make_dxbc
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -26,6 +29,89 @@ sys.modules[SPEC.name] = BUILDER
 SPEC.loader.exec_module(BUILDER)
 
 
+class ShaderBytecodeTests(unittest.TestCase):
+    def test_accepts_supported_stages_and_program_chunks(self) -> None:
+        for stage, extension in ((0, ".pso"), (1, ".vso"), (5, ".cso")):
+            for kind in (b"SHDR", b"SHEX"):
+                with self.subTest(stage=stage, kind=kind):
+                    BUILDER.validate_dxbc(make_dxbc(stage, b"auxiliary data", kind), extension)
+
+    def test_rejects_wrong_stages_and_unsupported_extensions(self) -> None:
+        for stage in (0, 1, 2, 3, 4, 5, 0xFFFF):
+            for expected, extension in ((0, ".pso"), (1, ".vso"), (5, ".cso")):
+                if stage != expected:
+                    with self.subTest(stage=stage, extension=extension), self.assertRaisesRegex(ValueError, "stage"):
+                        BUILDER.validate_dxbc(make_dxbc(stage), extension)
+        with self.assertRaisesRegex(ValueError, "extension"):
+            BUILDER.validate_dxbc(make_dxbc(), ".unknown")
+
+    def test_rejects_malformed_headers_chunks_and_programs(self) -> None:
+        valid = make_dxbc(marker=b"padding")
+
+        def word(offset: int, value: int) -> bytes:
+            changed = bytearray(valid)
+            struct.pack_into("<I", changed, offset, value)
+            return bytes(changed)
+
+        program = struct.pack("<II", 0x50, 2)
+        cases = {
+            "signature": b"BAD!" + valid[4:],
+            "header-version": word(20, 2),
+            "size-small": word(24, len(valid) - 1),
+            "size-large": word(24, len(valid) + 1),
+            "no-chunks": word(28, 0),
+            "chunk-count-overflow": word(28, 0xFFFFFFFF),
+            "chunk-inside-table": word(32, 36),
+            "chunk-header-truncated": word(32, len(valid) - 4),
+            "chunk-offset-overflow": word(32, 0xFFFFFFFF),
+            "chunk-length-overflow": word(44, 0xFFFFFFFF),
+            "program-short": word(44, 4),
+            "program-length": word(52, 0xFFFFFFFF),
+            "no-program": make_container([(b"PRIV", b"content")]),
+            "partial-program-word": make_container([(b"SHEX", program + b"x")]),
+            "duplicate-program": make_container([(b"SHDR", program), (b"SHEX", program)]),
+        }
+        overlap = bytearray(make_container([(b"PRIV", b""), (b"SHEX", program)]))
+        struct.pack_into("<I", overlap, 44, 4)
+        cases["overlapping-chunks"] = bytes(overlap)
+        duplicate = bytearray(make_container([(b"SHEX", program), (b"PRIV", b""), (b"PRIV", b"")]))
+        struct.pack_into("<I", duplicate, 40, struct.unpack_from("<I", duplicate, 36)[0])
+        cases["duplicate-chunk-offset"] = bytes(duplicate)
+        for name, data in cases.items():
+            with self.subTest(case=name), self.assertRaises(ValueError):
+                BUILDER.validate_dxbc(data, ".pso")
+        for size in range(len(valid)):
+            with self.subTest(truncated_size=size), self.assertRaises(ValueError):
+                BUILDER.validate_dxbc(valid[:size], ".pso")
+
+    def test_accepts_unordered_chunk_table(self) -> None:
+        data = bytearray(make_dxbc())
+        first, second = struct.unpack_from("<II", data, 32)
+        struct.pack_into("<II", data, 32, second, first)
+        BUILDER.validate_dxbc(bytes(data), ".pso")
+
+    def test_loose_cache_rejects_bytecode_despite_matching_inventory(self) -> None:
+        for stage, extension in ((0, ".pso"), (1, ".vso"), (5, ".cso")):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as temporary:
+                cache = Path(temporary)
+                relative = "Lighting/1" + extension
+                path = cache / relative
+                path.parent.mkdir()
+                (cache / "Info.ini").write_text(
+                    "[Cache]\nPluginVersion=test\nShaderCacheABI=abi\n", encoding="utf-8"
+                )
+                (cache / "Manifest.json").write_text(json.dumps({
+                    "schemaVersion": 2, "entries": {relative: "a" * 32},
+                }), encoding="utf-8")
+                valid = make_dxbc(stage)
+                path.write_bytes(valid)
+                self.assertEqual(BUILDER.validate_cache(cache, "VR", "test", "abi"), 1)
+                for data in (valid[:-1], make_dxbc((stage + 1) % 6), b"DXBC"):
+                    path.write_bytes(data)
+                    with self.assertRaisesRegex(SystemExit, "DXBC"):
+                        BUILDER.validate_cache(cache, "VR", "test", "abi")
+
+
 class ShaderCachePackagingTests(unittest.TestCase):
     @staticmethod
     def _managed_cache(root: Path, runtime: str, *, horizon: bool = True) -> Path:
@@ -36,15 +122,15 @@ class ShaderCachePackagingTests(unittest.TestCase):
         for index, variant in enumerate(variants):
             water = variant / "Water" / "1.pso"
             water.parent.mkdir(parents=True)
-            water.write_bytes(f"DXBC{runtime}-water-{index}".encode("utf-8"))
+            water.write_bytes(make_dxbc(marker=f"{runtime}-water-{index}".encode("utf-8")))
             lighting = variant / "Lighting" / "2.pso"
             lighting.parent.mkdir()
-            lighting.write_bytes(f"DXBC{runtime}-lighting".encode("utf-8"))
+            lighting.write_bytes(make_dxbc(marker=f"{runtime}-lighting".encode("utf-8")))
             (variant / BUILDER.MANIFEST_FILE_NAME).write_text(
                 json.dumps({
-                    "schemaVersion": 1,
+                    "schemaVersion": BUILDER.MANIFEST_SCHEMA_VERSION,
                     "entries": {
-                        "Water/1.pso": "1" * 32,
+                        "Water/1.pso": str(index + 1) * 32,
                         "Lighting/2.pso": "3" * 32,
                     },
                 }),
@@ -156,6 +242,33 @@ class ShaderCachePackagingTests(unittest.TestCase):
                     self._archive_cache(root), shutil.which("cmake"), "VR", "CSX 3.18-VR"
                 )
 
+    @unittest.skipUnless(shutil.which("cmake"), "CMake is required to inspect cache archives")
+    def test_archive_rejects_malformed_bytecode_with_valid_pack_hashes(self) -> None:
+        for runtime in ("SE", "VR"):
+            for bytecode in (make_dxbc(stage=1), make_dxbc()[:-1]):
+                with self.subTest(runtime=runtime, bytecode=bytecode), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary) / "runtime"
+                    cache = self._managed_cache(root, runtime, horizon=False)
+                    pack_manifest = json.loads((cache / BUILDER.PACK_MANIFEST_FILE_NAME).read_text(encoding="utf-8"))
+                    registrations = BUILDER.compatibility_variant_manifest(REPO)["default"]["registrations"]
+                    records = [
+                        {
+                            **BUILDER.shader_pack_record_identity(path, contract, registrations),
+                            "bytecode": contents,
+                        }
+                        for path, contract, contents in (
+                            ("Water/1.pso", "1" * 32, bytecode),
+                            ("Lighting/2.pso", "3" * 32, make_dxbc()),
+                        )
+                    ]
+                    BUILDER.write_shader_pack(
+                        cache / "Optimized.A.csxpack", 1, 1, records, pack_manifest["packSetId"]
+                    )
+                    with self.assertRaisesRegex(SystemExit, "invalid packaged shader bytecode"):
+                        BUILDER.validate_cache_archive(
+                            self._archive_cache(root), shutil.which("cmake"), runtime, "CSX 3.18-VR"
+                        )
+
     @staticmethod
     def _sample_shader_config() -> dict[str, object]:
         profile_defines = [
@@ -164,6 +277,8 @@ class ShaderCachePackagingTests(unittest.TestCase):
             "CS_HAIR",
             "D3DCOMPILE_DEBUG",
             "D3DCOMPILE_SKIP_OPTIMIZATION",
+            "VANILLA_FRESNEL",
+            "HDR_OUTPUT",
             "EXTENDED_TRANSLUCENCY",
             "GRASS_COLLISION",
             "HORIZON_FIX",
@@ -172,7 +287,7 @@ class ShaderCachePackagingTests(unittest.TestCase):
             "WETNESS_EFFECTS",
         ]
         return {
-            "common_defines": ["VR", "WETTERNESS", *profile_defines],
+            "common_defines": ["VR", "WETTERNESS", "PBR_GRASS", "GRASS_OPTIMIZATIONS", *profile_defines],
             "file_common_defines": {
                 "Lighting.hlsl": {
                     "PSHADER": ["LIGHT_LIMIT_FIX", *profile_defines],
@@ -182,6 +297,13 @@ class ShaderCachePackagingTests(unittest.TestCase):
                 },
             },
             "shaders": [
+                {
+                    "file": "RunGrass.hlsl",
+                    "configs": {
+                        "PSHADER": {"common_defines": ["GRASS_LIGHTING"], "entries": [{"entry": "Grass:Pixel:7", "defines": ["DO_ALPHA_TEST", "PBR_GRASS"]}]},
+                        "VSHADER": {"common_defines": ["GRASS_LIGHTING"], "entries": [{"entry": "Grass:Vertex:7", "defines": []}]},
+                    },
+                },
                 {
                     "file": "Lighting.hlsl",
                     "configs": {
@@ -260,139 +382,6 @@ class ShaderCachePackagingTests(unittest.TestCase):
             self.assertTrue(staging.is_dir())
             self.assertFalse(destination.exists())
 
-    def test_runtime_publication_preserves_unowned_stage_after_acquisition_race(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            out_root = root / "out"
-            out_root.mkdir()
-            destination = self._publication_cache(out_root / "VR", b"previous")
-            candidate = self._publication_cache(root / "candidate", b"candidate")
-            staging = out_root / ".VR.publishing"
-            marker = staging / "other-invocation.bin"
-            original_mkdir = Path.mkdir
-            raced = False
-
-            def racing_mkdir(path: Path, *args: object, **kwargs: object) -> None:
-                nonlocal raced
-                if path == staging and not raced:
-                    raced = True
-                    original_mkdir(path, *args, **kwargs)
-                    marker.write_bytes(b"owned elsewhere")
-                original_mkdir(path, *args, **kwargs)
-
-            with (
-                mock.patch.object(Path, "mkdir", new=racing_mkdir),
-                self.assertRaisesRegex(SystemExit, "unexpected publication staging"),
-            ):
-                BUILDER.publish_runtime_cache(candidate, out_root, "VR")
-
-            self.assertEqual(marker.read_bytes(), b"owned elsewhere")
-            self.assertEqual(
-                (destination / BUILDER.CACHE_DIRECTORY / "marker.bin").read_bytes(),
-                b"previous",
-            )
-
-    def test_archive_publication_preserves_unowned_stage_after_acquisition_race(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            out_root = root / "out"
-            out_root.mkdir()
-            candidate = root / "ShaderCache-VR-test.7z"
-            candidate.write_bytes(b"candidate")
-            destination = out_root / candidate.name
-            destination.write_bytes(b"previous")
-            staging = out_root / f".{candidate.name}.publishing"
-            original_open = Path.open
-            raced = False
-
-            def racing_open(
-                path: Path,
-                mode: str = "r",
-                *args: object,
-                **kwargs: object,
-            ):
-                nonlocal raced
-                if path == staging and mode == "xb" and not raced:
-                    raced = True
-                    with original_open(path, "wb") as stream:
-                        stream.write(b"owned elsewhere")
-                return original_open(path, mode, *args, **kwargs)
-
-            with (
-                mock.patch.object(Path, "open", new=racing_open),
-                self.assertRaisesRegex(SystemExit, "unexpected publication staging"),
-            ):
-                BUILDER.publish_cache_archive(candidate, out_root, "VR")
-
-            self.assertEqual(staging.read_bytes(), b"owned elsewhere")
-            self.assertEqual(destination.read_bytes(), b"previous")
-
-    def test_directory_staging_removes_owned_partial_copy_after_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / "candidate"
-            source.mkdir()
-            (source / "cache.bin").write_bytes(b"candidate")
-            staging = root / ".VR.publishing"
-
-            def fail_owned_copy(
-                source_path: Path,
-                destination_path: Path,
-                **kwargs: object,
-            ) -> None:
-                self.assertEqual(source_path, source)
-                self.assertTrue(kwargs["dirs_exist_ok"])
-                (destination_path / "partial.bin").write_bytes(b"partial")
-                raise PermissionError("simulated partial directory copy")
-
-            with (
-                mock.patch.object(BUILDER.shutil, "copytree", new=fail_owned_copy),
-                self.assertRaisesRegex(SystemExit, "failed to stage VR cache"),
-            ):
-                BUILDER.copy_publication_candidate(source, staging, "VR cache")
-
-            self.assertFalse(staging.exists())
-
-    def test_archive_staging_removes_owned_partial_copy_after_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / "ShaderCache-VR-test.7z"
-            source.write_bytes(b"candidate")
-            staging = root / ".ShaderCache-VR-test.7z.publishing"
-
-            def fail_owned_copy(source_path: Path, destination_path: Path) -> None:
-                self.assertEqual(source_path, source)
-                destination_path.write_bytes(b"partial")
-                raise PermissionError("simulated partial archive copy")
-
-            with (
-                mock.patch.object(BUILDER.shutil, "copy2", new=fail_owned_copy),
-                self.assertRaisesRegex(SystemExit, "failed to stage VR cache archive"),
-            ):
-                BUILDER.copy_publication_candidate(
-                    source,
-                    staging,
-                    "VR cache archive",
-                )
-
-            self.assertFalse(staging.exists())
-
-    def test_archive_publication_replaces_existing_archive(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            out_root = root / "out"
-            out_root.mkdir()
-            candidate = root / "ShaderCache-VR-test.7z"
-            candidate.write_bytes(b"candidate")
-            destination = out_root / candidate.name
-            destination.write_bytes(b"previous")
-
-            published = BUILDER.publish_cache_archive(candidate, out_root, "VR")
-
-            self.assertEqual(published, destination)
-            self.assertEqual(destination.read_bytes(), b"candidate")
-            self.assertFalse((out_root / f".{candidate.name}.publishing").exists())
-
     def test_runtime_publication_replaces_cache_and_removes_recovery_copy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -410,6 +399,60 @@ class ShaderCachePackagingTests(unittest.TestCase):
             )
             self.assertFalse((out_root / ".VR.publishing").exists())
             self.assertFalse((out_root / ".VR.previous").exists())
+
+    def test_publication_copy_preserves_competing_staging_owner(self) -> None:
+        for directory in (False, True):
+            with self.subTest(directory=directory), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "candidate"
+                staging = root / ".publishing"
+                if directory:
+                    source.mkdir()
+                    (source / "marker").write_bytes(b"candidate")
+                else:
+                    source.write_bytes(b"candidate")
+                original_exists = BUILDER.path_entry_exists
+                raced = False
+
+                def competing_owner(path: Path) -> bool:
+                    nonlocal raced
+                    if path == staging and not raced:
+                        raced = True
+                        if directory:
+                            staging.mkdir()
+                            (staging / "marker").write_bytes(b"other invocation")
+                        else:
+                            staging.write_bytes(b"other invocation")
+                        return False
+                    return original_exists(path)
+
+                with (
+                    mock.patch.object(BUILDER, "path_entry_exists", side_effect=competing_owner),
+                    self.assertRaisesRegex(SystemExit, "failed to stage"),
+                ):
+                    BUILDER.copy_publication_candidate(source, staging, "test cache")
+
+                marker = staging / "marker" if directory else staging
+                self.assertEqual(marker.read_bytes(), b"other invocation")
+
+    def test_publication_copy_cleans_only_its_failed_copy(self) -> None:
+        for directory in (False, True):
+            with self.subTest(directory=directory), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "candidate"
+                staging = root / ".publishing"
+                if directory:
+                    source.mkdir()
+                else:
+                    source.write_bytes(b"candidate")
+                copy_name = "copytree" if directory else "copy2"
+                with (
+                    mock.patch.object(BUILDER.shutil, copy_name, side_effect=PermissionError("copy failed")),
+                    self.assertRaisesRegex(SystemExit, "failed to stage"),
+                ):
+                    BUILDER.copy_publication_candidate(source, staging, "test cache")
+                self.assertFalse(staging.exists())
+                self.assertTrue(source.exists())
 
     def test_runtime_publication_restores_previous_cache_after_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -578,29 +621,58 @@ class ShaderCachePackagingTests(unittest.TestCase):
         self.assertNotIn("WETNESS_EFFECTS", names)
         self.assertNotIn("D3DCOMPILE_DEBUG", names)
         self.assertNotIn("D3DCOMPILE_SKIP_OPTIMIZATION", names)
+        self.assertNotIn("VANILLA_FRESNEL", names)
+        self.assertNotIn("HDR_OUTPUT", names)
+        self.assertNotIn("WETTERNESS", config["common_defines"])
 
         for shader in config["shaders"]:
+            if shader["file"] == "RunGrass.hlsl":
+                continue
             self.assertIn(
                 "WETTERNESS",
                 shader["configs"]["PSHADER"]["common_defines"],
             )
+
+    def test_bundled_grass_defines_match_native_factory_without_leaking(self) -> None:
+        for profile in (BUILDER.SHIPPED_CACHE_PROFILE, BUILDER.PATKA_CACHE_PROFILE):
+            with self.subTest(profile=profile.name):
+                original = self._sample_shader_config()
+                original["common_defines"].append("PBR_GRASS=0")
+                config = BUILDER.apply_cache_profile_defines(copy.deepcopy(original), profile)
+                flags = {"PBR_GRASS", "GRASS_OPTIMIZATIONS"}
+                self.assertTrue(flags.isdisjoint(self._all_define_names(config["common_defines"])))
+                for shader in config["shaders"]:
+                    stages = shader["configs"]
+                    if shader["file"] != "RunGrass.hlsl":
+                        self.assertTrue(flags.isdisjoint(self._all_define_names(stages)))
+                        continue
+                    for stage in stages.values():
+                        for flag in ("PBR_GRASS=1", "GRASS_OPTIMIZATIONS"):
+                            self.assertEqual(stage["common_defines"].count(flag), 1)
+                        self.assertNotIn("PBR_GRASS", stage["common_defines"])
+                        for entry in stage["entries"]:
+                            self.assertTrue(flags.isdisjoint(entry["defines"]))
+                grass_before = original["shaders"][0]["configs"]
+                grass_after = config["shaders"][0]["configs"]
+                self.assertEqual(
+                    {key: [entry["entry"] for entry in stage["entries"]] for key, stage in grass_before.items()},
+                    {key: [entry["entry"] for entry in stage["entries"]] for key, stage in grass_after.items()},
+                )
 
     def test_horizon_variants_layer_onto_the_shipped_profile(self) -> None:
         standard_config = BUILDER.apply_cache_profile_defines(
             copy.deepcopy(self._sample_shader_config()),
             BUILDER.SHIPPED_CACHE_PROFILE,
             additional_excluded_defines=frozenset({"HORIZON_FIX"}),
-            excluded_define_exceptions=frozenset({"WETNESS_EFFECTS"}),
         )
         standard_names = self._all_define_names(standard_config)
-        self.assertIn("WETNESS_EFFECTS", standard_names)
+        self.assertNotIn("WETNESS_EFFECTS", standard_names)
         self.assertNotIn("HORIZON_FIX", standard_names)
 
         horizon_config = BUILDER.apply_cache_profile_defines(
             copy.deepcopy(self._sample_shader_config()),
             BUILDER.SHIPPED_CACHE_PROFILE,
             additional_excluded_defines=frozenset({"HORIZON_FIX"}),
-            excluded_define_exceptions=frozenset({"WETNESS_EFFECTS"}),
             additional_file_defines={"Water.hlsl": ("HORIZON_FIX",)},
         )
         shaders = {
@@ -663,6 +735,7 @@ class ShaderCachePackagingTests(unittest.TestCase):
                 for entry in stages["VSHADER"]["entries"]
             },
             {
+                "Grass:Vertex:0": (),
                 "Grass:Vertex:5": (),
                 "Grass:Vertex:7": (),
             },
@@ -705,7 +778,7 @@ class ShaderCachePackagingTests(unittest.TestCase):
                 info.read(cache_dir / BUILDER.INFO_FILE_NAME, encoding="utf-8-sig")
                 self.assertFalse(info.has_option("HorizonFix", "ShaderCacheABI"))
                 BUILDER.write_shader_cache_manifest(
-                    cache_dir, root / "stage", "VR", {}, record_manifest, "test-shader-abi"
+                    cache_dir, root / "stage", "VR", {}, record_manifest, "test-shader-abi", []
                 )
 
         self.assertEqual(len(compile_states), 2)
@@ -742,6 +815,9 @@ class ShaderCachePackagingTests(unittest.TestCase):
         profile = BUILDER.derive_distribution_profile(REPO)
         self.assertEqual(profile.horizon_fix_define, "HORIZON_FIX")
         self.assertNotIn("HorizonFix", profile.excluded_short_names)
+        self.assertIn("WetnessEffects", profile.excluded_short_names)
+        self.assertIn("Wetness Effects", profile.excluded_packages)
+        self.assertIn("WETNESS_EFFECTS", profile.excluded_defines)
 
     def test_patka_profile_removes_disabled_feature_defines(self) -> None:
         self.assertEqual(
@@ -905,12 +981,20 @@ class ShaderCachePackagingTests(unittest.TestCase):
             )
             self.assertEqual(
                 BUILDER.default_plugin_version(source_root, "SE"),
-                "CSX 12.345-VR",
+                "CSX 12.345.0-VR",
             )
             self.assertEqual(
                 BUILDER.default_plugin_version(source_root, "VR"),
-                "CSX 12.345-VR",
+                "CSX 12.345.0-VR",
             )
+            variables = presets["configurePresets"][0]["cacheVariables"]
+            variables["CSX_RELEASE_VERSION"] = "12.345.7"
+            (source_root / "CMakePresets.json").write_text(json.dumps(presets), encoding="utf-8")
+            self.assertEqual(BUILDER.default_plugin_version(source_root, "SE"), "CSX 12.345.7-VR")
+            variables["CSX_RELEASE_VERSION"] = "12.346.0"
+            (source_root / "CMakePresets.json").write_text(json.dumps(presets), encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                BUILDER.default_plugin_version(source_root, "VR")
 
     def test_runtime_remains_in_each_record_compile_state(self) -> None:
         states: list[str] = []
@@ -938,6 +1022,7 @@ class ShaderCachePackagingTests(unittest.TestCase):
                     {},
                     record_manifest,
                     "a" * 64,
+                    [],
                 )
 
         self.assertEqual(

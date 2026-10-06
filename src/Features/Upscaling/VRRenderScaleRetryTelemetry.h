@@ -1,9 +1,9 @@
 #pragma once
 
 #ifdef DEVBENCH_BRIDGE_ENABLED
-#	include <array>
-#	include <cstdint>
-#	include <source_location>
+#include <array>
+#include <cstdint>
+#include <source_location>
 
 namespace VRRenderScaleRetryTelemetry
 {
@@ -26,15 +26,79 @@ namespace VRRenderScaleRetryTelemetry
 		SettleGuardSatisfied,
 		PromotionCandidate,
 		Promoted,
-		GuardCleared
+		GuardCleared,
+		RelatchDrainBegin,
+		RelatchDrainPending,
+		RelatchDrainReady,
+		RelatchDrainInvalidated,
+		RelatchCommitBegin,
+		RelatchSharedCleanup,
+		OwnedReleaseConsumed,
+		OwnedTargetPublished,
+		OwnedProviderPrepared,
+		OwnedReleaseEligibility
 	};
 
-	enum class FenceResult : uint8_t
+	enum class FenceResult : uint8_t { NotPolled, Pending, Ready, Failed };
+	enum class DrainFenceRole : uint8_t
 	{
-		NotPolled,
-		Pending,
-		Ready,
-		Failed
+		FSRHost,
+		FSRInterop,
+		FSRRuntime,
+		DLSSHost
+	};
+	enum OwnedReleaseObligation : uint32_t
+	{
+		OldProviderDrained = 1u << 0,
+		ProviderResetCompleted = 1u << 1,
+		DetachedRetirementOwned = 1u << 2,
+		PhysicalContractPublished = 1u << 3,
+		TargetProviderPrepared = 1u << 4,
+		CoherentStereo = 1u << 5
+	};
+
+	/** Observations of existing fence operations; identities are opaque, never dereferenced. */
+	struct DrainFenceObservation
+	{
+		bool observed = false;
+		DrainFenceRole role = DrainFenceRole::FSRHost;
+		FenceResult result = FenceResult::NotPolled;
+		uint64_t issueQpc = 0;
+		uint64_t readyQpc = 0;
+		uint64_t deviceIdentity = 0;
+		uint64_t contextIdentity = 0;
+		uint64_t queueIdentity = 0;
+		uint64_t fenceIdentity = 0;
+		uint64_t fenceValue = 0;
+	};
+
+	/** Historical ownership certificate; recording it does not authorize reuse of a live drain proof. */
+	struct OwnedReleaseObservation
+	{
+		bool observed = false;
+		uint32_t sourceGeneration = 0;
+		uint32_t requiredProviders = 0;  // FSR = 1, DLSS = 2.
+		uint64_t fsrRevision = 0;
+		uint64_t dlssRevision = 0;
+		uint64_t targetFSRRevision = 0;
+		uint64_t targetDLSSRevision = 0;
+		uint64_t fsrTicketSerial = 0;
+		uint64_t dlssTicketSerial = 0;
+		uint64_t certificateSerial = 0;
+		uint64_t targetQueueIdentity = 0;
+		uint64_t targetFenceIdentity = 0;
+		uint64_t deviceIdentity = 0;
+		uint64_t contextIdentity = 0;
+		uint64_t queueIdentity = 0;
+		uint64_t requestQueuedQpc = 0;
+		uint64_t blockingCleanupReadyQpc = 0;
+		uint32_t requiredObligations = 0;
+		uint32_t satisfiedObligations = 0;
+		bool oldProofConsumed = false;
+		bool targetPublished = false;
+		bool providerPrepared = false;
+		bool eligible = false;
+		bool presentationEligibility = false;
 	};
 
 	/** @brief Observations from existing viewport checks; never requests a GPU operation. */
@@ -60,59 +124,7 @@ namespace VRRenderScaleRetryTelemetry
 		uint32_t method = 0;
 		uint32_t qualityMode = 0;
 		uint32_t dlssPreset = 0;
-
-		[[nodiscard]] constexpr bool IsValid() const noexcept
-		{
-			return sessionID != 0 && requestID != 0 && transitionEpoch != 0;
-		}
-
-		friend constexpr bool operator==(const Context&, const Context&) = default;
 	};
-
-	struct ViewportOwner
-	{
-		Context context{};
-		uint64_t guardSerial = 0;
-		uint32_t generation = 0;
-
-		[[nodiscard]] constexpr bool IsValid() const noexcept
-		{
-			return context.IsValid() && guardSerial != 0 && generation != 0;
-		}
-	};
-
-	[[nodiscard]] constexpr bool OwnsViewportObservation(
-		const ViewportOwner& a_owner,
-		const Context& a_currentContext,
-		uint64_t a_currentGuardSerial,
-		uint32_t a_currentGeneration) noexcept
-	{
-		return a_owner.IsValid() && a_owner.context == a_currentContext &&
-		       a_owner.guardSerial == a_currentGuardSerial &&
-		       a_owner.generation == a_currentGeneration;
-	}
-
-	struct QualificationContext
-	{
-		bool known = false;
-		uint32_t requiredStableCycles = 0;
-		bool doorHandoff = false;
-	};
-
-	[[nodiscard]] constexpr QualificationContext ResolveQualificationContext(
-		EventType a_type,
-		uint32_t a_requiredStableCycles,
-		bool a_doorHandoff,
-		const QualificationContext& a_candidate) noexcept
-	{
-		if (a_type == EventType::PromotionCandidate ||
-			a_type == EventType::SettleGuardSatisfied) {
-			return { true, a_requiredStableCycles, a_doorHandoff };
-		}
-		if (a_type == EventType::Promoted || a_type == EventType::GuardCleared)
-			return a_candidate;
-		return {};
-	}
 
 	struct Event
 	{
@@ -137,9 +149,9 @@ namespace VRRenderScaleRetryTelemetry
 		uint32_t stableCycles = 0;
 		uint32_t requiredStableCycles = 0;
 		bool proofDrivenRelease = false;
-		bool qualificationKnown = false;
-		bool doorHandoff = false;
 		bool settleGuardRequired = false;
+		OwnedReleaseObservation ownedRelease{};
+		std::array<DrainFenceObservation, 4> drainFences{};
 	};
 
 	struct ViewportState
@@ -162,9 +174,7 @@ namespace VRRenderScaleRetryTelemetry
 		uint32_t count = 0;
 		uint64_t overwrittenEvents = 0;
 		Context guardContext{};
-		uint64_t guardSerial = 0;
 		bool settleGuardObserved = false;
-		QualificationContext promotionQualification{};
 		std::array<ViewportState, kViewportRoles> viewports{};
 		std::array<Event, kCapacity> events{};
 	};

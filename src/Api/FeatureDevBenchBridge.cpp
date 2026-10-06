@@ -119,8 +119,7 @@ namespace
 	{
 		const auto action = args.value("action", std::string{});
 		const bool known = action == "registry" || action == "snapshot" || action == "features" || action == "issues" || action == "preset_compatibility" || action == "settings" || action == "constraints" || action == "preflight" || action == "execute";
-		if (!known)
-			return Foundation().MakeError(args, "unknown_action", "action is not supported", "validation", false, "action");
+		if (!known) return Foundation().MakeError(args, "unknown_action", "action is not supported", "validation", false, "action");
 		if (action == "registry") {
 			auto response = Foundation().MakeEnvelope(args, true);
 			response["result"] = { { "service", ServiceName }, { "major", 1 }, { "minor", 1 }, { "schemaRevision", 2 },
@@ -243,16 +242,10 @@ namespace CSX::Api::FeatureDevBenchBridge
 {
 	void Install()
 	{
-		if (g_registered.load(std::memory_order_acquire))
-			return;
-		auto* host = DevBenchAPI::GetDevBenchInterface001();
-		if (!host) {
-			logger::info("FeatureDevBenchBridge: devbench host not present; feature API tool not registered");
-			return;
-		}
+		if (g_registered.load(std::memory_order_acquire)) return;
+		auto* host = DevBenchAPI::GetDevBenchInterface001(); if (!host) { logger::info("FeatureDevBenchBridge: devbench host not present; feature API tool not registered"); return; }
 		const char* descriptor = R"({"description":"Versioned CSX feature catalog, settings/constraint inspection, detected feature issues, preset compatibility diagnostics, and guarded boot-configuration API. issues returns boot warning data; preset_compatibility reports whether marked SettingsUser content was accepted or rejected.","inputSchema":{"type":"object","required":["contractMajor","clientId","commandId","action"],"properties":{"contractMajor":{"type":"integer","const":1},"clientId":{"type":"string","minLength":1,"maxLength":128},"commandId":{"type":"string","minLength":1,"maxLength":128},"expectedBuildId":{"type":"string"},"action":{"type":"string","enum":["registry","snapshot","features","issues","preset_compatibility","settings","constraints","preflight","execute"]},"featureShortName":{"type":"string"},"mutation":{"type":"object","required":["action","expectedStateRevision","featureShortName","disabled"],"properties":{"action":{"type":"string","const":"set_disabled_at_boot"},"expectedStateRevision":{"type":"integer","minimum":0},"featureShortName":{"type":"string"},"disabled":{"type":"boolean"},"persist":{"type":"boolean"},"allowDisruptive":{"type":"boolean"},"preflightToken":{"type":"string"}}}}}})";
-		host->RegisterTool("communityshaders.feature_api", descriptor, &Handler, nullptr);
-		g_registered.store(true, std::memory_order_release);
+		host->RegisterTool("communityshaders.feature_api", descriptor, &Handler, nullptr); g_registered.store(true, std::memory_order_release);
 		logger::info("FeatureDevBenchBridge: registered communityshaders.feature_api with devbench build {}", host->GetBuildNumber());
 	}
 	bool IsRegistered() { return g_registered.load(std::memory_order_acquire); }

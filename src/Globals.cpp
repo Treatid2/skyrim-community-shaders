@@ -15,6 +15,7 @@
 #include "Features/FoliageLighting.h"
 #include "Features/GrassCollision.h"
 #include "Features/GrassLighting.h"
+#include "Features/GrassOptimizations.h"
 #include "Features/HairSpecular.h"
 #include "Features/HorizonFix.h"
 #include "Features/IBL.h"
@@ -72,6 +73,7 @@ namespace globals
 		FoliageLighting foliageLighting{};
 		GrassCollision grassCollision{};
 		GrassLighting grassLighting{};
+		GrassOptimizations grassOptimizations{};
 		IBL ibl{};
 		LightLimitFix lightLimitFix{};
 		LinearLighting linearLighting{};
@@ -317,7 +319,9 @@ namespace globals
 	{
 		stl::detour_vfunc<14, ID3D11DeviceContext_Map>(a_context);
 		stl::detour_vfunc<15, ID3D11DeviceContext_Unmap>(a_context);
+#ifdef DEVBENCH_BRIDGE_ENABLED
 		Upscaling::InstallVRMenuPresentationTraceD3DHooks(a_context);
+#endif
 		UnderwaterDepthOfField::InstallD3DHooks(a_context);
 #ifdef DEVBENCH_BRIDGE_ENABLED
 		CSX::RenderMap::InstallD3DContextHooks(a_context);

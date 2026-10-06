@@ -1,11 +1,16 @@
 #include "Features/ScreenshotApiPolicy.h"
+#include "Features/ScreenshotStorageSecurity.cpp"
+#include "screenshot_storage_security_test.h"
 
+#include <iostream>
 #include <stdexcept>
 
 using namespace std::chrono_literals;
+#pragma comment(lib, "bcrypt.lib")
 
 int main()
-{
+try {
+	RunScreenshotStorageSecurityTests();
 	using namespace CSX::ScreenshotPolicy;
 	if (PublicationRetryDelay(0) != 0ms ||
 		PublicationRetryDelay(1) != 100ms ||
@@ -18,6 +23,22 @@ int main()
 		!IsPublicationRetryEligible(retryNow, retryNow) ||
 		IsPublicationRetryEligible(retryNow, retryNow + 1ms))
 		throw std::runtime_error("publication retry eligibility is invalid");
+	if (SelectSettingsCaptureSource("hmd_submission", true) != "hmd_submission" ||
+		SelectSettingsCaptureSource("hmd_submission", false) != "desktop_mirror" ||
+		SelectSettingsCaptureSource("desktop_mirror", true) != "desktop_mirror")
+		throw std::runtime_error("settings capture source ignored the active runtime");
+	const auto hmd = ResolveCaptureSource("hmd_submission", "reject", true);
+	const auto desktopFallback = ResolveCaptureSource("hmd_submission", "desktop_mirror", false);
+	if (!hmd || hmd.resolved != "hmd_submission" || hmd.fallbackUsed ||
+		!desktopFallback || desktopFallback.resolved != "desktop_mirror" || !desktopFallback.fallbackUsed ||
+		ResolveCaptureSource("hmd_submission", "reject", false) ||
+		ResolveCaptureSource("unknown", "reject", true))
+		throw std::runtime_error("capture source availability or fallback policy is invalid");
+	const std::filesystem::path stillDirectory = "still-invalid";
+	const std::filesystem::path sequenceDirectory = "frame-valid";
+	if (SelectConfiguredCaptureDirectory(stillDirectory, sequenceDirectory, false) != stillDirectory ||
+		SelectConfiguredCaptureDirectory(stillDirectory, sequenceDirectory, true) != sequenceDirectory)
+		throw std::runtime_error("still and sequence destination domains are not independent");
 	for (const auto* unsafe : { "", ".", "..", "CON", "con.txt", "NUL.png", "COM1", "LPT9.log",
 			 "trailing.", "trailing ", "stream:name", "star*", "slash/", "back\\slash", "caf\xC3\xA9" }) {
 		if (IsSafeWindowsFilenameSegment(unsafe))
@@ -110,6 +131,14 @@ int main()
 		IsContainedPath(captureRoot, captureRoot.parent_path() / "Other") ||
 		IsContainedPath(captureRoot, captureRoot / ".." / "Other"))
 		throw std::runtime_error("settings-default containment policy is invalid");
+	const auto relativeArtifact = RelativeContainedArtifactPath(
+		captureRoot, captureRoot / "CS_sequence_fixture" / "left" / "frame.bmp");
+	if (!relativeArtifact ||
+		*relativeArtifact != std::filesystem::path("CS_sequence_fixture/left/frame.bmp") ||
+		RelativeContainedArtifactPath(captureRoot, captureRoot) ||
+		RelativeContainedArtifactPath(captureRoot, captureRoot.parent_path() / "outside.bmp")) {
+		throw std::runtime_error("sequence artifact publication containment is invalid");
+	}
 	if (!IsWallClockScheduleWithinLimit(0, 1000, 3601) ||
 		IsWallClockScheduleWithinLimit(1, 1000, 3601))
 		throw std::runtime_error("wall-clock sequence limit is invalid");
@@ -117,4 +146,7 @@ int main()
 		IsGameFrameScheduleWithinLimit(1, 60, 3601))
 		throw std::runtime_error("game-frame sequence limit is invalid");
 	return 0;
+} catch (const std::exception& error) {
+	std::cerr << error.what() << '\n';
+	return 1;
 }

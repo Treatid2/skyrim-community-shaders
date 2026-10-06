@@ -20,6 +20,7 @@
 #include "../../State.h"
 #include "../../Util.h"
 #include "../Upscaling.h"
+#include "CameraReprojection.h"
 #include "DX12SwapChain.h"
 #include "NvidiaBoundedLog.h"
 #include "NvidiaPipelinePolicy.h"
@@ -405,6 +406,7 @@ namespace
 		return hash;
 	}
 
+#ifdef DEVBENCH_BRIDGE_ENABLED
 	std::string FormatExtent(const sl::Extent& a_extent)
 	{
 		return std::format("top={} left={} width={} height={}", a_extent.top, a_extent.left, a_extent.width, a_extent.height);
@@ -439,6 +441,7 @@ namespace
 	{
 		return globals::state && globals::state->IsDeveloperMode();
 	}
+#endif
 
 	std::string FormatDLSSDiagnosticResult(int32_t a_resultCode, std::string_view a_resultLabel)
 	{
@@ -789,7 +792,7 @@ namespace
 				}
 			} else if (a_stage == Streamline::DLSSDevBenchTraceStage::Evaluate) {
 				++state.evaluateCalls;
-				if (a_resultCode != static_cast<int32_t>(sl::Result::eOk)) {
+				if (!DLSSResultPolicy::IsEvaluationSuccessful(static_cast<sl::Result>(a_resultCode))) {
 					++state.evaluateFailures;
 					state.lastEvaluateFailureFound = true;
 					state.lastEvaluateFailure = record;
@@ -926,6 +929,7 @@ namespace
 		return emit;
 	}
 
+#ifdef DEVBENCH_BRIDGE_ENABLED
 	void LogDLSSDispatchDiagnostics(
 		DLSSDiagnosticStage a_stage,
 		int32_t a_resultCode,
@@ -1029,6 +1033,7 @@ namespace
 			a_result ? std::string_view(a_result) : std::string_view(),
 			a_diagnostics);
 	}
+#endif
 
 	D3D11IdleFenceResult BeginOrPollD3D11IdleFence(ID3D11DeviceContext* a_context, ID3D11Query*& a_query, const char* a_reason)
 	{
@@ -1407,6 +1412,7 @@ bool Streamline::LoadInterposer()
 	InvalidateDLSSOptionsCache();
 	reflexOptionsCache = {};
 	lastReflexSleepFrame = UINT32_MAX;
+	dlssBudgetWarningThrottle.Reset();
 	lifecycleState.store(LifecycleState::Initialized, std::memory_order_release);
 	logger::info("[Streamline] Successfully initialized Streamline");
 	return true;
@@ -1415,6 +1421,7 @@ bool Streamline::LoadInterposer()
 void Streamline::Shutdown()
 {
 	std::scoped_lock lifecycleLock(lifecycleMutex);
+	InvalidateDLSSRelatchDrain();
 	const auto state = lifecycleState.load(std::memory_order_acquire);
 	if (state == LifecycleState::Uninitialized || state == LifecycleState::ShuttingDown ||
 		state == LifecycleState::ShutdownQuarantined)
@@ -1517,6 +1524,7 @@ bool Streamline::TrySetD3DDevice(ID3D11Device* a_device)
 	if (boundDeviceIdentity == a_device)
 		return true;
 
+	InvalidateDLSSRelatchDrain();
 	const sl::Result result = slSetD3DDevice(a_device);
 	if (result != sl::Result::eOk) {
 		logger::error("[Streamline] D3D device binding failed: {}", magic_enum::enum_name(result));
@@ -1766,7 +1774,9 @@ bool Streamline::CheckFrameConstants(sl::ViewportHandle p_viewport, sl::FrameTok
 		return false;
 
 	if (!frameToken) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
 		LogDLSSDispatchDiagnostics(DLSSDiagnosticStage::FrameToken, "unavailable", diagnostics);
+#endif
 		return false;
 	}
 
@@ -1780,7 +1790,9 @@ bool Streamline::CheckFrameConstants(sl::ViewportHandle p_viewport, sl::FrameTok
 	if (temporalSnapshot &&
 		(!temporalSnapshot->valid || eyeIndex >= temporalSnapshot->eyes.size() ||
 			temporalSnapshot->key.frame != static_cast<uint32_t>(*frameToken))) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
 		LogDLSSDispatchDiagnostics(DLSSDiagnosticStage::FrameToken, "temporal-snapshot-mismatch", diagnostics);
+#endif
 		return false;
 	}
 	bool applyCroppedConstantsCorrection = false;
@@ -1812,16 +1824,24 @@ bool Streamline::CheckFrameConstants(sl::ViewportHandle p_viewport, sl::FrameTok
 	slConstants.cameraFar = temporalSnapshot ? temporalSnapshot->scalars.cameraFar : *globals::game::cameraFar;
 
 	auto viewMatrix = (temporalSnapshot ? temporalSnapshot->eyes[eyeIndex].viewInverse : globals::game::frameBufferCached.GetCameraViewInverse(eyeIndex)).Transpose();
-	auto cameraViewToClip = (temporalSnapshot ? temporalSnapshot->eyes[eyeIndex].projectionUnjittered : globals::game::frameBufferCached.GetCameraProjUnjittered(eyeIndex)).Transpose();
+	const auto& cameraPosition = temporalSnapshot ? temporalSnapshot->eyes[eyeIndex].position : globals::game::frameBufferCached.GetCameraPosAdjust(eyeIndex);
+	const auto& previousCameraPosition = temporalSnapshot ? temporalSnapshot->eyes[eyeIndex].previousPosition : globals::game::frameBufferCached.GetCameraPreviousPosAdjust(eyeIndex);
+	const auto cameraMatrices = UpscalingCamera::BuildReprojection(
+		viewMatrix,
+		(temporalSnapshot ? temporalSnapshot->eyes[eyeIndex].viewProjectionUnjittered : globals::game::frameBufferCached.GetCameraViewProjUnjittered(eyeIndex)).Transpose(),
+		(temporalSnapshot ? temporalSnapshot->eyes[eyeIndex].previousViewProjectionUnjittered : globals::game::frameBufferCached.GetCameraPreviousViewProjUnjittered(eyeIndex)).Transpose(),
+		float3(cameraPosition.x - previousCameraPosition.x, cameraPosition.y - previousCameraPosition.y, cameraPosition.z - previousCameraPosition.z));
 
 	slConstants.cameraMotionIncluded = sl::Boolean::eTrue;
 	slConstants.cameraPinholeOffset = { 0.f, 0.f };
 	slConstants.cameraRight = { viewMatrix._11, viewMatrix._12, viewMatrix._13 };
 	slConstants.cameraUp = { viewMatrix._21, viewMatrix._22, viewMatrix._23 };
 	slConstants.cameraFwd = { viewMatrix._31, viewMatrix._32, viewMatrix._33 };
-	const auto& cameraPosition = temporalSnapshot ? temporalSnapshot->eyes[eyeIndex].position : globals::game::frameBufferCached.GetCameraPosAdjust(eyeIndex);
 	slConstants.cameraPos = { cameraPosition.x, cameraPosition.y, cameraPosition.z };
-	slConstants.cameraViewToClip = *(sl::float4x4*)&cameraViewToClip;
+	slConstants.cameraViewToClip = std::bit_cast<sl::float4x4>(cameraMatrices.cameraViewToClip);
+	slConstants.clipToCameraView = std::bit_cast<sl::float4x4>(cameraMatrices.clipToCameraView);
+	slConstants.clipToPrevClip = std::bit_cast<sl::float4x4>(cameraMatrices.clipToPrevClip);
+	slConstants.prevClipToClip = std::bit_cast<sl::float4x4>(cameraMatrices.prevClipToClip);
 	slConstants.depthInverted = sl::Boolean::eFalse;
 
 	if (globals::game::isVR) {
@@ -1850,19 +1870,7 @@ bool Streamline::CheckFrameConstants(sl::ViewportHandle p_viewport, sl::FrameTok
 			};
 		}
 
-		// VR: compute clipToCameraView / clipToPrevClip / prevClipToClip from Skyrim's per-eye matrices.
-		// recalculateCameraMatrices() uses a single static prev-frame slot -- unusable for two viewports.
 		sl::matrixFullInvert(slConstants.clipToCameraView, slConstants.cameraViewToClip);
-
-		auto currViewProj = (temporalSnapshot ? temporalSnapshot->eyes[eyeIndex].viewProjectionUnjittered : globals::game::frameBufferCached.GetCameraViewProjUnjittered(eyeIndex)).Transpose();
-		auto prevViewProj = (temporalSnapshot ? temporalSnapshot->eyes[eyeIndex].previousViewProjectionUnjittered : globals::game::frameBufferCached.GetCameraPreviousViewProjUnjittered(eyeIndex)).Transpose();
-
-		sl::float4x4 currViewProjSL = *(sl::float4x4*)&currViewProj;
-		sl::float4x4 prevViewProjSL = *(sl::float4x4*)&prevViewProj;
-
-		sl::float4x4 invCurrViewProj;
-		sl::matrixFullInvert(invCurrViewProj, currViewProjSL);
-		sl::matrixMul(slConstants.clipToPrevClip, invCurrViewProj, prevViewProjSL);
 
 		if (applyCroppedConstantsCorrection) {
 			const float invScaleX = 1.0f / clampedViewportScaleX;
@@ -1881,8 +1889,6 @@ bool Streamline::CheckFrameConstants(sl::ViewportHandle p_viewport, sl::FrameTok
 		}
 
 		sl::matrixFullInvert(slConstants.prevClipToClip, slConstants.clipToPrevClip);
-	} else {
-		recalculateCameraMatrices(slConstants);
 	}
 
 	const auto jitter = upscaling.GetJitterForDispatch();
@@ -2049,7 +2055,9 @@ bool Streamline::CheckFrameConstants(sl::ViewportHandle p_viewport, sl::FrameTok
 		} else {
 			logger::error("[Streamline] Could not set constants for eye {}", eyeIndex);
 		}
+#ifdef DEVBENCH_BRIDGE_ENABLED
 		LogDLSSDispatchDiagnostics(DLSSDiagnosticStage::SetConstants, res, diagnostics);
+#endif
 		return false;
 	}
 
@@ -2089,7 +2097,7 @@ bool Streamline::IsRTXAndBelow40Series(const DXGI_ADAPTER_DESC& a_adapterDesc) c
 	return false;
 }
 
-bool Streamline::SetDLSSOptions(DLSSViewportRole viewportRole, sl::ViewportHandle p_viewport, uint32_t eyeIndex, uint32_t width, uint32_t height, bool colorBuffersHDR, uint32_t qualityMode, uint32_t dlssPreset, const DLSSDispatchDiagnostics* diagnostics)
+bool Streamline::SetDLSSOptions(DLSSViewportRole viewportRole, sl::ViewportHandle p_viewport, uint32_t eyeIndex, uint32_t width, uint32_t height, bool colorBuffersHDR, uint32_t qualityMode, uint32_t dlssPreset, [[maybe_unused]] const DLSSDispatchDiagnostics* diagnostics)
 {
 	if (!slDLSSSetOptions)
 		return false;
@@ -2173,12 +2181,15 @@ bool Streamline::SetDLSSOptions(DLSSViewportRole viewportRole, sl::ViewportHandl
 	dlssOptions.preExposure = 1.0f;
 	dlssOptions.sharpness = 0.0f;
 
+	InvalidateDLSSRelatchDrain();
 	if (SL_FAILED(result, slDLSSSetOptions(p_viewport, dlssOptions))) {
 		logger::critical("[Streamline] Could not enable DLSS for viewport {} eye {}: {}",
 			static_cast<uint32_t>(p_viewport),
 			eyeIndex,
 			magic_enum::enum_name(result));
+#ifdef DEVBENCH_BRIDGE_ENABLED
 		LogDLSSDispatchDiagnostics(DLSSDiagnosticStage::SetOptions, result, diagnostics);
+#endif
 		cache.valid = false;
 		return false;
 	}
@@ -2341,6 +2352,7 @@ bool Streamline::CanPrepareVRDLSSViewportWithoutRecycle(
 
 bool Streamline::FreeDLSSViewportResources(sl::ViewportHandle a_viewport, uint32_t a_eyeIndex, bool a_logFailures)
 {
+	InvalidateDLSSRelatchDrain();
 	if (!slDLSSSetOptions || !slFreeResources)
 		return true;
 
@@ -2403,7 +2415,8 @@ Streamline::DLSSViewportPreparationResult Streamline::PrepareVRDLSSViewport(
 	uint32_t qualityMode,
 	uint32_t dlssPreset
 #ifdef DEVBENCH_BRIDGE_ENABLED
-	, VRRenderScaleRetryTelemetry::ViewportObservation* a_observation
+	,
+	VRRenderScaleRetryTelemetry::ViewportObservation* a_observation
 #endif
 )
 {
@@ -2455,9 +2468,10 @@ Streamline::DLSSViewportPreparationResult Streamline::PrepareVRDLSSViewport(
 				if (a_observation) {
 					a_observation->reason = "cache_hit_superseded_recycle";
 					a_observation->fenceResult = idleFenceResult == D3D11IdleFenceResult::Pending ?
-						VRRenderScaleRetryTelemetry::FenceResult::Pending :
-						idleFenceResult == D3D11IdleFenceResult::Ready ?
-						VRRenderScaleRetryTelemetry::FenceResult::Ready : VRRenderScaleRetryTelemetry::FenceResult::Failed;
+					                                 VRRenderScaleRetryTelemetry::FenceResult::Pending :
+					                             idleFenceResult == D3D11IdleFenceResult::Ready ?
+					                                 VRRenderScaleRetryTelemetry::FenceResult::Ready :
+					                                 VRRenderScaleRetryTelemetry::FenceResult::Failed;
 				}
 #endif
 				if (idleFenceResult == D3D11IdleFenceResult::Failed)
@@ -2504,9 +2518,10 @@ Streamline::DLSSViewportPreparationResult Streamline::PrepareVRDLSSViewport(
 			if (a_observation) {
 				a_observation->reason = "viewport_recycle_fence";
 				a_observation->fenceResult = idleFenceResult == D3D11IdleFenceResult::Pending ?
-					VRRenderScaleRetryTelemetry::FenceResult::Pending :
-					idleFenceResult == D3D11IdleFenceResult::Ready ?
-					VRRenderScaleRetryTelemetry::FenceResult::Ready : VRRenderScaleRetryTelemetry::FenceResult::Failed;
+				                                 VRRenderScaleRetryTelemetry::FenceResult::Pending :
+				                             idleFenceResult == D3D11IdleFenceResult::Ready ?
+				                                 VRRenderScaleRetryTelemetry::FenceResult::Ready :
+				                                 VRRenderScaleRetryTelemetry::FenceResult::Failed;
 			}
 #endif
 			if (idleFenceResult == D3D11IdleFenceResult::Pending) {
@@ -2816,7 +2831,7 @@ bool Streamline::EvaluateDLSS(sl::ViewportHandle vp, uint32_t eyeIndex,
 		return false;
 	const bool vendorLifecycleMutationDeferred =
 		globals::game::isVR &&
-		upscaling.ShouldDeferVRVendorLifecycleMutation();
+		(upscaling.ShouldDeferVRVendorLifecycleMutation() || upscaling.ShouldReuseOrdinarySaveResources());
 	const bool existingProviderOnly =
 		vendorLifecycleMutationDeferred || useAuthoritativeProfile;
 	const auto existingProvider =
@@ -2864,8 +2879,6 @@ bool Streamline::EvaluateDLSS(sl::ViewportHandle vp, uint32_t eyeIndex,
 
 #ifdef DEVBENCH_BRIDGE_ENABLED
 	const bool collectDLSSDiagnostics = ShouldLogDLSSDiagnostics() || IsDLSSDevBenchTraceActive();
-#else
-	const bool collectDLSSDiagnostics = ShouldLogDLSSDiagnostics();
 #endif
 	DLSSDispatchDiagnostics diagnostics{};
 	DLSSDispatchDiagnostics* diagnosticsPtr = &diagnostics;
@@ -2887,6 +2900,7 @@ bool Streamline::EvaluateDLSS(sl::ViewportHandle vp, uint32_t eyeIndex,
 	diagnostics.pinholeOffsetX = pinholeOffsetX;
 	diagnostics.pinholeOffsetY = pinholeOffsetY;
 	diagnostics.submitStageVRDLSS = submitStageVRDLSS;
+#ifdef DEVBENCH_BRIDGE_ENABLED
 	diagnostics.colorIn = colorIn;
 	diagnostics.colorOut = colorOut;
 	diagnostics.depth = depth;
@@ -2918,6 +2932,7 @@ bool Streamline::EvaluateDLSS(sl::ViewportHandle vp, uint32_t eyeIndex,
 		diagnostics.optionsCacheHDR = optionsCache.isHDR;
 		diagnostics.optionsCacheLegacyProfile = optionsCache.useLegacyProfile;
 	};
+#endif
 
 	if (existingProviderOnly) {
 		if (!TryResolveExistingVRDLSSViewport(
@@ -2929,28 +2944,36 @@ bool Streamline::EvaluateDLSS(sl::ViewportHandle vp, uint32_t eyeIndex,
 				extentOut.height,
 				colorIn,
 				vp)) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
 			LogDLSSDispatchDiagnostics(DLSSDiagnosticStage::ResolveViewport, "lifecycle-gated", diagnosticsPtr);
+#endif
 			return false;
 		}
 	} else if (!ResolveDLSSViewport(viewportRole, vp, eyeIndex, qualityMode, dlssPreset, vp)) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
 		LogDLSSDispatchDiagnostics(DLSSDiagnosticStage::ResolveViewport, "unavailable", diagnosticsPtr);
+#endif
 		return false;
 	}
 	diagnostics.resolvedViewport = vp;
+#ifdef DEVBENCH_BRIDGE_ENABLED
 	updateOptionsCacheDiagnostics();
 
-#ifdef DEVBENCH_BRIDGE_ENABLED
 	DLSSDevBenchTraceSignature devBenchFrameConstantsSignature{};
 	auto* devBenchFrameConstantsSignaturePtr = IsDLSSDevBenchTraceActive() ? &devBenchFrameConstantsSignature : nullptr;
 #endif
 	const auto frameTokenSnapshot = AcquireFrameToken(diagnostics.frame, "dlss");
 	if (!frameTokenSnapshot) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
 		LogDLSSDispatchDiagnostics(DLSSDiagnosticStage::FrameToken, "unavailable", diagnosticsPtr);
+#endif
 		return false;
 	}
 	auto* const frameToken = frameTokenSnapshot->token;
 	diagnostics.frame = frameTokenSnapshot->frame;
+#ifdef DEVBENCH_BRIDGE_ENABLED
 	diagnostics.frameToken = frameToken;
+#endif
 	if (!CheckFrameConstants(
 			vp,
 			frameToken,
@@ -2969,7 +2992,9 @@ bool Streamline::EvaluateDLSS(sl::ViewportHandle vp, uint32_t eyeIndex,
 	if (!existingProviderOnly &&
 		!SetDLSSOptions(viewportRole, vp, eyeIndex, outputWidth, extentOut.height, colorBuffersHDR, qualityMode, dlssPreset, diagnosticsPtr))
 		return false;
+#ifdef DEVBENCH_BRIDGE_ENABLED
 	updateOptionsCacheDiagnostics();
+#endif
 
 	// These markers currently surround only a DLSS evaluation, not Skyrim's
 	// complete render submission. Keep marker-driven scheduling disabled on every
@@ -3030,6 +3055,7 @@ bool Streamline::EvaluateDLSS(sl::ViewportHandle vp, uint32_t eyeIndex,
 	}
 
 	emitPCLMarker(sl::PCLMarker::eRenderSubmitStart, "DLSS-EvaluateStart", 0);
+	InvalidateDLSSRelatchDrain();
 	sl::Result evalResult = slEvaluateFeature(sl::kFeatureDLSS, *frameToken, inputs, _countof(inputs), context);
 	emitPCLMarker(sl::PCLMarker::eRenderSubmitEnd, "DLSS-EvaluateEnd", 1);
 
@@ -3046,8 +3072,20 @@ bool Streamline::EvaluateDLSS(sl::ViewportHandle vp, uint32_t eyeIndex,
 	if (state && state->frameAnnotations)
 		state->EndPerfEvent();
 
-	if (evalResult != sl::Result::eOk) {
+	const bool evaluationSucceeded = DLSSResultPolicy::IsEvaluationSuccessful(evalResult);
+	if (evalResult == sl::Result::eWarnOutOfVRAM) {
+		const uint32_t logEye = globals::game::isVR ? eyeIndex : 0u;
+		const uint32_t frame = state ? state->frameCount : 0u;
+		if (dlssBudgetWarningThrottle.ShouldLog(logEye, frame)) {
+			logger::warn("[Streamline] DLSS output valid but VRAM budget exceeded{} frame={} viewport={} result={} ({})",
+				globals::game::isVR ? std::format(" for eye {}", eyeIndex) : "",
+				frame, static_cast<uint32_t>(vp), static_cast<int>(evalResult), magic_enum::enum_name(evalResult));
+		}
+	}
+	if (!evaluationSucceeded) {
+#ifdef DEVBENCH_BRIDGE_ENABLED
 		LogDLSSDispatchDiagnostics(DLSSDiagnosticStage::Evaluate, evalResult, diagnosticsPtr);
+#endif
 		static sl::ViewportHandle lastLoggedEvalErrorViewport[2] = {};
 		static sl::Result lastLoggedEvalErrorResult[2] = {};
 		uint32_t logIdx = globals::game::isVR ? std::min(eyeIndex, 1u) : 0;
@@ -3076,7 +3114,7 @@ bool Streamline::EvaluateDLSS(sl::ViewportHandle vp, uint32_t eyeIndex,
 		}
 	}
 
-	return evalResult == sl::Result::eOk;
+	return evaluationSucceeded;
 }
 
 bool Streamline::UpscaleRegion(uint32_t eyeIndex, ID3D11Resource* colorIn, ID3D11Resource* colorOut, ID3D11Resource* depth,
@@ -3161,7 +3199,7 @@ bool Streamline::Upscale(ID3D11Resource* a_upscalingTexture, ID3D11Resource* a_r
 				upscaling.GetActiveVRRenderScaleContractGeneration() :
 				0u;
 		const bool vendorLifecycleMutationDeferred =
-			upscaling.ShouldDeferVRVendorLifecycleMutation();
+			upscaling.ShouldDeferVRVendorLifecycleMutation() || upscaling.ShouldReuseOrdinarySaveResources();
 		const auto existingProvider =
 			vendorLifecycleMutationDeferred ?
 				upscaling.GetExistingVRVendorProviderSnapshot() :
@@ -3407,13 +3445,69 @@ bool Streamline::Upscale(ID3D11Resource* a_upscalingTexture, ID3D11Resource* a_r
 		return evaluated;
 	}
 }
-/**
- * @brief Releases DLSS resources and disables DLSS for the current viewport.
- *
- * Sets the DLSS mode to off and frees all DLSS-related resources associated with the viewport.
- */
-Streamline::DLSSResourceTeardownResult Streamline::DestroyDLSSResources()
+void Streamline::CancelDLSSRelatchDrain() noexcept
 {
+	dlssRelatchDrainProof.Cancel();
+	dlssRelatchDrainFence.Reset();
+	dlssRelatchDrainDevice = nullptr;
+}
+
+void Streamline::InvalidateDLSSRelatchDrain() noexcept
+{
+	CancelDLSSRelatchDrain();
+	dlssRelatchDrainProof.Invalidate();
+}
+
+bool Streamline::IsDLSSRelatchDrainReady(uint64_t a_epoch) const noexcept
+{
+	return globals::game::isVR && dlssRelatchDrainProof.IsReady(a_epoch) &&
+	       dlssRelatchDrainDevice.get() == globals::d3d::device &&
+	       boundDeviceIdentity == dlssRelatchDrainDevice.get() &&
+	       initialized && featureDLSS && slDLSSSetOptions && slFreeResources;
+}
+
+Streamline::DLSSResourceTeardownResult Streamline::PollDLSSRelatchDrain(uint64_t a_epoch)
+{
+	if (!globals::game::isVR || a_epoch == 0 || !globals::d3d::device || !globals::d3d::context ||
+		boundDeviceIdentity != globals::d3d::device ||
+		!initialized || !featureDLSS || !slDLSSSetOptions || !slFreeResources ||
+		FAILED(globals::d3d::device->GetDeviceRemovedReason())) {
+		return DLSSResourceTeardownResult::Failed;
+	}
+	if (!dlssRelatchDrainProof.Matches(a_epoch)) {
+		CancelDLSSRelatchDrain();
+		(void)dlssRelatchDrainProof.Begin(a_epoch);
+		dlssRelatchDrainDevice.copy_from(globals::d3d::device);
+	}
+	if (dlssRelatchDrainDevice.get() != globals::d3d::device)
+		return DLSSResourceTeardownResult::Failed;
+	if (IsDLSSRelatchDrainReady(a_epoch))
+		return DLSSResourceTeardownResult::Ready;
+	if (!HasDLSSResourcesPendingTeardown()) {
+		dlssRelatchDrainProof.MarkReady(a_epoch);
+		return DLSSResourceTeardownResult::Ready;
+	}
+	const auto result = dlssRelatchDrainFence.Poll(globals::d3d::context, "Upscaling::DLSSRelatchDrain");
+	if (result == VRRelatchDrainFence::Result::Ready) {
+		dlssRelatchDrainProof.MarkReady(a_epoch);
+		return DLSSResourceTeardownResult::Ready;
+	}
+	return result == VRRelatchDrainFence::Result::Pending ? DLSSResourceTeardownResult::Pending : DLSSResourceTeardownResult::Failed;
+}
+
+#ifdef DEVBENCH_BRIDGE_ENABLED
+void Streamline::CaptureDLSSRelatchDrainTelemetry(VRRenderScaleRetryTelemetry::Event& a_event) const noexcept
+{
+	a_event.drainFences[3] = dlssRelatchDrainFence.GetObservation();
+	a_event.drainFences[3].role = VRRenderScaleRetryTelemetry::DrainFenceRole::DLSSHost;
+}
+#endif
+
+/** Releases DLSS resources after consuming the exact drain proof or the legacy idle fence. */
+Streamline::DLSSResourceTeardownResult Streamline::DestroyDLSSResources(uint64_t a_drainEpoch)
+{
+	if (a_drainEpoch != 0 && !IsDLSSRelatchDrainReady(a_drainEpoch))
+		return DLSSResourceTeardownResult::Pending;
 	const bool hasTrackedViewportOwnership = [&]() {
 		if (activeDLSSViewportResourcesAllocated[0] ||
 			activeDLSSViewportResourcesAllocated[1] ||
@@ -3449,7 +3543,7 @@ Streamline::DLSSResourceTeardownResult Streamline::DestroyDLSSResources()
 		return DLSSResourceTeardownResult::Ready;
 	}
 
-	if (auto context = globals::d3d::context) {
+	if (auto context = globals::d3d::context; context && a_drainEpoch == 0) {
 		const auto idleFenceResult = BeginOrPollD3D11IdleFence(context, pendingDLSSResourceFreeIdleFence, "DLSS resource free");
 		if (idleFenceResult == D3D11IdleFenceResult::Pending) {
 			static bool loggedDLSSResourceFreePending = false;
@@ -3465,6 +3559,7 @@ Streamline::DLSSResourceTeardownResult Streamline::DestroyDLSSResources()
 		ResetDLSSIdleFences();
 	}
 
+	InvalidateDLSSRelatchDrain();
 	bool activeViewportResourcesFreed = true;
 	if (activeDLSSViewportResourcesAllocated[0]) {
 		const bool leftFreed = FreeDLSSViewportResources(viewport, 0, true);

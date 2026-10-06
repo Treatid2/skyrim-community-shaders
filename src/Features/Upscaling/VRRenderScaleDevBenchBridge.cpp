@@ -15,6 +15,9 @@
 #	include "Globals.h"
 #	include "ShaderCache.h"
 #	include "State.h"
+#	include "Utils/D3DContextProtection.h"
+#	include "Utils/RendererContextAccess.h"
+#	include "Utils/VRLoadingMenuClear.h"
 #	include "Utils/Form.h"
 #	include "VRAPI/CSserviceapi.h"
 #	include "VRAPI/CSupscalingapi.h"
@@ -51,7 +54,7 @@ namespace
 	static_assert(kDLSSDevBenchTraceDefaultReadLimit <= Streamline::kDLSSDevBenchTraceCapacity);
 	constexpr uint64_t kQualificationMaximumTimeoutMs = 120'000;
 	constexpr double kQualificationFoveationFloatTolerance = 0.0001;
-	constexpr unsigned int kDevBenchToolExtensionRevision = 10;
+	constexpr unsigned int kDevBenchToolExtensionRevision = 12;
 	std::atomic_bool g_registered{ false };
 	std::atomic_uint64_t g_nextDiagnosticTrimEpoch{ 1ull << 63 };
 	using SubmitBoundaryRejection = VRSubmitInputFreshnessPolicy::OuterBoundaryRejection;
@@ -1022,6 +1025,26 @@ namespace
 			{ "loadingPresentationActive", a_gate.loadingPresentationActive },
 			{ "raceSexPresentationActive", a_gate.raceSexPresentationActive },
 			{ "saveLoadProtectionActive", a_gate.saveLoadProtectionActive },
+			{ "ordinarySaveRecovery", {
+										  { "saveToken", a_gate.ordinarySaveToken },
+										  { "presentationReady", a_gate.ordinarySavePresentationReady },
+										  { "persistenceBlocked", a_gate.ordinarySavePersistenceBlocked },
+										  { "proofSaveToken", a_gate.ordinarySaveProof.identity.saveToken },
+										  { "contractGeneration", a_gate.ordinarySaveProof.identity.generation },
+										  { "resourceKey", a_gate.ordinarySaveProof.identity.resourceKey },
+										  { "method", a_gate.ordinarySaveProof.identity.method },
+										  { "commonResourceGeneration", a_gate.ordinarySaveProof.identity.commonResourceGeneration },
+										  { "intermediateGeneration", a_gate.ordinarySaveProof.identity.intermediateGeneration },
+										  { "firstFrame", a_gate.ordinarySaveProof.firstFrame },
+										  { "lastCompleteFrame", a_gate.ordinarySaveProof.lastCompleteFrame },
+										  { "stableFrames", a_gate.ordinarySaveProof.stableFrames },
+										  { "requiredStereoFrames", VROrdinarySaveRecovery::kRequiredStereoFrames },
+										  { "producerScope", a_gate.ordinarySaveProof.boundary.scopeToken },
+										  { "submitFlags", a_gate.ordinarySaveProof.boundary.submitFlags },
+										  { "qualifiedFrame", a_gate.ordinarySaveProof.qualifiedFrame },
+										  { "qualifiedCycle", a_gate.ordinarySaveProof.qualifiedCycle },
+										  { "lastObservedCycle", a_gate.ordinarySaveProof.cycle },
+									  } },
 			{ "completedWorldFrame", a_gate.completedWorldFrame },
 			{ "recoveryPending", a_gate.recoveryPending },
 			{ "relatchPending", a_gate.relatchPending },
@@ -1402,8 +1425,9 @@ namespace
 		}
 
 		LARGE_INTEGER driverVersion{};
+		// DXGI reports driver versions through IDXGIDevice; D3D11 interfaces are unsupported here.
 		const bool driverVersionAvailable =
-			SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(ID3D11Device), &driverVersion));
+			SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &driverVersion));
 		const auto high = static_cast<uint32_t>(driverVersion.HighPart);
 		const auto low = static_cast<uint32_t>(driverVersion.LowPart);
 		const std::string driverVersionText = driverVersionAvailable ?
@@ -1421,6 +1445,37 @@ namespace
 			{ "driverVersionAvailable", driverVersionAvailable },
 			{ "driverVersion", driverVersionText },
 			{ "driverVersionRaw", static_cast<uint64_t>(driverVersion.QuadPart) },
+		};
+	}
+
+	json BuildGraphicsContextStatus()
+	{
+		const auto observation = Util::InspectImmediateContextProtection(globals::d3d::context);
+		const auto loadingClear = Util::VRLoadingMenuClear::GetStatus();
+		const bool apiReady = SUCCEEDED(observation.status);
+		const bool rendererOwnershipAvailable = Util::GetRendererContextLock(globals::game::renderer, globals::d3d::context) != nullptr;
+		return {
+			{ "policy", "renderer_ownership" },
+			{ "contextAvailable", observation.contextAvailable },
+			{ "immediateContext", observation.immediateContext },
+			{ "deviceFlags", observation.deviceFlags },
+			{ "singleThreadedDevice", (observation.deviceFlags & D3D11_CREATE_DEVICE_SINGLETHREADED) != 0 },
+			{ "multithreadAvailable", observation.multithreadAvailable },
+			{ "multithreadProtected", observation.multithreadProtected },
+			{ "apiReady", apiReady },
+			{ "rendererOwnershipAvailable", rendererOwnershipAvailable },
+			{ "ready", apiReady && rendererOwnershipAvailable && loadingClear.ready },
+			{ "hresult", static_cast<int32_t>(observation.status) },
+			{ "loadingMenuClear", {
+									  { "state", loadingClear.state },
+									  { "installed", loadingClear.installed },
+									  { "applicable", loadingClear.applicable },
+									  { "ready", loadingClear.ready },
+									  { "attempted", loadingClear.attempted },
+									  { "executed", loadingClear.executed },
+									  { "deferred", loadingClear.deferred },
+									  { "missingRenderer", loadingClear.missingRenderer },
+								  } },
 		};
 	}
 
@@ -1534,6 +1589,7 @@ namespace
 									  { "lastContextCreateResult", static_cast<int32_t>(a_upscaling.fidelityFX.GetLastFSRContextCreateResult()) },
 								  } },
 			{ "vendorWorkGate", VendorWorkGateJson(vendorWorkGate) },
+			{ "graphicsContext", BuildGraphicsContextStatus() },
 			{ "renderScaleSelectionPolicy", {
 												{ "linkedToUpscaling", a_upscaling.settings.renderScaleLinkedToUpscaling },
 												{ "rememberedPreference", a_upscaling.GetVRRenderScaleModePreference() },
@@ -1742,6 +1798,7 @@ namespace
 														{ "pressureDeferrals", controller.metrics.current.pressureDeferrals },
 														{ "retirementDeferrals", controller.metrics.current.retirementDeferrals },
 														{ "backendDeferrals", controller.metrics.current.backendDeferrals },
+														{ "readinessDeferrals", controller.metrics.current.readinessDeferrals },
 														{ "failures", controller.metrics.current.failures },
 														{ "fidelityMismatches", controller.metrics.current.fidelityMismatches },
 														{ "memoryTrimCount", controller.metrics.current.memoryTrimCount },
@@ -3684,12 +3741,8 @@ namespace
 					a_value.blockedPreMutationEvidence.is_null()) {
 					a_value.blockedPreMutationEvidence = evidence;
 				}
-			} else if (mutationStarted &&
-					   a_value.firstPhysicalMutationEvidence.is_null()) {
-				a_value.firstPhysicalMutationEvidence = evidence;
 			}
-			if (firstMutationRecorded &&
-				!a_value.firstPhysicalMutationEvidence.is_null() &&
+			if (!a_value.firstPhysicalMutationEvidence.is_null() &&
 				a_value.firstPostMutationEvidence.is_null() &&
 				mutationStarted &&
 				OptionalNonNegativeIntegerOrZero(evidence, "tick") >=
@@ -4931,7 +4984,8 @@ namespace
 			"texture_lifetime_status",
 			"texture_lifetime_checkpoint",
 			"texture_lifetime_stop",
-			"texture_lifetime_reset" });
+			"texture_lifetime_reset",
+			"graphics_context_status" });
 	}
 
 	void RunHandler(
@@ -5283,31 +5337,6 @@ namespace
 				receipt["nativeVendorExecution"] = observation["nativeVendorExecution"];
 			if (observation.contains("status"))
 				receipt["status"] = observation["status"];
-		}
-		if (!receipt.contains("status")) {
-			const uint64_t expectedSessionID =
-				a_transition.ready ? a_transition.baseline.stressSessionID : 0;
-			auto retryTelemetry =
-				globals::features::upscaling.BuildVRRenderScaleRetryTelemetry();
-			const uint64_t observedSessionID =
-				retryTelemetry.value("sessionId", uint64_t{ 0 });
-			json terminalStatus{
-				{ "partial", true },
-			};
-			if (expectedSessionID != 0 && observedSessionID == expectedSessionID) {
-				terminalStatus["retryTelemetry"] = std::move(retryTelemetry);
-			} else {
-				terminalStatus["retryTelemetry"] = {
-					{ "schemaVersion", 2 },
-					{ "available", false },
-					{ "reason", expectedSessionID == 0 ?
-									"qualification_has_no_stress_session" :
-									"stress_session_replaced_or_reset" },
-					{ "expectedSessionId", expectedSessionID },
-					{ "observedSessionId", observedSessionID },
-				};
-			}
-			receipt["status"] = std::move(terminalStatus);
 		}
 		return receipt;
 	}
@@ -6313,10 +6342,8 @@ namespace
 				if (!globals::game::isVR)
 					return json{ { "error", "shared guide diagnostics require Skyrim VR" } };
 				auto& upscaling = globals::features::upscaling;
-				if (enabled && upscaling.IsVRRenderScaleGPUPerformanceTelemetryActive())
+				if (enabled && !upscaling.SetFSRSharedGuideInputsEnabled(*enabled))
 					return json{ { "error", "stop GPU performance capture before changing shared guide mode" } };
-				if (enabled)
-					upscaling.fidelityFX.SetRuntimeSharedGuideInputsEnabled(*enabled);
 				return json{
 					{ "action", "fsr_shared_guides" },
 					{ "enabled", upscaling.fidelityFX.AreRuntimeSharedGuideInputsEnabled() },
@@ -6580,6 +6607,12 @@ namespace
 			});
 		}
 
+		if (action == "graphics_context_status") {
+			return RunOnMainThread([action]() {
+				return json{ { "action", action }, { "graphicsContext", BuildGraphicsContextStatus() } };
+			});
+		}
+
 		if (action == "texture_lifetime_start") {
 			return RunOnMainThread([]() {
 				if (!globals::game::isVR)
@@ -6756,6 +6789,8 @@ namespace
 			{ "actions", RenderScaleActions() },
 		};
 		result["usage"] =
+			"status includes vendorWorkGate.ordinarySaveRecovery with save identity, "
+			"stereo recovery progress, presentation readiness and independent persistence protection. "
 			"qualification_dispatch accepts optional cocCellEditorId to execute "
 			"exactly one validated COC on its main-thread operation. When present, "
 			"the QPC timer is read immediately before that command and "
@@ -6767,7 +6802,7 @@ namespace
 			"mutating it. milestone defaults to strict for backward compatibility; "
 			"presentation and cleanup expose their independent first-observed "
 			"timestamps, signed presentation-to-cleanup deltas, and cleanup tail "
-			"without changing strict qualification. The schema-revision-15 "
+			"without changing strict qualification. The schema-revision-12 "
 			"terminal receipt retains the immutable dispatch, blocked and last "
 			"pre-mutation, first physical mutation, first post-mutation, first "
 			"proven new-generation, exact owner-bound no-mutation proof, and "
@@ -7201,31 +7236,23 @@ namespace VRRenderScaleDevBenchBridge
 								   resources.backend == Upscaling::VRRenderScaleBackendKind::None);
 				};
 			const auto exactProfileMatches = [&](const auto& a_profile) {
-				return ReplacementTelemetry::MatchesPublishedReplacementProfile({
-					.profileValid = a_profile.valid,
-					.requiresPublishedGeneration =
-						a_profile.method == Upscaling::UpscaleMethod::kDLSS ||
-						a_profile.method == Upscaling::UpscaleMethod::kFSR,
-					.observedTransitionEpoch = a_observation.transitionEpoch,
-					.expectedTransitionEpoch = a_profile.transitionEpoch,
-					.observedContractGeneration =
-						a_observation.contractGeneration,
-					.expectedContractGeneration = a_profile.contractGeneration,
-					.observedMethod = a_observation.method,
-					.expectedMethod = static_cast<uint32_t>(a_profile.method),
-					.observedRenderWidth = a_observation.renderWidth,
-					.observedRenderHeight = a_observation.renderHeight,
-					.observedDisplayWidth = a_observation.displayWidth,
-					.observedDisplayHeight = a_observation.displayHeight,
-					.expectedRenderWidth = a_profile.renderEyeWidth,
-					.expectedRenderHeight = a_profile.renderEyeHeight,
-					.expectedDisplayWidth = a_profile.displayEyeWidth,
-					.expectedDisplayHeight = a_profile.displayEyeHeight,
-					.observedDeviceIdentity = a_observation.deviceIdentity,
-					.currentDeviceIdentity = reinterpret_cast<uintptr_t>(
-						globals::d3d::device),
-					.observedResourceRevision = a_observation.resourceRevision,
-				});
+				const bool requiresPublishedGeneration =
+					a_profile.method == Upscaling::UpscaleMethod::kDLSS ||
+					a_profile.method == Upscaling::UpscaleMethod::kFSR;
+				return a_profile.valid &&
+				       ReplacementTelemetry::MatchesTargetContractGeneration(
+						   requiresPublishedGeneration,
+						   a_observation.contractGeneration,
+						   a_profile.contractGeneration) &&
+				       a_observation.transitionEpoch == a_profile.transitionEpoch &&
+				       a_observation.method == static_cast<uint32_t>(a_profile.method) &&
+				       a_observation.renderWidth == a_profile.renderEyeWidth &&
+				       a_observation.renderHeight == a_profile.renderEyeHeight &&
+				       a_observation.displayWidth == a_profile.displayEyeWidth &&
+				       a_observation.displayHeight == a_profile.displayEyeHeight &&
+				       a_observation.deviceIdentity ==
+				           reinterpret_cast<uintptr_t>(globals::d3d::device) &&
+				       a_observation.resourceRevision != 0;
 			};
 			const auto boundaryMatchesProfile = [&](const auto& a_profile) {
 				const bool requiresPublishedGeneration =
@@ -7516,7 +7543,7 @@ namespace VRRenderScaleDevBenchBridge
 		}
 
 		static constexpr const char* diagnosticDescriptor =
-			R"json({"description":"Control and inspect CSX VR render-scale, including DevBench-only retryTelemetry schema v2 with non-coalesced causes, source locations, per-role viewport wait intervals, QPC timestamps, dropped-event accounting, exact producer ownership and stabilization milestones in status and qualification receipts, plus bounded exact-owner preparation stage telemetry and a single-owner, QPC-timed server-side qualification barrier that returns the first coherent exact-cell/profile observation without menu queries or client polling. qualification_begin requires an active stress session plus caller-supplied transitionId and ownerId; qualification_dispatch freezes the latency origin immediately before the command and can atomically reset/start CPU plus GPU performance telemetry on that dispatch frame; qualification_wait accepts the same ownership pair, an exact editor ID and/or form ID, an optional target profile, an optional exact foveation fixture, and a timeout that defaults to 120000ms and cannot exceed it. None and TAA targets validate the authoritative effective profile and native presentation without requiring inactive controller projections to mirror TAA. target.fsrRuntime matches the configured preference; coherent desired, authoritative, resource, lifecycle, and eye-dispatch evidence independently validates the physical FSR backend, including capability fallback. Omit target when an external controller owns profile selection; the waiter then requires a post-dispatch profile change and validates the mutually coherent observed profile without changing it. DLSS dispatch tracing remains opt-in and non-blocking. stop, dlss_trace_stop, and cpu_performance_stop accept expectedSessionId to fail closed if capture ownership changed; gpu_performance_stop accepts expectedStartFrame as its ownership guard; expectedStartFrame remains a legacy optional secondary guard for CPU telemetry. CPU performance status, start, and stop responses expose cpuPerformance.sessionId and state; stop retains the session ID and reset clears it to zero. Every response identifies the producing DLL; expectedBuildId fails closed on a stale build.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["status","qualification_status","qualification_begin","qualification_dispatch","qualification_wait","qualification_cancel","cpu_performance_status","cpu_performance_start","cpu_performance_stop","cpu_performance_reset","gpu_performance_status","gpu_performance_start","gpu_performance_stop","gpu_performance_reset","dlss_trace_status","dlss_trace_start","dlss_trace_read","dlss_trace_stop","dlss_trace_reset","record","start","apply","stop","reset","probe_start","probe_stop","probe_record","probe_reset","ham_status","ham_reset","trim","texture_lifetime_start","texture_lifetime_status","texture_lifetime_checkpoint","texture_lifetime_stop","texture_lifetime_reset"]},"method":{"type":"string","enum":["dlss","fsr"]},"enabled":{"type":"boolean"},"qualityMode":{"type":"integer","minimum":0,"maximum":6},"dlssPreset":{"type":"integer","minimum":0,"maximum":5},"transitionId":{"type":"integer","minimum":1,"description":"Caller-owned nonzero qualification transition ID. Begin, dispatch, wait, and cancel must present it."},"ownerId":{"type":"string","minLength":1,"maxLength":128,"description":"Caller-generated qualification owner identity. Begin, dispatch, wait, and cancel must present the same value."},"startPerformanceTelemetry":{"type":"boolean","default":false,"description":"qualification_dispatch only: require inactive CPU and GPU captures, reset/start both on the dispatch frame, and return their ownership receipts."},"expectedCell":{"type":"integer","minimum":1,"maximum":4294967295,"description":"Optional exact destination cell form ID. qualification_wait requires this or expectedCellEditorId; when both are supplied both must match."},"expectedCellEditorId":{"type":"string","minLength":1,"maxLength":128,"description":"Preferred stable exact destination cell editor ID for qualification_wait."},"timeoutMs":{"type":"integer","minimum":1,"maximum":120000,"default":120000,"description":"Maximum qualification deadline measured from qualification_dispatch on the server QPC clock; the waiter returns immediately when the requested milestone is satisfied."},"target":{"type":"object","additionalProperties":false,"properties":{"method":{"type":"string","enum":["none","taa","dlss","fsr"]},"qualityMode":{"type":"integer","minimum":0,"maximum":6},"renderScaleMode":{"type":"boolean"},"dlssProfile":{"type":"string","enum":["J","K","L","M","F","E"]},"fsrRuntime":{"type":"string","enum":["fsr3","fsr4"],"description":"Configured FSR runtime preference only. Physical backend fallback is validated independently."}},"required":["method","qualityMode","renderScaleMode"],"description":"Optional exact expected profile for a runner-owned selection. None and TAA require qualityMode 0 and renderScaleMode false. Omit it for an externally owned selection; the waiter observes and returns the exact coherent profile without mutating upscaling state."},"foveation":{"type":"object","additionalProperties":false,"properties":{"foveatedVendorDispatch":{"type":"boolean"},"foveatedCenterArea":{"type":"number","minimum":0,"maximum":1},"peripheryTAAEnable":{"type":"boolean"},"peripheryTAACenterArea":{"type":"number","minimum":0,"maximum":1},"peripheryTAAOuterScale":{"type":"number","minimum":0,"maximum":1}},"required":["foveatedVendorDispatch","foveatedCenterArea","peripheryTAAEnable","peripheryTAACenterArea","peripheryTAAOuterScale"],"description":"Optional exact settings fixture. Float comparisons use the tolerance returned in each receipt; active physical flags must agree with the requested enable states."},"afterSequence":{"type":"integer","minimum":0,"description":"For dlss_trace_read, return records after this sequence."},"limit":{"type":"integer","minimum":1,"maximum":256,"description":"Maximum ring records returned by dlss_trace_read; defaults to 32 and pinned failures are returned separately."},"expectedSessionId":{"type":"integer","minimum":1,"description":"Optional ownership guard for stop, dlss_trace_stop, and cpu_performance_stop. The corresponding active session must match before it is stopped."},"expectedStartFrame":{"type":"integer","minimum":0,"description":"Optional ownership guard for gpu_performance_stop and legacy secondary guard for cpu_performance_stop. When present, the active capture window start frame must match before it is stopped."},"expectedBuildId":{"type":"string","description":"Exact 64-character CSX Build ID required for this operation."}},"required":["action"]}})json";
+			R"json({"description":"Control and inspect CSX VR render-scale, including DevBench-only retryTelemetry schema v1 with non-coalesced causes, source locations, per-role viewport wait intervals, QPC timestamps and stabilization milestones in status and qualification receipts, plus bounded exact-owner preparation stage telemetry and a single-owner, QPC-timed server-side qualification barrier that returns the first coherent exact-cell/profile observation without menu queries or client polling. qualification_begin requires an active stress session plus caller-supplied transitionId and ownerId; qualification_dispatch freezes the latency origin immediately before the command and can atomically reset/start CPU plus GPU performance telemetry on that dispatch frame; qualification_wait accepts the same ownership pair, an exact editor ID and/or form ID, an optional target profile, an optional exact foveation fixture, and a timeout that defaults to 120000ms and cannot exceed it. None and TAA targets validate the authoritative effective profile and native presentation without requiring inactive controller projections to mirror TAA. target.fsrRuntime matches the configured preference; coherent desired, authoritative, resource, lifecycle, and eye-dispatch evidence independently validates the physical FSR backend, including capability fallback. Omit target when an external controller owns profile selection; the waiter then requires a post-dispatch profile change and validates the mutually coherent observed profile without changing it. DLSS dispatch tracing remains opt-in and non-blocking. stop, dlss_trace_stop, and cpu_performance_stop accept expectedSessionId to fail closed if capture ownership changed; gpu_performance_stop accepts expectedStartFrame as its ownership guard; expectedStartFrame remains a legacy optional secondary guard for CPU telemetry. CPU performance status, start, and stop responses expose cpuPerformance.sessionId and state; stop retains the session ID and reset clears it to zero. Every response identifies the producing DLL; expectedBuildId fails closed on a stale build.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["status","qualification_status","qualification_begin","qualification_dispatch","qualification_wait","qualification_cancel","cpu_performance_status","cpu_performance_start","cpu_performance_stop","cpu_performance_reset","gpu_performance_status","gpu_performance_start","gpu_performance_stop","gpu_performance_reset","dlss_trace_status","dlss_trace_start","dlss_trace_read","dlss_trace_stop","dlss_trace_reset","record","start","apply","stop","reset","probe_start","probe_stop","probe_record","probe_reset","ham_status","ham_reset","trim","texture_lifetime_start","texture_lifetime_status","texture_lifetime_checkpoint","texture_lifetime_stop","texture_lifetime_reset"]},"method":{"type":"string","enum":["dlss","fsr"]},"enabled":{"type":"boolean"},"qualityMode":{"type":"integer","minimum":0,"maximum":6},"dlssPreset":{"type":"integer","minimum":0,"maximum":5},"transitionId":{"type":"integer","minimum":1,"description":"Caller-owned nonzero qualification transition ID. Begin, dispatch, wait, and cancel must present it."},"ownerId":{"type":"string","minLength":1,"maxLength":128,"description":"Caller-generated qualification owner identity. Begin, dispatch, wait, and cancel must present the same value."},"startPerformanceTelemetry":{"type":"boolean","default":false,"description":"qualification_dispatch only: require inactive CPU and GPU captures, reset/start both on the dispatch frame, and return their ownership receipts."},"expectedCell":{"type":"integer","minimum":1,"maximum":4294967295,"description":"Optional exact destination cell form ID. qualification_wait requires this or expectedCellEditorId; when both are supplied both must match."},"expectedCellEditorId":{"type":"string","minLength":1,"maxLength":128,"description":"Preferred stable exact destination cell editor ID for qualification_wait."},"timeoutMs":{"type":"integer","minimum":1,"maximum":120000,"default":120000,"description":"Maximum qualification deadline measured from qualification_dispatch on the server QPC clock; the waiter returns immediately when the requested milestone is satisfied."},"target":{"type":"object","additionalProperties":false,"properties":{"method":{"type":"string","enum":["none","taa","dlss","fsr"]},"qualityMode":{"type":"integer","minimum":0,"maximum":6},"renderScaleMode":{"type":"boolean"},"dlssProfile":{"type":"string","enum":["J","K","L","M","F","E"]},"fsrRuntime":{"type":"string","enum":["fsr3","fsr4"],"description":"Configured FSR runtime preference only. Physical backend fallback is validated independently."}},"required":["method","qualityMode","renderScaleMode"],"description":"Optional exact expected profile for a runner-owned selection. None and TAA require qualityMode 0 and renderScaleMode false. Omit it for an externally owned selection; the waiter observes and returns the exact coherent profile without mutating upscaling state."},"foveation":{"type":"object","additionalProperties":false,"properties":{"foveatedVendorDispatch":{"type":"boolean"},"foveatedCenterArea":{"type":"number","minimum":0,"maximum":1},"peripheryTAAEnable":{"type":"boolean"},"peripheryTAACenterArea":{"type":"number","minimum":0,"maximum":1},"peripheryTAAOuterScale":{"type":"number","minimum":0,"maximum":1}},"required":["foveatedVendorDispatch","foveatedCenterArea","peripheryTAAEnable","peripheryTAACenterArea","peripheryTAAOuterScale"],"description":"Optional exact settings fixture. Float comparisons use the tolerance returned in each receipt; active physical flags must agree with the requested enable states."},"afterSequence":{"type":"integer","minimum":0,"description":"For dlss_trace_read, return records after this sequence."},"limit":{"type":"integer","minimum":1,"maximum":256,"description":"Maximum ring records returned by dlss_trace_read; defaults to 32 and pinned failures are returned separately."},"expectedSessionId":{"type":"integer","minimum":1,"description":"Optional ownership guard for stop, dlss_trace_stop, and cpu_performance_stop. The corresponding active session must match before it is stopped."},"expectedStartFrame":{"type":"integer","minimum":0,"description":"Optional ownership guard for gpu_performance_stop and legacy secondary guard for cpu_performance_stop. When present, the active capture window start frame must match before it is stopped."},"expectedBuildId":{"type":"string","description":"Exact 64-character CSX Build ID required for this operation."}},"required":["action"]}})json";
 		static const std::string runtimeDiagnosticDescriptor = [&] {
 			auto descriptor = json::parse(diagnosticDescriptor);
 			auto description = descriptor["description"].get<std::string>();
@@ -7545,10 +7572,27 @@ namespace VRRenderScaleDevBenchBridge
 			                            "is saved through the normal CS settings save operation.";
 			descriptor["inputSchema"]["properties"]["action"]["enum"].push_back("set_render_scale_link");
 			descriptor["inputSchema"]["properties"]["action"]["enum"].push_back("fsr_shared_guides");
+			descriptor["inputSchema"]["properties"]["action"]["enum"].push_back("graphics_context_status");
 			descriptor["description"] = descriptor["description"].get<std::string>() +
-			                            " fsr_shared_guides inspects the session-only full-eye FSR shared-guide mode; "
+			                            " graphics_context_status reads the current immediate context on the main thread without changing protection. "
+			                            "graphicsContext reports device flags, interface availability, multithreadProtected, HRESULT and ready. "
+			                            "The renderer_ownership policy validates SE, AE and VR contexts without changing their API protection flag. "
+			                            "apiReady requires a compatible multi-thread-capable immediate context; rendererOwnershipAvailable reports its native renderer lock. "
+			                            "ready additionally requires that owner and the applicable loading-menu guard to be installed. These are implementation readiness checks, "
+			                            "not runtime stability or whole-pass isolation certification. loadingMenuClear separately reports the "
+			                            "VR loading-message renderer guard installation and attempted, executed, deferred and missingRenderer counters. "
+			                            "Contended loading-message clears remain pending for the native render-side clear. Counters are independently sampled. "
+			                            "status includes the same graphicsContext object.";
+			descriptor["inputSchema"]["properties"]["enabled"]["description"] =
+				"Action-specific enabled state. For fsr_shared_guides, omit to inspect; supplied values "
+				"update the live preference while GPU capture is inactive. Save Settings persists the choice.";
+			descriptor["description"] = descriptor["description"].get<std::string>() +
+			                            " fsr_shared_guides inspects the full-eye FSR shared-guide mode; "
 			                            "optional boolean enabled selects direct imports or reference copies while GPU "
-			                            "performance capture is inactive. Imports remain retained until fenced teardown. "
+			                            "performance capture is inactive. The in-game Upscaling checkbox Share FSR guide "
+			                            "textures uses the same setting and capture guard. Changes apply immediately and "
+			                            "persist through Save Settings; this action does not write configuration files. "
+			                            "Imports remain retained until fenced teardown. "
 			                            "GPU status exposes runtimeFSRSharedGuides direct inputs/pixels, fallback guide "
 			                            "copies and import failures; item5ActiveFSRCopies counts actual input copies, "
 			                            "with avoidedPixels including direct sharing and inactive rectangle savings.";
@@ -7581,10 +7625,66 @@ namespace VRRenderScaleDevBenchBridge
 				"eye in a runtime stereo batch; retries identify another attempt "
 				"with the same proven current-eye identity, including full-eye "
 				"fallback after foveated dispatch.";
+			const std::string readinessRetryDescription =
+				" Render-scale metrics expose readinessDeferrals as the subset of "
+				"backendDeferrals proven to wait before provider/shared-resource "
+				"release. These remain included in retries; retryTelemetry labels "
+				"them PreMutationReadiness. Only otherwise healthy immutable "
+				"settings transitions poll these waits each frame and retain "
+				"proof-driven settling; partial teardown and recovery stay guarded.";
+			const std::string ownedDrainDescription =
+				" Owned settings-drain waits remain included in Backend retry totals. "
+				"Only a complete healthy owned-release certificate permits proof-driven "
+				"release; unproven operations retain the six-frame guard. retryTelemetry records RelatchDrainBegin, "
+				"RelatchDrainPending, RelatchDrainReady, RelatchDrainInvalidated, "
+				"RelatchCommitBegin and RelatchSharedCleanup with request ownership "
+				"and frame/QPC observations. Polling performs no provider teardown; "
+				"commit requires the completed native stereo boundary. Additive "
+				"ownedRelease schema v1 binds source/target generations, required "
+				"providers, revisions, ticket serials and opaque device/context/queue "
+				"identities. drainFences records existing issue and observed-ready QPC "
+				"timestamps without extra GPU work. OwnedReleaseConsumed, "
+				"OwnedTargetPublished, OwnedProviderPrepared and OwnedReleaseEligibility "
+				"separate historical drain consumption, target publication/preparation "
+				"and scoped eligibility. Guard-exemption eligibility does not enable "
+				"vendor dispatch: target preparation and coherent stereo remain required "
+				"by promotion. Obligation bits 1,2,4,8,16,32 identify "
+				"old-provider drain, completed reset, owned detached retirement, physical "
+				"publication, target-provider preparation and coherent stereo. Owned "
+				"detached retirement is not a claim that cleanup-only fences completed; "
+				"the existing cleanup milestone reports that debt separately. "
+				"blockingCleanupReadyQpc observes when guard eligibility verifies "
+				"blocking ownership obligations, not cleanup-only fence completion. Missing "
+				"timestamps/identities are null; opaque identities are decimal strings.";
+			const std::string ordinarySaveDescription =
+				" status.vendorWorkGate.ordinarySaveRecovery reports the ordinary save "
+				"token, unchanged resource identity, consecutive stereo frame proof, "
+				"presentation readiness and the independent persistence guard. "
+				"Six successfully prepared stereo world frames from matching outer "
+				"submit scopes permit reuse in the following compositor "
+				"cycle; loads, unknown engine state and resource changes revoke proof.";
+			const std::string textureLifetimeDescription =
+				" Texture-lifetime status skips NiSourceTexture owner correlation "
+				"when no D3D textures are tracked; "
+				"capture.niSourceTextureOwnerScanSkipped reports this. Unsafe "
+				"renderer pointers are skipped during correlation. "
+				"capture.niSourceTextureInvalidRendererTextureCount counts skipped "
+				"owners; capture.niSourceTextureFirstInvalidRendererTexture "
+				"reports the first owner and raw renderer pointer, or null.";
+			const std::string stressAcceptanceDescription =
+				" The record and stop actions retain the raw two-frame presentation "
+				"stretch result as a diagnostic_only gate; it does not reject the "
+				"stress capture. allowedPresentationStretch adds diagnosticThresholdFrames "
+				"while retaining maximumAcceptedFrames for older readers. Other "
+				"failed gates still reject the capture.";
+			const std::string dlssResultDescription =
+				" DLSS trace evaluateFailures and pinned evaluation failures exclude "
+				"eWarnOutOfVRAM because evaluation completed successfully; raw records "
+				"retain that warning result code. Constants failures remain unchanged.";
 			descriptor["description"] =
-				descriptor["description"].get<std::string>() + submitFreshnessDescription;
+				descriptor["description"].get<std::string>() + submitFreshnessDescription + readinessRetryDescription + ownedDrainDescription + ordinarySaveDescription + textureLifetimeDescription + stressAcceptanceDescription + dlssResultDescription;
 			descriptor["inputSchema"]["properties"]["action"]["description"] =
-				"Select a diagnostic or control action." + submitFreshnessDescription;
+				"Select a diagnostic or control action." + submitFreshnessDescription + readinessRetryDescription + ownedDrainDescription + ordinarySaveDescription + textureLifetimeDescription + stressAcceptanceDescription + dlssResultDescription;
 			descriptor["inputSchema"]["properties"]["milestone"] = {
 				{ "type", "string" },
 				{ "enum", json::array({ "strict", "presentation", "cleanup" }) },
