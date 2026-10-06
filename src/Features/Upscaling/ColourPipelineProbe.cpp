@@ -3,6 +3,7 @@
 #ifdef DEVBENCH_BRIDGE_ENABLED
 
 #	include "ColourPipelineProbePolicy.h"
+#	include "ColourPipelineSceneObservation.h"
 #	include "Globals.h"
 #	include "GpuPass.h"
 #	include "State.h"
@@ -70,6 +71,7 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 			std::string stagingResourceObservationId;
 			std::string sourcePointer;
 			DispatchMetadata dispatch{};
+			ColourPipelineSceneObservation::Snapshot sceneObservation{};
 			D3D11_TEXTURE2D_DESC sourceDesc{};
 			DXGI_FORMAT srvFormat = DXGI_FORMAT_UNKNOWN;
 			DXGI_FORMAT rtvFormat = DXGI_FORMAT_UNKNOWN;
@@ -388,6 +390,47 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 			return resource.get() == static_cast<ID3D11Resource*>(a_texture);
 		}
 
+		ColourPipelineSceneObservation::Snapshot ObserveScene(std::uint32_t a_eye)
+		{
+			ColourPipelineSceneObservation::Snapshot result{};
+			const auto* state = globals::state;
+			if (!state || a_eye >= kEyeCount)
+				return result;
+			result.beginQpc = QueryQpc();
+			LARGE_INTEGER frequency{};
+			if (QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0)
+				result.qpcFrequency = static_cast<std::uint64_t>(frequency.QuadPart);
+			result.cpuFrame = state->frameCount;
+			result.eye = a_eye;
+			result.inWorld = state->inWorld;
+			result.lastStartedWorldFrame = state->lastWorldRenderFrame;
+			result.lastCompletedWorldFrame = state->lastCompletedWorldRenderFrame;
+			const auto& cache = globals::game::frameBufferCached;
+			const std::array<const Matrix*, 5> matrices{
+				&cache.GetCameraView(a_eye), &cache.GetCameraProj(a_eye), &cache.GetCameraProjUnjittered(a_eye),
+				&cache.GetCameraViewProjUnjittered(a_eye), &cache.GetCameraPreviousViewProjUnjittered(a_eye)
+			};
+			for (std::size_t index = 0; index < matrices.size(); ++index)
+				for (std::size_t row = 0; row < 4; ++row)
+					for (std::size_t column = 0; column < 4; ++column)
+						result.matrices[index][row][column] = matrices[index]->m[row][column];
+			const auto& position = cache.GetCameraPosAdjust(a_eye);
+			const auto& previous = cache.GetCameraPreviousPosAdjust(a_eye);
+			result.positionAdjust = { position.x, position.y, position.z };
+			result.previousPositionAdjust = { previous.x, previous.y, previous.z };
+			if (const auto* manager = RE::ImageSpaceManager::GetSingleton()) {
+				const auto& data = manager->GetImageSpaceData().baseData;
+				result.imageSpaceAvailable = true;
+				result.hdr = { data.hdr.eyeAdaptSpeed, data.hdr.eyeAdaptStrength, data.hdr.bloomBlurRadius,
+					data.hdr.bloomThreshold, data.hdr.bloomScale, data.hdr.receiveBloomThreshold,
+					data.hdr.white, data.hdr.sunlightScale, data.hdr.skyScale };
+				result.cinematic = { data.cinematic.saturation, data.cinematic.brightness, data.cinematic.contrast };
+				result.tint = { data.tint.amount, data.tint.color.red, data.tint.color.green, data.tint.color.blue };
+			}
+			result.endQpc = QueryQpc();
+			return result;
+		}
+
 		bool QueueSlotLocked(
 			Stage a_stage,
 			std::uint32_t a_eye,
@@ -458,6 +501,7 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 			slot.sourceOwner.copy_from(a_texture);
 			g_state.stagingPayloadBytes += std::uint64_t{ a_width } * a_height * bytesPerPixel;
 			const D3D11_BOX box{ a_x, a_y, 0, a_x + a_width, a_y + a_height, 1 };
+			slot.sceneObservation = ObserveScene(a_eye);
 			{
 				CS_GPU_PASS("ColourPipelineProbe::Copy");
 				a_context->CopySubresourceRegion(slot.staging.get(), 0, 0, 0, 0, a_texture, a_subresource, &box);
@@ -715,6 +759,7 @@ namespace CSX::Diagnostics::ColourPipelineProbe
 				{ "eyeMask", 1u << a_eye },
 				{ "queued", a_slot.queued },
 				{ "mapped", a_slot.mapped },
+				{ "sceneObservation", ColourPipelineSceneObservation::ToJson(a_slot.sceneObservation) },
 			};
 			if (!a_slot.queued)
 				return result;

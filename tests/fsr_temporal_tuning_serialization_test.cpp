@@ -1,3 +1,4 @@
+#include "Features/Upscaling/ColourPipelineSceneObservation.h"
 #include "Features/Upscaling/FSRDispatchInputTelemetry.h"
 #include "Features/Upscaling/FSRTemporalTuningSerialization.h"
 
@@ -91,8 +92,76 @@ void TestSubmittedInputTelemetry()
 	Require(Inputs::ToJson(Inputs::Capture(true, maximum, -maximum, maximum), true).at("available") == true);
 }
 
+void TestSceneObservation()
+{
+	namespace Scene = CSX::Diagnostics::ColourPipelineSceneObservation;
+	const auto missing = Scene::ToJson({});
+	Require(missing.at("schemaVersion") == 1 && missing.at("available") == false);
+	Require(missing.at("observationCpuFrame").is_null() && missing.at("beginQpc").is_null());
+	Require(missing.at("cameraCache").at("view").is_null());
+	Require(missing.at("imageSpaceParameters").at("hdr").at("white").is_null());
+	Scene::Snapshot snapshot{};
+	snapshot.cpuFrame = 41;
+	snapshot.eye = 1;
+	snapshot.beginQpc = 1000;
+	snapshot.endQpc = 1100;
+	snapshot.qpcFrequency = 10000000;
+	snapshot.lastStartedWorldFrame = 41;
+	snapshot.lastCompletedWorldFrame = 40;
+	for (std::size_t index = 0; index < snapshot.matrices.size(); ++index)
+		for (std::size_t row = 0; row < 4; ++row)
+			for (std::size_t column = 0; column < 4; ++column)
+				snapshot.matrices[index][row][column] = static_cast<float>(index * 100 + row * 10 + column);
+	snapshot.positionAdjust = { 1.0f, 2.0f, 3.0f };
+	snapshot.previousPositionAdjust = { 4.0f, 5.0f, 6.0f };
+	snapshot.imageSpaceAvailable = true;
+	snapshot.hdr = { 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+	snapshot.cinematic = { 10, 11, 12 };
+	snapshot.tint = { 0.25f, 0.1f, 0.2f, 0.3f };
+	const auto retained = Scene::ToJson(snapshot);
+	Require(retained.at("available") == true && retained.at("eyeIndex") == 1);
+	Require(retained.at("observationCpuFrame") == 41 && retained.at("endQpc") == 1100);
+	Require(retained.at("cameraCache").at("view").at(1).at(2) == 12.0f);
+	Require(retained.at("cameraCache").at("projection").at(1).at(2) == 112.0f);
+	Require(retained.at("cameraCache").at("contentCpuFrame").is_null());
+	Require(retained.at("cameraCache").at("initialized").is_null());
+	Require(retained.at("worldRender").at("lastCompletedCpuFrame") == 40);
+	Require(retained.at("worldRender").at("continuousCameraEquivalenceProven") == false);
+	Require(retained.at("imageSpaceParameters").at("hdr").at("skyScale") == 9.0f);
+	Require(retained.at("imageSpaceParameters").at("internalAdaptiveExposure").at("value").is_null());
+	Require(nlohmann::json::parse(retained.dump()) == retained && retained.dump().size() < 16384);
+	for (float invalid : { std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity() }) {
+		auto changed = snapshot;
+		changed.matrices[2][3][1] = invalid;
+		auto result = Scene::ToJson(changed);
+		Require(result.at("cameraCache").at("available") == false && result.at("cameraCache").at("projection").is_null());
+		changed = snapshot;
+		changed.hdr[7] = invalid;
+		result = Scene::ToJson(changed);
+		Require(result.at("imageSpaceParameters").at("hdr").at("available") == false);
+		Require(result.at("imageSpaceParameters").at("hdr").at("sunlightScale").is_null());
+		Require(result.at("imageSpaceParameters").at("cinematic").at("available") == true);
+		changed = snapshot;
+		changed.positionAdjust[1] = invalid;
+		Require(Scene::ToJson(changed).at("cameraCache").at("view").is_null());
+	}
+	auto changed = snapshot;
+	changed.imageSpaceAvailable = false;
+	Require(Scene::ToJson(changed).at("imageSpaceParameters").at("tint").at("rgb").is_null());
+	changed = snapshot;
+	changed.eye = 2;
+	Require(Scene::ToJson(changed).at("available") == false);
+	changed = snapshot;
+	changed.endQpc = 999;
+	Require(Scene::ToJson(changed).at("available") == false);
+	snapshot.cpuFrame = 99;
+	snapshot.matrices[0][1][2] = 900.0f;
+	Require(retained.at("observationCpuFrame") == 41 && retained.at("cameraCache").at("view").at(1).at(2) == 12.0f);
+}
+
 int main()
 {
+	TestSceneObservation();
 	TestSubmittedInputTelemetry();
 	const json malformed[]{ nullptr, false, 1, "invalid", json::array(),
 		{ { "enabled", 1 } }, { { "enabled", true }, { "velocityFactor", "bad" } },

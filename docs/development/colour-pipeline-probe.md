@@ -76,6 +76,37 @@ evidence, not an established shader source. Headset pixel lineage remains
 unverified; the separate Render Map records accepted eye publication and
 nullable observed command epochs.
 
+Each stage/eye page also includes additive `sceneObservation` schema 1.
+Only the active probe copies these CPU observations, immediately before
+that slot's staging-copy call. `observationCpuFrame`, numeric eye,
+`beginQpc`, `endQpc` and `qpcFrequency` describe the sequential observation
+bracket. The parent slot supplies stage/eye identity and `queuedQpc` after
+the copy call; these are separate timestamps. No GPU completion or atomic
+engine snapshot is implied. Unqueued slots expose unavailable/null values.
+
+`cameraCache` contains native per-eye view, projection, unjittered
+projection, current and previous unjittered view-projection matrices,
+plus current and previous position-adjust vectors. Matrices use four rows
+of four columns in `Matrix::m` storage order without transposition or
+convention conversion. Adjusted positions are not absolute world-camera
+coordinates. Every component must be finite; otherwise the camera group
+is unavailable. Finite values do not establish geometric validity. The
+native framebuffer Unmap cache has no content-frame/QPC or initialization
+stamp, so those fields remain null. World-render started/completed CPU
+markers are associations and do not prove continuous camera equivalence.
+
+`imageSpaceParameters` observes the runtime-aware typed
+`ImageSpaceManager::GetImageSpaceData().baseData` accessor. HDR parameters
+are `eyeAdaptSpeed`, `eyeAdaptStrength`, `bloomBlurRadius`, `bloomThreshold`,
+`bloomScale`, `receiveBloomThreshold`, `white`, `sunlightScale` and
+`skyScale`. Cinematic parameters are saturation, brightness and contrast;
+tint retains amount and RGB. Values use native engine units. A missing
+manager or any nonfinite value makes its parameter group unavailable/null.
+These are image-space parameters, not measured adaptive exposure or SDK
+exposure history. `internalAdaptiveExposure` is explicitly unavailable;
+individual scene-light objects are not sampled. The observation adds no
+settings or SDK setter, simulation freeze, scheduling or rendering change.
+
 Both colour-contract successful-dispatch status and page `dispatch` include
 an additive `submittedInputs` object with `schemaVersion: 1`, boolean
 `available`, nullable boolean `reset`, nullable two-number
