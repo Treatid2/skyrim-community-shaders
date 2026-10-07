@@ -2629,9 +2629,10 @@ public:
 		ID3D11Resource* a_transparencySource,
 		uint32_t a_contractGeneration) const;
 	void FinalizePerEyeOutputs(ID3D11Resource* colorDst);
-	/// Publish a completed eye pair to the existing desktop mirror consumer.
+	/// Publish finalized eyes from one producer scope to the existing mirror consumer.
 	bool UpdateVRSubmitDesktopMirror(uint32_t eyeIndex, uint32_t currentFrame, uint64_t compositorCycleToken,
-		ID3D11Texture2D* sourceTexture, const D3D11_TEXTURE2D_DESC& sourceDesc, uint32_t eyeWidthOut, uint32_t eyeHeightOut);
+		ID3D11Texture2D* sourceTexture, const D3D11_TEXTURE2D_DESC& sourceDesc, uint32_t eyeWidthOut, uint32_t eyeHeightOut,
+		const VRSubmitInputReusePolicy::CurrentEyeIdentity& currentEyeInputIdentity);
 	bool BlitVRRenderScaleDesktopMirror(ID3D11Texture2D* a_targetTexture, const D3D11_TEXTURE2D_DESC& a_targetDesc,
 		uint32_t a_eyeWidth, uint32_t a_eyeHeight, Texture2D* const* a_eyeSources = nullptr,
 		bool a_compositeCommittedMenuLayer = false);
@@ -3495,7 +3496,7 @@ public:
 	std::atomic_bool vrDLSSRapidTransitionGuardLogged{ false };
 	uint32_t submitStageMirrorFrame = std::numeric_limits<uint32_t>::max();
 	uint64_t submitStageMirrorCycle = 0;
-	std::array<bool, 2> submitStageMirrorEyeReady = {};
+	VRSubmitInputReusePolicy::FinalizedEyePair submitStageMirrorPair{};
 	ID3D11Texture2D* submitStageMirrorSourceTexture = nullptr;
 	uint32_t submitStageFoveatedPeripheryTAAFrame = std::numeric_limits<uint32_t>::max();
 	uint64_t submitStageFoveatedPeripheryTAACycle = 0;

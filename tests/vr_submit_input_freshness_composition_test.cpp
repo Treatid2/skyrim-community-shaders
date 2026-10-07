@@ -276,6 +276,17 @@ int main()
 	Require(!mirrorPair.Consume(), "Single finalized eye completed a mirror pair");
 	mirrorPair.Record(right);
 	Require(mirrorPair.Consume(), "Compatible finalized eyes did not complete a mirror pair");
+	Require(!mirrorPair.Consume(), "A consumed mirror pair was published twice");
+	mirrorPair.Record(left);
+	mirrorPair.Record(left);
+	Require(!mirrorPair.Consume(), "Repeated left-eye output replaced a missing right eye");
+	auto staleRight = right;
+	--staleRight.source.lastCompletedWorldRenderFrame;
+	mirrorPair.Record(staleRight);
+	Require(!mirrorPair.Consume(), "Stale guide output completed a mirror pair");
+	mirrorPair.Record(right);
+	mirrorPair.Invalidate(0x3u);
+	Require(!mirrorPair.Consume(), "A failed stereo replacement retained finalized outputs");
 	auto replacementRight = right;
 	++replacementRight.scopeToken;
 	mirrorPair.Record(left);

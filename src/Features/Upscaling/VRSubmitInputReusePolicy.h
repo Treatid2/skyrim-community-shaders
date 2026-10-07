@@ -3,6 +3,7 @@
 #include "VRSubmitInputFreshnessPolicy.h"
 
 #include <array>
+#include <iterator>
 
 namespace VRSubmitInputReusePolicy
 {
@@ -59,7 +60,7 @@ namespace VRSubmitInputReusePolicy
 		std::uint32_t a_eye,
 		const EyeRegion& a_region) noexcept
 	{
-		const bool regionCorrespondenceProven = a_eye < a_source.eyes.size() &&
+		const bool regionCorrespondenceProven = a_eye < std::size(a_source.eyes) &&
 		                                        a_region.IsValid() &&
 		                                        MatchesEyeRegion(a_source.eyes[a_eye], a_region) &&
 		                                        a_region.right - a_region.left == a_region.depthWidth &&
