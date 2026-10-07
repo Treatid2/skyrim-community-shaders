@@ -1593,7 +1593,7 @@ void Wetterness::DrawSettings()
 		rainGrassGlossiness = GrassLighting::ClampGlossiness(rainGrassGlossiness, kDefaultRainGrassGlossiness);
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::TextUnformatted(
-				"Maximum effective grass glossiness while rain is active, including TRUE_PBR roughness. Wetterness blends down from this value after rain using the grass drying time. If this is below the dry endpoint, the dry endpoint wins so rain never makes grass less glossy.");
+				"Maximum effective grass glossiness while rain is active. Wetterness blends down from this value after rain using the grass drying time. If this is below the dry endpoint, the dry endpoint wins so rain never makes grass less glossy.");
 		}
 
 		ImGui::SliderFloat(
@@ -1652,7 +1652,7 @@ void Wetterness::DrawSettings()
 		markPresetDirtyIfEdited();
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::TextUnformatted(
-				"Reduces grass albedo while wet. The effect reaches this strength during rain and fades out using the grass drying time. Applies to basic, complex, and TRUE_PBR grass.");
+				"Reduces grass albedo while wet. The effect reaches this strength during rain and fades out using the grass drying time. Applies to basic and complex grass.");
 		}
 
 		ImGui::Separator();
@@ -2622,13 +2622,7 @@ Wetterness::PerFrame Wetterness::GetCommonBufferData() const
 		}
 	}
 	runtimeState.grassLightingWetnessPhase = grassLightingWetnessPhase;
-	const float dryGrassGlossiness = GrassLighting::ClampGlossiness(
-		globals::features::grassLighting.settings.Glossiness,
-		GrassLighting::Settings{}.Glossiness);
-	const float wetGrassGlossiness = (std::max)(dryGrassGlossiness,
-		GrassLighting::ClampGlossiness(rainGrassGlossiness, kDefaultRainGrassGlossiness));
 	data.GrassWetnessPhase = grassLightingWetnessPhase;
-	data.GrassWetRoughness = std::clamp(1.0f - wetGrassGlossiness * 0.01f, 0.0f, 1.0f);
 	data.GrassWetDarkeningStrength = ClampRainGrassDarkening(rainGrassDarkening);
 	data.PuddleMaskMode = static_cast<uint32_t>(
 		ResolveEffectivePuddleMaskMode(puddleMaskMode, puddleMaskSrv != nullptr));

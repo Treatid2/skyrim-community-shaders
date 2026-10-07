@@ -3,6 +3,8 @@
 #include <nlohmann/json.hpp>
 
 #include <cassert>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 namespace
@@ -12,7 +14,7 @@ namespace
 		return {
 			{ "Preset Compatibility",
 				{
-					{ "contractVersion", 1 },
+					{ "contractVersion", 1u },
 					{ "presetId", "csx-unified-balanced" },
 					{ "presetVersion", "d2026.08.30.2" },
 					{ "target",
@@ -23,7 +25,7 @@ namespace
 						} },
 					{ "settingsContract",
 						{
-							{ "revision", 3 },
+							{ "revision", PresetCompatibility::kSettingsContractRevision },
 							{ "sourceTreeSha256", std::string(64, 'A') },
 						} },
 				} },
@@ -31,9 +33,21 @@ namespace
 	}
 }
 
-int main()
+int main(int argc, char** argv)
 {
 	using PresetCompatibility::Disposition;
+	assert(argc == 2);
+	for (const auto tier : { "Performance", "Balanced", "Quality" }) {
+		const auto path = std::filesystem::path(argv[1]) / "MGO-Presets" /
+		                  (std::string("CSX Unified- ") + tier + " - Press END on PC to Customize") /
+		                  "SKSE/Plugins/CommunityShaders/SettingsUser.json";
+		std::ifstream input(path);
+		assert(input.is_open());
+		const auto preset = nlohmann::json::parse(input);
+		const auto result = PresetCompatibility::Evaluate(preset, "CSX 3.20.0-VR");
+		assert(result.disposition == Disposition::kCompatible);
+		assert(result.ShouldApply());
+	}
 
 	const auto unmarked = PresetCompatibility::Evaluate(nlohmann::json::object(), "CSX 3.19-VR");
 	assert(unmarked.disposition == Disposition::kUnmarked);
@@ -48,14 +62,26 @@ int main()
 	assert(older.disposition == Disposition::kRejected);
 	assert(!older.ShouldApply());
 
-	const auto newer = PresetCompatibility::Evaluate(CompatiblePreset(), "CSX 3.20-VR");
+	const auto legacy = PresetCompatibility::Evaluate(CompatiblePreset(), "CSX 3.20.0-VR");
+	assert(legacy.disposition == Disposition::kCompatible);
+	assert(legacy.currentVersion == "CSX 3.20.0-VR");
+	const auto newer = PresetCompatibility::Evaluate(CompatiblePreset(), "CSX 3.21.0-VR");
 	assert(newer.disposition == Disposition::kRejected);
+	auto thirdParty = CompatiblePreset();
+	thirdParty["Preset Compatibility"]["presetId"] = "another-preset";
+	assert(!PresetCompatibility::Evaluate(thirdParty, "CSX 3.20.0-VR").ShouldApply());
+	for (const auto label : { "CSX 3.20.x-VR", "CSX 3.20.0.1-VR", "CSX 3.20.-VR", "CSX 3.20.4294967296-VR" }) {
+		assert(!PresetCompatibility::Evaluate(CompatiblePreset(), label).ShouldApply());
+	}
+	auto invalidRange = CompatiblePreset();
+	invalidRange["Preset Compatibility"]["target"]["minimumVersion"] = "3.19.0";
+	assert(!PresetCompatibility::Evaluate(invalidRange, "CSX 3.20.0-VR").ShouldApply());
 
 	const auto wrongRuntime = PresetCompatibility::Evaluate(CompatiblePreset(), "CSX 3.19-SE");
 	assert(wrongRuntime.disposition == Disposition::kRejected);
 
 	auto futureContract = CompatiblePreset();
-	futureContract["Preset Compatibility"]["contractVersion"] = 2;
+	futureContract["Preset Compatibility"]["contractVersion"] = 2u;
 	const auto unsupported = PresetCompatibility::Evaluate(futureContract, "CSX 3.19-VR");
 	assert(unsupported.disposition == Disposition::kRejected);
 
@@ -65,9 +91,18 @@ int main()
 	assert(invalid.disposition == Disposition::kRejected);
 
 	auto futureSettings = CompatiblePreset();
-	futureSettings["Preset Compatibility"]["settingsContract"]["revision"] = 4;
+	futureSettings["Preset Compatibility"]["settingsContract"]["revision"] = PresetCompatibility::kSettingsContractRevision + 1;
 	const auto unsupportedSettings = PresetCompatibility::Evaluate(futureSettings, "CSX 3.19-VR");
 	assert(unsupportedSettings.disposition == Disposition::kRejected);
+	for (const auto key : { "contractVersion", "revision" }) {
+		auto oversized = CompatiblePreset();
+		auto& marker = oversized["Preset Compatibility"];
+		if (std::string_view(key) == "contractVersion")
+			marker[key] = (std::uint64_t{ 1 } << 32) + PresetCompatibility::kContractVersion;
+		else
+			marker["settingsContract"][key] = (std::uint64_t{ 1 } << 32) + PresetCompatibility::kSettingsContractRevision;
+		assert(!PresetCompatibility::Evaluate(oversized, "CSX 3.19-VR").ShouldApply());
+	}
 
 	auto invalidSourceHash = CompatiblePreset();
 	invalidSourceHash["Preset Compatibility"]["settingsContract"]["sourceTreeSha256"] = std::string(64, 'Z');

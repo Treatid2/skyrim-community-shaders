@@ -6,7 +6,10 @@
 
 #include "../../Buffer.h"
 #include "../../State.h"
+#include "DLSSResultPolicy.h"
 #include "StreamlineFrameTokenPublication.h"
+#include "VRRelatchDrainFence.h"
+#include "VRRelatchDrainPolicy.h"
 
 #include <array>
 #include <atomic>
@@ -166,6 +169,9 @@ public:
 	uint64_t vrDLSSViewportUseCounter = 0;
 	std::array<bool, 2> activeDLSSViewportResourcesAllocated = {};
 	ID3D11Query* pendingDLSSResourceFreeIdleFence = nullptr;
+	VRRelatchDrainPolicy::Proof dlssRelatchDrainProof;
+	VRRelatchDrainFence dlssRelatchDrainFence;
+	winrt::com_ptr<ID3D11Device> dlssRelatchDrainDevice;
 	struct VRDLSSSlotRecycleFence
 	{
 		ID3D11Query* query = nullptr;
@@ -182,6 +188,7 @@ public:
 	};
 	ReflexOptionsCache reflexOptionsCache{};
 	uint32_t lastReflexSleepFrame = UINT32_MAX;
+	DLSSResultPolicy::BudgetWarningThrottle dlssBudgetWarningThrottle;
 	bool lastDLSSFailureDuplicatedConstants = false;
 
 	struct DLSSDispatchDiagnostics
@@ -203,10 +210,11 @@ public:
 		bool croppedViewport = false;
 		float pinholeOffsetX = 0.0f;
 		float pinholeOffsetY = 0.0f;
+		bool submitStageVRDLSS = false;
+#ifdef DEVBENCH_BRIDGE_ENABLED
 		float jitterX = 0.0f;
 		float jitterY = 0.0f;
 		bool colorBuffersHDR = false;
-		bool submitStageVRDLSS = false;
 		bool presentationUpscalingActive = false;
 		bool renderScaleActive = false;
 		bool foveatedDispatchEnabled = false;
@@ -227,6 +235,7 @@ public:
 		ID3D11Resource* motionVectors = nullptr;
 		ID3D11Resource* reactiveMask = nullptr;
 		ID3D11Resource* transparencyMask = nullptr;
+#endif
 	};
 
 #ifdef DEVBENCH_BRIDGE_ENABLED
@@ -400,6 +409,7 @@ public:
 		uint64_t setConstantsCalls = 0;
 		uint64_t evaluateCalls = 0;
 		uint64_t duplicatedConstantsFailures = 0;
+		/** Failed evaluations, excluding successful VRAM-budget warnings retained in raw records. */
 		uint64_t evaluateFailures = 0;
 		uint64_t lastDuplicatedConstantsFailureSequence = 0;
 		uint64_t lastEvaluateFailureSequence = 0;
@@ -439,7 +449,7 @@ public:
 		Failed
 	};
 
-	// Helper: Execute DLSS for a single viewport with given resources
+	/** Evaluates one viewport; a VRAM-budget warning retains valid output, while real failures return false. */
 	bool EvaluateDLSS(sl::ViewportHandle vp, uint32_t eyeIndex,
 		ID3D11Resource* colorIn, ID3D11Resource* colorOut, ID3D11Resource* depth,
 		ID3D11Resource* mvec, ID3D11Resource* reactiveMask, ID3D11Resource* transparencyMask,
@@ -574,7 +584,16 @@ public:
 	bool EnsureReflexDisabledForFrameGeneration();
 	void UpdateReflex();
 
-	DLSSResourceTeardownResult DestroyDLSSResources();
+	DLSSResourceTeardownResult DestroyDLSSResources(uint64_t a_drainEpoch = 0);
+	/** Render-thread-only readiness observation; never frees or reconfigures DLSS. */
+	DLSSResourceTeardownResult PollDLSSRelatchDrain(uint64_t a_epoch);
+	[[nodiscard]] bool IsDLSSRelatchDrainReady(uint64_t a_epoch) const noexcept;
+	void CancelDLSSRelatchDrain() noexcept;
+	void InvalidateDLSSRelatchDrain() noexcept;
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	/** Copies observations of the existing drain fence without polling it. */
+	void CaptureDLSSRelatchDrainTelemetry(VRRenderScaleRetryTelemetry::Event& a_event) const noexcept;
+#endif
 
 	enum class LifecycleState : uint8_t
 	{

@@ -598,13 +598,46 @@ bool State::IsEngineSaveLoadActivityActive() const
 	return engineSaveLoadActivityActive.load(std::memory_order_acquire);
 }
 
+uint64_t State::GetOrdinarySaveRenderRecoveryToken() const
+{
+	std::lock_guard lock(saveLoadSafeModeMutex);
+	const uint64_t recoveryState = saveLoadRenderRecoveryState;
+	if ((recoveryState & kSaveLoadRenderRecoverySourceMask) !=
+			static_cast<uint64_t>(SaveLoadRenderRecoverySource::OrdinarySave) ||
+		!engineSaveLoadActivityKnown ||
+		IsEngineSaveLoadActivityActive()) {
+		return 0;
+	}
+	return recoveryState;
+}
+
 bool State::IsPersistentMutationBlocked() const
 {
 	return persistentMutationBlocked.load(std::memory_order_acquire);
 }
 
+void State::RecordSaveLoadRenderRecoverySource(SaveLoadRenderRecoverySource a_source)
+{
+	const auto previousSource = static_cast<SaveLoadRenderRecoverySource>(
+		saveLoadRenderRecoveryState & kSaveLoadRenderRecoverySourceMask);
+	const auto source = previousSource == SaveLoadRenderRecoverySource::Other ?
+	                        SaveLoadRenderRecoverySource::Other :
+	                        a_source;
+	const uint64_t nextGeneration =
+		(saveLoadRenderRecoveryState & ~kSaveLoadRenderRecoverySourceMask) + kSaveLoadRenderRecoverySourceMask + 1;
+	saveLoadRenderRecoveryState = nextGeneration | static_cast<uint64_t>(source);
+}
+
+void State::NotifyOrdinarySave(uint32_t a_currentFrame)
+{
+	std::lock_guard lock(saveLoadSafeModeMutex);
+	ExtendSaveLoadSafeModeImpl(a_currentFrame, kSaveLoadSafeModeGraceFrames);
+	RecordSaveLoadRenderRecoverySource(SaveLoadRenderRecoverySource::OrdinarySave);
+}
+
 void State::BeginSaveLoadSafeMode(uint32_t a_currentFrame)
 {
+	std::lock_guard lock(saveLoadSafeModeMutex);
 	const uint32_t currentFrame = a_currentFrame != 0 ? a_currentFrame : std::max(frameCount, 1u);
 	saveLoadSafeModeStartFrame.store(currentFrame, std::memory_order_release);
 	saveLoadSafeModeEndFrame.store(0, std::memory_order_release);
@@ -612,9 +645,17 @@ void State::BeginSaveLoadSafeMode(uint32_t a_currentFrame)
 		globals::shaderCache->SetSaveLoadDiskPersistenceBlocked(true);
 	saveLoadSafeModeActive.store(true, std::memory_order_release);
 	persistentMutationBlocked.store(true, std::memory_order_release);
+	RecordSaveLoadRenderRecoverySource(SaveLoadRenderRecoverySource::Other);
 }
 
 void State::ExtendSaveLoadSafeMode(uint32_t a_currentFrame, uint32_t a_frameCount)
+{
+	std::lock_guard lock(saveLoadSafeModeMutex);
+	ExtendSaveLoadSafeModeImpl(a_currentFrame, a_frameCount);
+	RecordSaveLoadRenderRecoverySource(SaveLoadRenderRecoverySource::Other);
+}
+
+void State::ExtendSaveLoadSafeModeImpl(uint32_t a_currentFrame, uint32_t a_frameCount)
 {
 	const uint32_t currentFrame = a_currentFrame != 0 ? a_currentFrame : std::max(frameCount, 1u);
 	const uint32_t endFrame = currentFrame + std::max(a_frameCount, 1u);
@@ -630,6 +671,7 @@ void State::ExtendSaveLoadSafeMode(uint32_t a_currentFrame, uint32_t a_frameCoun
 
 void State::BeginPersistentMutationBlock(uint32_t a_currentFrame, uint32_t a_frameCount)
 {
+	std::lock_guard lock(saveLoadSafeModeMutex);
 	const uint32_t currentFrame = a_currentFrame != 0 ? a_currentFrame : std::max(frameCount, 1u);
 	const uint32_t endFrame = currentFrame + std::max(a_frameCount, 1u);
 	StoreMax(persistentMutationBlockEndFrame, endFrame);
@@ -638,6 +680,7 @@ void State::BeginPersistentMutationBlock(uint32_t a_currentFrame, uint32_t a_fra
 
 void State::ExtendPersistentMutationBlock(uint32_t a_currentFrame, uint32_t a_frameCount)
 {
+	std::lock_guard lock(saveLoadSafeModeMutex);
 	const uint32_t currentFrame = a_currentFrame != 0 ? a_currentFrame : std::max(frameCount, 1u);
 	const uint32_t endFrame = currentFrame + std::max(a_frameCount, 1u);
 	StoreMax(persistentMutationBlockEndFrame, endFrame);
@@ -646,22 +689,36 @@ void State::ExtendPersistentMutationBlock(uint32_t a_currentFrame, uint32_t a_fr
 
 void State::UpdateSaveLoadSafeMode()
 {
+	std::lock_guard lock(saveLoadSafeModeMutex);
 	const uint32_t currentFrame = std::max(frameCount, 1u);
 	bool safeModeActive = saveLoadSafeModeActive.load(std::memory_order_acquire);
 	const bool wasSafeModeActive = safeModeActive;
 
-	bool engineSaveLoadActive = false;
+	bool engineStateKnown = false;
+	bool engineSaving = false;
+	bool engineLoadingOrInitializing = false;
 	if (auto* saveLoad = RE::BGSSaveLoadGame::GetSingleton()) {
-		engineSaveLoadActive =
+		engineStateKnown = true;
+		engineSaving = saveLoad->GetSaveGameSaving();
+		engineLoadingOrInitializing =
 			saveLoad->GetSaveGameLoading() ||
-			saveLoad->GetSaveGameSaving() ||
 			saveLoad->GetInitingForms() ||
 			saveLoad->GetDeferInitForms() ||
 			saveLoad->GetPositioningPlayerCharacter();
 	}
+	const bool engineSaveLoadActive = engineSaving || engineLoadingOrInitializing;
 	engineSaveLoadActivityActive.store(
 		engineSaveLoadActive,
 		std::memory_order_release);
+	engineSaveLoadActivityKnown = engineStateKnown;
+	const bool ordinarySaveRecoveryUnsafe = !engineStateKnown ||
+	                                        engineLoadingOrInitializing || IsMainOrLoadingMenuOpen() || pendingPostLoadRuntimeReset;
+	if (ordinarySaveRecoveryUnsafe) {
+		RecordSaveLoadRenderRecoverySource(SaveLoadRenderRecoverySource::Other);
+	} else if (engineSaving && !engineSavingWasActive) {
+		RecordSaveLoadRenderRecoverySource(SaveLoadRenderRecoverySource::OrdinarySave);
+	}
+	engineSavingWasActive = engineSaving;
 
 	if (engineSaveLoadActive) {
 		if (!safeModeActive) {
@@ -704,11 +761,16 @@ void State::UpdateSaveLoadSafeMode()
 
 	if (wasSafeModeActive && !safeModeActive && globals::shaderCache)
 		globals::shaderCache->SetSaveLoadDiskPersistenceBlocked(false);
+
+	if (!safeModeActive && !ordinarySaveRecoveryUnsafe) {
+		saveLoadRenderRecoveryState &= ~kSaveLoadRenderRecoverySourceMask;
+	}
 }
 
 void State::Reset()
 {
-	globals::profiler->EndFrame(frameCount);
+	if (globals::game::isVR)
+		globals::profiler->EndFrame(frameCount);
 	Feature::ForEachLoadedFeature("Reset", [](Feature* feature) { feature->Reset(); });
 	if (!globals::game::ui->GameIsPaused())
 		timer += RE::GetSecondsSinceLastFrame();
@@ -1599,10 +1661,12 @@ void State::SetLogLevel(spdlog::level::level_enum a_level)
 	spdlog::flush_on(flushLevel);
 	logger::info("Log Level set to {} ({})", magic_enum::enum_name(logLevel), magic_enum::enum_integer(logLevel));
 
+#ifdef DEVBENCH_BRIDGE_ENABLED
 	// Testers can enable debug logging after the D3D device was initialized.
 	// Install the otherwise dormant trace hooks at that point as well.
 	if (globals::game::isVR && IsDeveloperMode() && globals::d3d::context)
 		Upscaling::InstallVRMenuPresentationTraceD3DHooks(globals::d3d::context);
+#endif
 }
 
 spdlog::level::level_enum State::GetLogLevel()
@@ -1652,9 +1716,8 @@ std::shared_ptr<const State::ShaderDefinesSnapshot> State::GetShaderDefinesSnaps
 
 bool State::ShaderEnabled(const RE::BSShader::Type a_type)
 {
-	auto index = magic_enum::enum_integer(a_type) + 1;
-	if (index < sizeof(enabledClasses)) {
-		return enabledClasses[index];
+	if (a_type > RE::BSShader::Type::None && a_type < RE::BSShader::Type::Total) {
+		return enabledClasses[magic_enum::enum_integer(a_type) - 1];
 	}
 	return false;
 }
@@ -1708,7 +1771,7 @@ void State::CheckTypedUAVLoadSupport()
 		{ DXGI_FORMAT_R16G16_UNORM, "R16G16_UNORM", "Terrain Shadows (RWTexShadowHeights)" },
 		{ DXGI_FORMAT_R16G16_FLOAT, "R16G16_FLOAT", "VR Stereo Blend (kMOTION_VECTOR reprojection)" },
 		{ DXGI_FORMAT_R8G8B8A8_UNORM, "R8G8B8A8_UNORM", "HDR Display UI brightness (uiTexture)" },
-		{ DXGI_FORMAT_R8_UINT, "R8_UINT", "Skylighting accumulation frames (outAccumFramesArray)" },
+		{ DXGI_FORMAT_R16_UINT, "R16_UINT", "Skylighting accumulation and shadow sample cursor (outAccumFramesArray)" },
 		{ DXGI_FORMAT_R16_FLOAT, "R16_FLOAT", "Vanilla volumetric lighting density (DensityRW)" },
 	};
 
@@ -1783,7 +1846,7 @@ void State::SetupResources()
 	}
 
 	if (globals::profiler && globals::d3d::device && globals::d3d::context) {
-		globals::profiler->Initialize(globals::d3d::device, globals::d3d::context);
+		globals::profiler->Initialize(globals::d3d::device, globals::d3d::context, !globals::game::isVR);
 		if (frameAnnotations) {
 			globals::profiler->SetPerfEventCallbacks(
 				[this](std::string_view a_title) { BeginPerfEvent(a_title); },
@@ -1892,16 +1955,6 @@ void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescr
 			{
 				if (deferred->deferredPass || a_forceDeferred)
 					a_pixelDescriptor |= 256;
-			}
-			break;
-		case RE::BSShader::Type::Grass:
-			{
-				auto technique = a_vertexDescriptor & 0xF;
-				auto flags = a_vertexDescriptor & ~0xF;
-				if (technique == static_cast<uint32_t>(SIE::ShaderCache::GrassShaderTechniques::TruePbr)) {
-					technique = 0;
-				}
-				a_vertexDescriptor = flags | technique;
 			}
 			break;
 		}
@@ -2063,8 +2116,13 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		data.HasDirectionalShadows = HasDirectionalShadows();
 		const auto& volumetricShadows = globals::features::volumetricShadows;
 		data.VolumetricShadowsEnabled = volumetricShadows.loaded && volumetricShadows.settings.Enabled;
-		data.VolumetricLightingOpacity =
-			a_inWorld ? globals::features::volumetricLighting.GetRuntimeGodrayOpacity() : 1.0f;
+		const auto godrayProfile = a_inWorld ? globals::features::volumetricLighting.GetRuntimeGodrayProfile() : VolumetricLighting::GodrayProfile{};
+		data.VolumetricLightingOpacity = godrayProfile.Opacity;
+		data.VolumetricLightingSaturation = godrayProfile.Saturation;
+		data.VolumetricLightingCustomColor = {
+			godrayProfile.CustomColorRed, godrayProfile.CustomColorGreen,
+			godrayProfile.CustomColorBlue, godrayProfile.CustomColorContribution
+		};
 
 		data.SSSHumanMaleIntensity = sssHumanMaleIntensity;
 		data.SSSHumanMaleSaturation = sssHumanMaleSaturation;

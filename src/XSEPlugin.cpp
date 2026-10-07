@@ -1,3 +1,4 @@
+#include "Api/AcceptedDrawService.h"
 #include "Api/EditorDevBenchBridge.h"
 #include "Api/EditorService.h"
 #include "Api/FeatureDevBenchBridge.h"
@@ -17,7 +18,9 @@
 #include "Features/HorizonFix.h"
 #include "Features/InteriorSun.h"
 #include "Features/LightLimitFix.h"
+#include "Features/Skylighting.h"
 #include "Features/Upscaling.h"
+#include "Features/VR/StabilizerIntegration.h"
 #include "FrameAnnotations.h"
 #include "Globals.h"
 #include "Hooks.h"
@@ -70,18 +73,18 @@ namespace
 			return false;
 		}
 
-		CSX::Api::InitializeServiceRegistryProvider();
 		if (!messaging->RegisterListener(nullptr, CommunityShadersAPIMessageHandler)) {
 			PushStartupError("Failed to register CSX API message listener. Check CommunityShaders.log for details.");
 			return false;
 		}
 
-		logger::info("Registered legacy CSAP and versioned CSXR API message listener before PostLoad dispatch");
+		logger::info("Registered legacy CSAP and versioned CSXR API listener for currently loaded plugins");
 		return true;
 	}
 
 	void ResetRuntimeStateAfterGameLoad()
 	{
+		globals::features::skylighting.QueueResetSkylighting();
 		if (globals::state) {
 			globals::state->pendingPostLoadRuntimeReset = true;
 		}
@@ -130,7 +133,7 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	InitializeLog();
 	logger::info("Loaded {} {}", Plugin::NAME, Plugin::BUILD_LABEL);
 	BuildProvenance::LogRuntimeIdentity();
-	SKSE::Init(a_skse);
+	SKSE::Init(a_skse, false);
 	SKSE::AllocTrampoline(kTrampolineCapacity);
 	return Load();
 }
@@ -157,6 +160,11 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 	switch (message->type) {
 	case SKSE::MessagingInterface::kPostLoad:
 		{
+			// Keep early consumers reachable; refresh the wildcard registration
+			// for plugins loaded after CSX before their PostLoad callbacks.
+			if (!RegisterCommunityShadersAPIMessageListener())
+				break;
+
 			// Establish the API owner from an actual SKSE game-thread task. The
 			// lifecycle callback itself is not a reliable thread-affinity oracle.
 			CSX::Api::ScheduleRuntimeMainThreadBinding();
@@ -179,6 +187,8 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 	case SKSE::MessagingInterface::kPostPostLoad:
 		{
 			if (errors.empty()) {
+				VRFpsStabilizer::Initialize();
+				VRFpsStabilizer::InstallDevBench();
 				ScreenshotDevBenchBridge::Install();
 				CSX::Api::ProfilerApiDevBenchBridge::Install();
 				// DevBench publishes its interface from its own PostLoad listener. If
@@ -191,6 +201,7 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 				CSX::Api::ShaderDevBenchBridge::Install();
 				Deferred::Hooks::Install();
 				Hooks::Install();
+				CSX::Api::RegisterAcceptedDrawService();
 				EngineFix::InstallOnPostPostLoadFixes();
 				FrameAnnotations::OnPostPostLoad();
 
@@ -319,8 +330,8 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 	case SKSE::MessagingInterface::kSaveGame:
 		{
 			if (errors.empty() && globals::state) {
-				const uint32_t frame = globals::state->frameCount;
-				globals::state->ExtendSaveLoadSafeMode(frame, State::kSaveLoadSafeModeGraceFrames);
+				const uint32_t frame = globals::state->frameCountAtomic.load(std::memory_order_acquire);
+				globals::state->NotifyOrdinarySave(frame);
 				globals::state->ExtendPersistentMutationBlock(frame, State::kSaveMutationBlockGraceFrames);
 			}
 
@@ -362,7 +373,7 @@ bool Load()
 	}
 
 	if (REL::Module::IsVR()) {
-		REL::IDDB::get().IsVRAddressLibraryAtLeastVersion("0.207.0", true);
+		REL::IDDB::get().IsVRAddressLibraryAtLeastVersion("0.269.0", true);
 	}
 
 	auto privateProfileRedirectorVersion = Util::GetDllVersion(L"Data/SKSE/Plugins/PrivateProfileRedirector.dll");
@@ -375,6 +386,7 @@ bool Load()
 		logger::error("SKSE messaging interface unavailable");
 		return false;
 	}
+	CSX::Api::InitializeServiceRegistryProvider();
 	if (!RegisterCommunityShadersAPIMessageListener())
 		return false;
 

@@ -83,7 +83,12 @@ public static class UnifiedPresetPathIdentity
 
     public static string ResolveExisting(string path)
     {
-        using (var handle = CreateFileW(path, FileReadAttributes, ShareAll, IntPtr.Zero,
+        var nativePath = System.IO.Path.GetFullPath(path);
+        if (!nativePath.StartsWith(@"\\?\", StringComparison.Ordinal))
+            nativePath = nativePath.StartsWith(@"\\", StringComparison.Ordinal)
+                ? @"\\?\UNC\" + nativePath.Substring(2)
+                : @"\\?\" + nativePath;
+        using (var handle = CreateFileW(nativePath, FileReadAttributes, ShareAll, IntPtr.Zero,
             OpenExisting, BackupSemantics, IntPtr.Zero))
         {
             if (handle.IsInvalid)
@@ -485,7 +490,8 @@ function Get-RuntimeSettingsContractHash {
         if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
             throw "Runtime settings contract source is absent: $sourcePath"
         }
-        "${sourcePath}`0$((Get-FileHash -Algorithm SHA256 -LiteralPath $resolved).Hash)"
+        $sourceText = [System.IO.File]::ReadAllText($resolved, [System.Text.Encoding]::UTF8).Replace("`r`n", "`n")
+        "${sourcePath}`0$(Get-TextSha256 $sourceText)"
     }
     $inventoryRecord = "inventory`0$(Get-TextSha256 (ConvertTo-CanonicalJson $contract.inventory))"
     Get-TextSha256 (((@($records | Sort-Object) + $inventoryRecord) -join "`n") + "`n")
@@ -511,9 +517,9 @@ function Assert-TierContract {
     }
     if ($policy.presetCompatibility.contractVersion -ne 1 -or
         $policy.presetCompatibility.target.runtime -cne 'VR' -or
-        $policy.presetCompatibility.target.minimumVersion -cne '3.19' -or
-        $policy.presetCompatibility.target.maximumVersionExclusive -cne '3.20') {
-        throw 'Preset compatibility must target CSX VR >= 3.19 and < 3.20 with contract version 1.'
+        $policy.presetCompatibility.target.minimumVersion -cne '3.20' -or
+        $policy.presetCompatibility.target.maximumVersionExclusive -cne '3.21') {
+        throw 'Preset compatibility must target CSX VR >= 3.20 and < 3.21 with contract version 1.'
     }
 
     $ownedPaths = @($policy.tierOwnedPaths | ForEach-Object { ConvertTo-CanonicalPath $_ })
@@ -661,7 +667,7 @@ installationFile=CSX-Unified-$slug-Provisional.7z
 repository=Nexus
 ignoredVersion=
 comments=WABBAJACK_ALWAYS_ENABLE
-notes=PROVISIONAL unified $Tier preset generated from policy schema v4 for CSX 3.19-VR; qualification=$qualificationSummary
+notes=PROVISIONAL unified $Tier preset generated from policy schema v4 for CSX 3.20.0-VR; qualification=$qualificationSummary
 nexusDescription=
 url=
 hasCustomURL=false

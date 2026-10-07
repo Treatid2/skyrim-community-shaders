@@ -1,4 +1,5 @@
 #include "Api/ServiceFoundation.h"
+#include "service_retry_test.h"
 
 #include <iostream>
 #include <stdexcept>
@@ -34,6 +35,7 @@ int RunTest()
 	limits.maximumEvents = 3;
 	ServiceFoundation service({ "csx.test", 1, 2, 3 }, limits);
 	service.SetServerMetadataProvider([] { return json{ { "testServer", true } }; });
+	CheckRetryableCommands(service, Check);
 
 	const auto invalid = service.Dispatch(json::object(), [](const json&) { return json::object(); });
 	Check(!invalid["ok"].get<bool>(), "missing contract major must be rejected");
@@ -75,28 +77,24 @@ int RunTest()
 	Check(!conflict["ok"].get<bool>(), "idempotency conflict was accepted");
 	Check(conflict["error"]["code"] == "idempotency_conflict", "wrong idempotency error code");
 
-	uint32_t failedCalls = 0;
-	const auto failedRequest = Request("fail", "failure-one");
-	const auto failed = service.Dispatch(failedRequest, [&](const json& command) {
-		++failedCalls;
-		service.AppendEvent("failed-request", 1, "request.failed");
-		return service.MakeError(
-			command,
-			"main_thread_dispatch_failed",
-			"callback failed",
-			"execution",
-			false);
+	auto firstTuple = Request("tuple", "gamma");
+	firstTuple["clientId"] = "alpha\nbeta";
+	const auto firstTupleResponse = service.Dispatch(firstTuple, [&](const json& command) {
+		auto response = service.MakeEnvelope(command, true);
+		response["result"] = { { "tuple", 1 } };
+		return response;
 	});
-	Check(!failed["ok"].get<bool>() && !failed["error"]["retryable"].get<bool>(),
-		"admitted callback failure was marked retryable");
-	const auto failedReplay = service.Dispatch(failedRequest, [&](const json&) {
-		++failedCalls;
-		return json::object();
+	auto secondTuple = Request("tuple", "beta\ngamma");
+	secondTuple["clientId"] = "alpha";
+	const auto secondTupleResponse = service.Dispatch(secondTuple, [&](const json& command) {
+		auto response = service.MakeEnvelope(command, true);
+		response["result"] = { { "tuple", 2 } };
+		return response;
 	});
-	Check(failedCalls == 1, "failed idempotent command executed twice");
-	Check(failedReplay["error"]["phase"] == "execution" &&
-			  !failedReplay["error"]["retryable"].get<bool>(),
-		"failed replay lost its execution provenance");
+	Check(firstTupleResponse["ok"].get<bool>() && secondTupleResponse["ok"].get<bool>(),
+		"distinct client and command tuples collided");
+	Check(firstTupleResponse["result"]["tuple"] == 1 && secondTupleResponse["result"]["tuple"] == 2,
+		"structured idempotency identity returned the wrong command");
 
 	service.AppendEvent("request-1", 1, "request.accepted");
 	service.AppendEvent("request-1", 2, "request.running");

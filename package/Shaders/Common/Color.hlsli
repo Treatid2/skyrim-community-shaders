@@ -222,10 +222,15 @@ namespace Color
 		return ENABLE_LL_COLOR_ADJUSTMENTS ? LinearToSkyrimGamma(color) : color;
 	}
 
+	float3 PBRDiffuse(float3 color)
+	{
+		return ENABLE_LL_COLOR_ADJUSTMENTS ? color : LinearToSrgb(color);
+	}
+
 	float3 Diffuse(float3 color)
 	{
 #	if defined(TRUE_PBR)
-		return ENABLE_LL_COLOR_ADJUSTMENTS ? color : LinearToSrgb(color);
+		return PBRDiffuse(color);
 #	else
 		return ENABLE_LL_COLOR_ADJUSTMENTS ? pow(abs(color), SharedData::linearLightingSettings.colorGamma) * SharedData::linearLightingSettings.vanillaDiffuseColorMult : color;
 #	endif
@@ -322,9 +327,32 @@ namespace Color
 		return ENABLE_BRIGHTNESS_ADJUSTMENTS ? color * SharedData::linearLightingSettings.glowmapMult : color;
 	}
 
+	/// Engine ambient adjustments before selecting vanilla or image-based lighting.
 	float3 Ambient(float3 color)
 	{
 		return ENABLE_BRIGHTNESS_ADJUSTMENTS ? pow(abs(color), SharedData::linearLightingSettings.ambientGamma) * SharedData::linearLightingSettings.ambientMult : color;
+	}
+
+	/// Scene adjustments include reflections and exclude out-of-world object previews.
+	bool IsSceneColorDraw()
+	{
+#	if defined(PSHADER) && defined(LL_COLOR_ADJUSTMENTS_USE_EXTRA_FLAGS)
+		return (Permutation::ExtraShaderDescriptor & (Permutation::ExtraFlags::InWorld | Permutation::ExtraFlags::InReflection)) != 0;
+#	else
+		return true;
+#	endif
+	}
+
+	/// Composed Adaptive Balance multiplier, excluding out-of-world object previews.
+	float AmbientBalanceMultiplier()
+	{
+		return IsSceneColorDraw() ? SharedData::adaptiveBalanceSettings.ambientMult : 1.0;
+	}
+
+	/// Apply once after ambient sources are combined, in the renderer's lighting space.
+	float3 ApplyAmbientBalance(float3 color)
+	{
+		return color * AmbientBalanceMultiplier();
 	}
 
 	float3 Fog(float3 color)
@@ -334,7 +362,9 @@ namespace Color
 
 	float FogAlpha(float alpha)
 	{
-		return ENABLE_BRIGHTNESS_ADJUSTMENTS ? pow(abs(alpha), SharedData::linearLightingSettings.fogAlphaGamma) : alpha;
+		alpha = ENABLE_BRIGHTNESS_ADJUSTMENTS ? pow(abs(alpha), SharedData::linearLightingSettings.fogAlphaGamma) : alpha;
+		float intensity = IsSceneColorDraw() ? SharedData::adaptiveBalanceSettings.fogIntensity : 1.0;
+		return intensity == 1.0 ? alpha : saturate(alpha * intensity);
 	}
 
 	float3 Effect(float3 color)
@@ -372,7 +402,11 @@ namespace Color
 
 	float3 Sky(float3 color)
 	{
+#	if defined(CLOUDS)
+		return ENABLE_BRIGHTNESS_ADJUSTMENTS ? pow(abs(color), SharedData::linearLightingSettings.cloudGamma) : color;
+#	else
 		return ENABLE_BRIGHTNESS_ADJUSTMENTS ? pow(abs(color), SharedData::linearLightingSettings.skyGamma) : color;
+#	endif
 	}
 
 	float3 Water(float3 color)
@@ -415,6 +449,12 @@ namespace Color
 		return ENABLE_LL_COLOR_ADJUSTMENTS ? color : LinearToSkyrimGamma(color);
 	}
 
+	/// Match the ambient brightness adjustment for contributions already in linear space.
+	float3 ApplyAmbientBalanceLinear(float3 color)
+	{
+		return color * IrradianceToLinear(AmbientBalanceMultiplier());
+	}
+
 	float VanillaNormalization()
 	{
 		return ENABLE_LL_COLOR_ADJUSTMENTS ? 1.0 / Math::PI : 1.0f;
@@ -429,10 +469,15 @@ namespace Color
 	const static float ReflectionNormalisationScale = 1.0;
 	const static float PBRLightingCompensation = Math::PI;
 
+	float3 PBRDiffuse(float3 color)
+	{
+		return LinearToSrgb(color);
+	}
+
 	float3 Diffuse(float3 color)
 	{
 #	if defined(TRUE_PBR)
-		return LinearToSrgb(color);
+		return PBRDiffuse(color);
 #	else
 		return color;
 #	endif

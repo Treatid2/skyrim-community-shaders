@@ -46,9 +46,7 @@ namespace LightLimitFixVRHookPolicy
 		const std::uint8_t* a_epilogue,
 		std::size_t a_size) noexcept
 	{
-		// Skyrim VR restores XMM6/XMM7 with a 0x41 REX prefix, followed by
-		// XMM8-XMM12 with 0x45. The former signature incorrectly expected 0x45
-		// for all seven restores.
+		// Skyrim VR restores XMM6/XMM7 with 0x41, then XMM8-XMM12 with 0x45.
 		return a_epilogue != nullptr && a_size >= 45 &&
 		       a_epilogue[20] == 0x41 && a_epilogue[25] == 0x41 &&
 		       a_epilogue[30] == 0x45 && a_epilogue[35] == 0x45 &&

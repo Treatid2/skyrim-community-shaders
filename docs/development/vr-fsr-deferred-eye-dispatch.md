@@ -36,13 +36,6 @@ the original trigger.
 -   Main-pass deferral also preserves reset intent, including flat FSR and
     a foveated first-eye wait. A warm provider that missed a frame must not
     reuse history with motion vectors describing only the latest frame.
--   A deferred main-pass FSR dispatch leaves dynamic resolution enabled and
-    returns control to Skyrim's temporal-AA pass for the current input. Depth
-    upscale, the full-resolution lock, and camera-data publication wait until
-    FSR has produced complete color. Terminal reset and dispatch failures retain
-    `Failed` status while using the same complete current-input fallback; safe
-    presentation does not relabel a failure as `Deferred`. DLSS does not use
-    this FSR-only fallback.
 -   Present ordinary `PresentationStretch` and hold the current compositor
     cycle on presentation-only output, including when intermediate texture
     replacement cleared its admission record. Preserve a conflicting
@@ -51,10 +44,7 @@ the original trigger.
     the planned context count, including both contexts in VR, and admits
     foveated subregions within the allocated context's render/output bounds.
     Lifecycle compatibility still requires the exact display contract,
-    including when a gate changes after foveated admission. The compatibility
-    decision is authoritative for every host continuation: pending, terminal,
-    and runtime-not-selected paths all fail before an incompatible host can be
-    dispatched or exposed as an available fallback.
+    including when a gate changes after foveated admission.
 -   Latch a frame's host fallback when dispatch selects that path. A pure
     provider-readiness wait does not prevent a later compositor cycle in
     the same engine frame from using the now-ready runtime provider.
@@ -78,13 +68,13 @@ classification, and reset protection after output-cache invalidation. A source
 contract also guards the FSR-only main-pass handoff to Skyrim temporal AA
 before the full-resolution lock.
 
-These tests do not execute the complete resolver, hooks, or GPU dispatch in
-Skyrim. Runtime qualification and the generated `csx-render-scale-pr-v1`
-summary remain absent. The existing
-[comparison ledger](vr-render-scale-comparison-ledger.csv) has no new
-candidate measurements from this repair. Runtime validation must still cover
-cold entry and warm reuse, both eyes, repeated cycles, compatible-host and
-runtime-only paths, and the required
+The operator explicitly deferred all builds and tests while another
+workload is running. Runtime qualification and the generated
+`csx-render-scale-pr-v1` summary are therefore absent; the PR remains a
+draft. The existing [comparison ledger](vr-render-scale-ledger.md)
+has no new candidate measurements from this repair. After authorization,
+validation must cover cold entry and warm reuse, both eyes, repeated
+cycles, compatible-host and runtime-only paths, and the required
 [render-scale qualification](render-scale-pr-qualification.md).
 
 The review correction was validated in an ALL Release configuration with the

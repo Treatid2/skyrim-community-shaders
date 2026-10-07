@@ -1,6 +1,9 @@
 #pragma once
 
 #include "Feature.h"
+#ifdef DEVBENCH_BRIDGE_ENABLED
+#	include <atomic>
+#endif
 
 struct GlintParameters
 {
@@ -21,7 +24,6 @@ public:
 	virtual bool SupportsVR() override { return true; }
 	virtual bool IsInMenu() const override { return true; }
 	virtual bool DrawFailLoadMessage() const override { return false; }
-	virtual bool HasFeatureSettings() const override { return false; }
 
 	virtual std::pair<std::string, std::vector<std::string>> GetFeatureSummary() override
 	{
@@ -52,12 +54,14 @@ public:
 	virtual void SaveSettings(json& o_json) override;
 	virtual void LoadSettings(json& o_json) override;
 	virtual void RestoreDefaultSettings() override;
+	virtual void RestoreDefaultSettingsForLoad() override { settings = {}; }
 
 	struct alignas(16) Settings
 	{
 		float VertexAOStrength = 1.0f;
 		uint Enabled = true;
-		uint pad[2]{};
+		uint GrassEnabled = false;
+		uint pad{};
 	};
 	STATIC_ASSERT_ALIGNAS_16(Settings);
 	static_assert(sizeof(Settings) == 16);
@@ -67,6 +71,24 @@ public:
 	bool enableVerboseJsonLogging = false;
 
 	bool TESObjectLAND_SetupMaterial(RE::TESObjectLAND* land);
+	/** Preserve authored grass maps before the engine interns the material. */
+	void SetupGrassMaterial(RE::BSLightingShaderProperty* source, RE::BSLightingShaderProperty* grass);
+	/** Identify authored grass without dereferencing an unregistered PBR material. */
+	[[nodiscard]] bool IsPBRGrassMaterial(const RE::BSShaderMaterial* material) const;
+	/** Bind authored grass through the unchanged native technique and geometry ABI. */
+	void SetupGrassShaderMaterial(RE::BSShader* shader, const RE::BSLightingShaderMaterialBase* material);
+	/** Report whether the requested material path has both lighting features available. */
+	[[nodiscard]] bool IsPBRGrassEnabled() const;
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	/** Enable bounded material-setup counters independently of rendering settings. */
+	void SetGrassDiagnosticsEnabled(bool enabled);
+	/** Guard all additional grass measurement work in diagnostic builds. */
+	[[nodiscard]] bool IsGrassDiagnosticsEnabled() const { return grassDiagnosticsEnabled.load(std::memory_order_relaxed); }
+	/** Snapshot setup counters; these count material binds rather than instances. */
+	[[nodiscard]] json GetGrassDiagnostics() const;
+#endif
+	/** @brief Reports whether the raw lighting technique uses custom material setup instead of native setup. */
+	[[nodiscard]] bool UsesCustomMaterialSetup(uint32_t rawTechnique) const;
 	bool BSLightingShader_SetupMaterial(RE::BSLightingShader* shader, RE::BSLightingShaderMaterialBase const* material);
 
 	void SetShaderResouces(ID3D11DeviceContext* a_context);
@@ -116,7 +138,7 @@ public:
 	{
 		std::array<float, 3> baseColorScale = { 1.f, 1.f, 1.f };
 		float roughness = 1.f;
-		float specularLevel = 1.f;
+		float specularLevel = 0.04f;
 
 		GlintParameters glintParameters;
 	};
@@ -130,4 +152,14 @@ public:
 	PBRMaterialObjectData* selectedPbrMaterialObject = nullptr;
 
 	RE::BGSTextureSet* currentTextureSet = nullptr;
+
+private:
+#ifdef DEVBENCH_BRIDGE_ENABLED
+	std::atomic_bool grassDiagnosticsEnabled{ false };
+	std::atomic_uint64_t grassMaterialsCreated{ 0 };
+	std::atomic_uint64_t grassMaterialSetups{ 0 };
+	std::atomic_uint64_t grassPBRMaterialSetups{ 0 };
+	std::atomic_uint64_t grassShaderFallbackSetups{ 0 };
+	std::atomic_uint64_t grassMissingRmaos{ 0 };
+#endif
 };
