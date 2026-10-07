@@ -162,7 +162,9 @@ The generator and runtime loader both use settings-contract revision 5.
 The Release compatibility regression loads every generated tier to verify
 that the shipping loader accepts its metadata.
 
-The fingerprint covers complete inventoried source files, so edits outside
+The fingerprint hashes UTF-8 source text with CRLF normalized to LF, so
+checkout line endings do not change compatibility metadata. It covers
+complete inventoried source files, so edits outside
 settings methods can also invalidate it. Before refreshing the policy hash,
 review serialized keys, defaults, loading, saving and migrations. If those
 contracts are unchanged, retain the revision and base, regenerate the
