@@ -306,6 +306,7 @@ The response includes at least:
     "limits": {
         "activeSourceCaptures": 1,
         "outstandingCaptureJobs": 2,
+        "outstandingArtifacts": 2,
         "maximumOutputsPerCaptureJob": 4,
         "pendingOperations": 64,
         "maximumOutputsPerFrame": 4,
@@ -315,20 +316,6 @@ The response includes at least:
         "maximumRetainedEvents": 4096,
         "retentionSeconds": 3600
     }
-  },
-  "limits": {
-    "activeSourceCaptures": 1,
-    "outstandingArtifacts": 2,
-    "outstandingCaptureJobs": 2,
-    "maximumOutputsPerCaptureJob": 4,
-    "pendingOperations": 64,
-    "maximumOutputsPerFrame": 4,
-    "maximumSequenceFrames": 10000,
-    "maximumSequenceDurationMs": 3600000,
-    "maximumRetainedTerminalRequests": 256,
-    "maximumRetainedEvents": 4096,
-    "retentionSeconds": 3600
-  }
 }
 ```
 
@@ -1221,13 +1208,15 @@ build. The same burst descriptor is accepted by the comparison builds of CSX
 and Open Shaders:
 
 ```json
-"burst": {
-    "maximumBytes": 536870912,
-    "regions": [
-        { "x": 564, "y": 712, "width": 384, "height": 256 },
-        { "x": 944, "y": 712, "width": 384, "height": 256 },
-        { "x": 1128, "y": 1040, "width": 384, "height": 256 }
-    ]
+{
+    "burst": {
+        "maximumBytes": 536870912,
+        "regions": [
+            { "x": 564, "y": 712, "width": 384, "height": 256 },
+            { "x": 944, "y": 712, "width": 384, "height": 256 },
+            { "x": 1128, "y": 1040, "width": 384, "height": 256 }
+        ]
+    }
 }
 ```
 

@@ -1623,6 +1623,7 @@ endif()
 
 if(BUILD_CONTROLLER_TESTS)
     enable_testing()
+    get_property(_tests_before_controller_tests DIRECTORY PROPERTY TESTS)
     add_test(
         NAME RuntimeDownloadPolicy
         COMMAND
@@ -1669,12 +1670,6 @@ if(BUILD_CONTROLLER_TESTS)
             "${PROJECT_SOURCE_DIR}/tests/aio_install_reset_policy_test.cmake"
     )
     add_test(
-        NAME FeaturePresetCompatibilityContract
-        COMMAND
-            "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}" -P
-            "${PROJECT_SOURCE_DIR}/tests/feature_preset_compatibility_contract_test.cmake"
-    )
-    add_test(
         NAME PerformanceTuningDevBenchContract
         COMMAND
             "${CMAKE_COMMAND}" "-DPROJECT_ROOT=${PROJECT_SOURCE_DIR}" -P
@@ -1687,10 +1682,14 @@ if(BUILD_CONTROLLER_TESTS)
             "${PROJECT_SOURCE_DIR}/tests/vr_menu_ui_contract_test.cmake"
     )
     set_tests_properties(
+        RuntimeDownloadPolicy
+        ScreenshotApiContract
         MenuDevBenchPreflightContract
         PerformanceTuningDevBenchContract
         VRMenuUiContract
         FeaturePresetCompatibilityContract
+        WetternessPuddleStrengthContract
+        AioInstallResetPolicy
         PROPERTIES LABELS "ControllerTests"
     )
     add_test(
@@ -4013,6 +4012,37 @@ if(BUILD_CONTROLLER_TESTS)
     endforeach()
 
     # Tests own their scratch files; inherited user temp paths may be inaccessible.
+    get_property(_registered_controller_tests DIRECTORY PROPERTY TESTS)
+    list(
+        REMOVE_ITEM _registered_controller_tests
+        ${_tests_before_controller_tests}
+    )
+    list(
+        APPEND _registered_controller_tests
+        ControllerTestRegistration
+        ScreenshotDocumentationJson
+    )
+    add_test(
+        NAME ControllerTestRegistration
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/controller_test_registration_test.py"
+            --build-directory "${CMAKE_BINARY_DIR}" --ctest-command
+            "${CMAKE_CTEST_COMMAND}" --expected-tests
+            ${_registered_controller_tests}
+    )
+    add_test(
+        NAME ScreenshotDocumentationJson
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/screenshot_documentation_json_test.py"
+    )
+    set_tests_properties(
+        ControllerTestRegistration
+        ScreenshotDocumentationJson
+        PROPERTIES LABELS "ControllerTests"
+    )
+
     set(_controller_temp "${CMAKE_BINARY_DIR}/test-temp")
     file(MAKE_DIRECTORY "${_controller_temp}")
     get_property(_controller_tests DIRECTORY PROPERTY TESTS)
