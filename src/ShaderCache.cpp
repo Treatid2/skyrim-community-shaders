@@ -217,16 +217,6 @@ namespace SIE
 				a_fingerprint);
 		}
 
-		struct ClosureDigestEntry
-		{
-			std::uint64_t generation;
-			Util::ContentHash::Hash128 closureFingerprint;
-			Util::ContentHash::Hash128 digest;
-		};
-
-		std::unordered_map<std::string, ClosureDigestEntry> g_shaderClosureDigestCache;
-		std::mutex g_shaderClosureDigestCacheMutex;
-
 		std::optional<Util::ContentHash::Hash128> GetShaderContentDigestInternal(
 			const std::filesystem::path& a_path,
 			const std::filesystem::path& a_shadersRoot,

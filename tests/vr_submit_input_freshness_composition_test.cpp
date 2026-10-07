@@ -182,8 +182,23 @@ int main()
 	const auto right = ResolveCurrentEyeIdentity(fallbackAdmission, rejectedBoundary, 1, fallbackAdmission.eyes[1], true);
 	Require(!fallbackProof.IsValid() && left.IsValid() && right.IsValid(),
 		"Rejected stereo proof prevented a correlated current-eye retry");
+	const auto canonicalLeft = ResolveCurrentEyeIdentity(fallbackAdmission, rejectedBoundary, 0, fallbackAdmission.eyes[0]);
+	Require(MatchesCurrentEyeIdentity(left, canonicalLeft),
+		"Canonical current-eye correspondence changed the explicit-proof identity");
+	Require(!ResolveCurrentEyeIdentity(fallbackAdmission, rejectedBoundary, 2, fallbackAdmission.eyes[0]).IsValid(),
+		"Invalid eye indexed the canonical region array");
+	auto mismatchedRegion = fallbackAdmission.eyes[0];
+	++mismatchedRegion.depthOffsetX;
+	Require(!ResolveCurrentEyeIdentity(fallbackAdmission, rejectedBoundary, 0, mismatchedRegion).IsValid(),
+		"Noncanonical guide offset authorized current-eye reuse");
+	auto incompleteRegionAdmission = fallbackAdmission;
+	--incompleteRegionAdmission.eyes[0].right;
+	Require(!ResolveCurrentEyeIdentity(incompleteRegionAdmission, rejectedBoundary, 0, incompleteRegionAdmission.eyes[0]).IsValid(),
+		"Truncated color region authorized a full guide region");
 	auto staleGuideAdmission = fallbackAdmission;
 	--staleGuideAdmission.lastCompletedWorldRenderFrame;
+	Require(!ResolveCurrentEyeIdentity(staleGuideAdmission, rejectedBoundary, 0, staleGuideAdmission.eyes[0]).IsValid(),
+		"Canonical region bypassed guide freshness");
 	Require(!ResolveCurrentEyeIdentity(
 				staleGuideAdmission, rejectedBoundary, 0, staleGuideAdmission.eyes[0], true)
 				.IsValid(),

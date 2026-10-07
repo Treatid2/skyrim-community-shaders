@@ -279,7 +279,6 @@ private:
 		std::mutex mutex;
 		std::condition_variable condition;
 		std::queue<PendingScreenshot> queue;
-		std::vector<ReadbackContextProtection> readbackProtections;
 		std::shared_ptr<CSX::Api::ServiceFoundation> service;
 		std::shared_ptr<ScreenshotApi> api;
 		std::size_t outstandingCount = 0;

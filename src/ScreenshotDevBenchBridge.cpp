@@ -104,7 +104,7 @@ namespace
 		try {
 			const auto request = json::parse(args ? args : "{}");
 			auto* host = static_cast<DevBenchAPI::IDevBenchInterface001*>(context);
-			result = RunOnMainThread([request, host] {
+			result = RunOnMainThread(request, [request, host] {
 				return globals::features::screenshotFeature.HandleReferenceCapture(request, [host](const json& completion) {
 					const auto text = completion.dump();
 					host->EmitEvent("capture.ready", text.c_str());

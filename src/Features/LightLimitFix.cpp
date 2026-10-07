@@ -190,11 +190,6 @@ namespace
 		return GetModuleHandleW(L"EngineFixes.dll") != nullptr;
 	}
 
-	bool IsEngineFixesLoaded() noexcept
-	{
-		return GetModuleHandleW(L"EngineFixes.dll") != nullptr;
-	}
-
 	class VRValidatedObjectGuard : public Xbyak::CodeGenerator
 	{
 	protected:

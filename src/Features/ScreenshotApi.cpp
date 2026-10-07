@@ -2027,7 +2027,7 @@ void ScreenshotApi::FinalizeSequenceLocked(
 	}
 	const auto terminal = manifestWritten ? a_sequence.finalTerminalOutcome :
 	                                        (a_sequence.written == 0 ? "failed" : "failed_partial");
-	TransitionLocked(updatedParent, terminal, "request.terminal", { { "manifestPath", a_sequence.frameManifest && manifestWritten ? json(PathUtf8(a_sequence.finalManifestPath)) : json(nullptr) } });
+	TransitionLocked(updatedParent, terminal, "request.terminal", { { "manifestPath", a_sequence.frameManifest && manifestWritten ? json(Util::PathToUtf8(a_sequence.finalManifestPath)) : json(nullptr) } });
 	parent->second = std::move(updatedParent);
 	a_sequence.directoryLease.reset();
 }
@@ -2195,7 +2195,7 @@ bool ScreenshotApi::DrainManifestResultsLocked()
 						AppendEventLocked(parent->second, result.success ? "packaging.completed" : "packaging.failed", {
 																														   { "generation", result.generation },
 																														   { "final", result.final },
-																														   { "path", PathUtf8(result.destination) },
+																														   { "path", Util::PathToUtf8(result.destination) },
 																														   { "error", result.success ? json(nullptr) : json(result.error) },
 																													   });
 						completed.packagingEventPublished = true;
@@ -2204,13 +2204,13 @@ bool ScreenshotApi::DrainManifestResultsLocked()
 				if (result.final) {
 					if (result.generation == record.finalManifestGeneration) {
 						record.packaging["frameManifest"] = result.success ?
-						                                        json({ { "requested", true }, { "state", "written" }, { "path", PathUtf8(result.destination) } }) :
+						                                        json({ { "requested", true }, { "state", "written" }, { "path", Util::PathToUtf8(result.destination) } }) :
 						                                        json({ { "requested", true }, { "state", "failed" }, { "error", result.error } });
 						FinalizeSequenceLocked(record, &result);
 					}
 				} else if (result.success && result.generation <= record.manifestGeneration) {
 					record.packaging["frameManifest"] = {
-						{ "requested", true }, { "state", "partial" }, { "path", PathUtf8(result.destination) }
+						{ "requested", true }, { "state", "partial" }, { "path", Util::PathToUtf8(result.destination) }
 					};
 				} else if (!result.success) {
 					logger::warn("Screenshot partial manifest checkpoint failed: {}", result.error);
@@ -2304,8 +2304,8 @@ std::optional<ScreenshotApi::DueFrame> ScreenshotApi::PrepareDueFrameLocked(uint
 		const auto requestedWallClock = sequence.nextWallClock;
 		dueFrame.capture["destination"] = {
 			{ "policy", "absolute" },
-			{ "directory", PathUtf8(sequence.directory) },
-			{ "resolvedDirectory", PathUtf8(sequence.directory) },
+			{ "directory", Util::PathToUtf8(sequence.directory) },
+			{ "resolvedDirectory", Util::PathToUtf8(sequence.directory) },
 			{ "baseName", std::format("frame_{:06}", dueFrame.ordinal) },
 			{ "overwrite", "never" },
 		};

@@ -52,6 +52,21 @@ namespace VRSubmitInputReusePolicy
 		return identity.IsValid() ? identity : CurrentEyeIdentity{};
 	}
 
+	/** Derives current-eye correspondence from the canonical full color and guide region. */
+	[[nodiscard]] constexpr CurrentEyeIdentity ResolveCurrentEyeIdentity(
+		const ProducerAdmission& a_source,
+		const SubmitBoundaryIdentity& a_boundary,
+		std::uint32_t a_eye,
+		const EyeRegion& a_region) noexcept
+	{
+		const bool regionCorrespondenceProven = a_eye < a_source.eyes.size() &&
+		                                        a_region.IsValid() &&
+		                                        MatchesEyeRegion(a_source.eyes[a_eye], a_region) &&
+		                                        a_region.right - a_region.left == a_region.depthWidth &&
+		                                        a_region.bottom - a_region.top == a_region.depthHeight;
+		return ResolveCurrentEyeIdentity(a_source, a_boundary, a_eye, a_region, regionCorrespondenceProven);
+	}
+
 	/** Retains independent eye entries while their common outer producer scope stays active. */
 	[[nodiscard]] constexpr bool SharesCurrentEyeProducerScope(
 		const CurrentEyeIdentity& a_latched,
