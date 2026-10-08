@@ -78,6 +78,13 @@ contains a versioned `Preset Compatibility` object with a stable preset ID,
 package version, VR runtime, inclusive minimum `3.19`, exclusive maximum
 `3.20`, and the settings-contract fingerprint used to generate it.
 
+These migrated settings use contract revision `7`, which the preset loader
+accepts exactly. Revision `3` marked presets require regeneration for this
+schema; unmarked user settings retain the existing migration path. Generation
+rejects a policy revision that differs from the loader before publication.
+The focused compatibility test reads all three committed tier files through
+the loader under the declared `CSX 3.19-VR` version range.
+
 CSX validates marked settings before canonicalization, migration, or merge.
 Malformed metadata, an unsupported compatibility-contract version, the wrong
 runtime, or a CSX version outside the declared range rejects the complete user

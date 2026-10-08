@@ -220,6 +220,15 @@ try {
     [System.IO.File]::WriteAllText($isolatedPolicyPath, $baselinePolicyText, $utf8)
 
     $invalidPolicy = $baselinePolicyText | ConvertFrom-Json -Depth 100
+    $invalidPolicy.runtimeSettingsContract.revision = [int]$policy.runtimeSettingsContract.revision + 1
+    Write-JsonFile -Path $isolatedPolicyPath -Value $invalidPolicy
+    $null = Invoke-ExpectedFailure -GeneratorPath $isolatedGenerator -Arguments @{
+        OutputRoot = $outputRoot; ReportPath = $reportPath
+    } -Pattern 'contract revision differs from the preset loader' -Message 'A preset revision unsupported by the loader was accepted.'
+    Assert-True ($baselineSnapshot -ceq (Get-PublicationSnapshot -OutputRoot $outputRoot -ReportPath $reportPath)) 'A rejected loader revision mutated the published generation.'
+    [System.IO.File]::WriteAllText($isolatedPolicyPath, $baselinePolicyText, $utf8)
+
+    $invalidPolicy = $baselinePolicyText | ConvertFrom-Json -Depth 100
     $invalidPolicy.tierOwnedPaths[0] = @('menu', 'UI Mode')
     foreach ($tier in $invalidPolicy.tiers.psobject.Properties) {
         $tier.Value.overrides[0].path = @('menu', 'UI Mode')

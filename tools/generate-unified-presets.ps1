@@ -499,6 +499,13 @@ function Get-RuntimeSettingsContractHash {
 }
 
 function Assert-RuntimeSettingsContract {
+    $loaderHeader = Resolve-RepositoryPath -RelativePath 'src/PresetCompatibility.h'
+    $loaderText = [System.IO.File]::ReadAllText($loaderHeader, [System.Text.Encoding]::UTF8)
+    $loaderRevision = [regex]::Matches($loaderText, '\bkSettingsContractRevision\s*=\s*([0-9]+)\s*;')
+    if ($loaderRevision.Count -ne 1 -or
+        [uint32]$loaderRevision[0].Groups[1].Value -ne $policy.runtimeSettingsContract.revision) {
+        throw 'Runtime settings contract revision differs from the preset loader.'
+    }
     $actual = Get-RuntimeSettingsContractHash
     if ($actual -cne [string]$policy.runtimeSettingsContract.sourceTreeSha256) {
         throw "Runtime settings contract changed: expected $($policy.runtimeSettingsContract.sourceTreeSha256), got $actual. Review the settings schema, refresh the base when required, and update the contract deliberately."
