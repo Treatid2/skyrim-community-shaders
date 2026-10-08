@@ -2131,7 +2131,10 @@ if(BUILD_CONTROLLER_TESTS)
         preset_compatibility_test
         PRIVATE nlohmann_json::nlohmann_json
     )
-    add_test(NAME PresetCompatibility COMMAND preset_compatibility_test)
+    add_test(
+        NAME PresetCompatibility
+        COMMAND preset_compatibility_test "${PROJECT_SOURCE_DIR}"
+    )
     set_tests_properties(
         PresetCompatibility
         PROPERTIES LABELS "ControllerTests"
