@@ -43,6 +43,10 @@ bindings, or compiler controls. Those values are inherited identically from
 the base/common layer. This prevents unnoticed divergence between tiers even
 though each MGO package must ultimately contain a complete settings file.
 
+The runtime source fingerprint uses UTF-8 text with CRLF normalized to LF, so
+Windows and Linux checkouts share the same identity. Other source-content changes
+still invalidate the contract and require a reviewed fingerprint refresh.
+
 The generator rejects:
 
 -   a base whose SHA-256 does not match the policy;
@@ -74,6 +78,13 @@ contains a versioned `Preset Compatibility` object with a stable preset ID,
 package version, VR runtime, inclusive minimum `3.19`, exclusive maximum
 `3.20`, and the settings-contract fingerprint used to generate it.
 
+These migrated settings use contract revision `7`, which the preset loader
+accepts exactly. Revision `3` marked presets require regeneration for this
+schema; unmarked user settings retain the existing migration path. Generation
+rejects a policy revision that differs from the loader before publication.
+The focused compatibility test reads all three committed tier files through
+the loader under the declared `CSX 3.19-VR` version range.
+
 CSX validates marked settings before canonicalization, migration, or merge.
 Malformed metadata, an unsupported compatibility-contract version, the wrong
 runtime, or a CSX version outside the declared range rejects the complete user
@@ -95,6 +106,8 @@ independent of command-line paths. Before writing, the generator resolves path
 aliases and proves that all outputs are distinct from the policy, base,
 generator, focused test, workflow, documentation, refresh source, and complete
 runtime-source inventory.
+Native identity queries use extended-length Windows paths so deeply nested
+outputs retain the same alias and publication checks.
 
 A normal generation records a durable transaction journal before staging,
 backs up every existing target, publishes all seven outputs, verifies their

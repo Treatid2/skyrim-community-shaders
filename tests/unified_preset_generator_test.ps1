@@ -124,6 +124,34 @@ try {
     & $isolatedGenerator -OutputRoot $outputRoot -ReportPath $reportPath | Out-Null
     Assert-True $? 'Temporary unified preset generation failed.'
 
+    foreach ($lineEnding in "`r`n", "`n") {
+        foreach ($sourcePath in $policy.runtimeSettingsContract.sources) {
+            $fixtureSource = Join-Path $fixtureRoot ([string]$sourcePath)
+            $sourceText = [System.IO.File]::ReadAllText($fixtureSource, $utf8).Replace("`r`n", "`n")
+            [System.IO.File]::WriteAllText($fixtureSource, $sourceText.Replace("`n", $lineEnding), $utf8)
+        }
+        & $isolatedGenerator -OutputRoot $outputRoot -ReportPath $reportPath -Check | Out-Null
+        Assert-True $? 'Checkout line endings changed the runtime settings contract.'
+    }
+
+    $longFixtureRoot = Join-Path $scratch ('long-' + ('p' * 180))
+    foreach ($relativePath in @('tools\generate-unified-presets.ps1',
+            'docs\development\unified-preset-policy.json',
+            'docs\development\unified-preset-templates\Base.SettingsUser.json') +
+        @($policy.runtimeSettingsContract.sources)) {
+        Copy-RepositoryFile -RelativePath ([string]$relativePath) -FixtureRoot $longFixtureRoot
+    }
+    $longGenerator = Join-Path $longFixtureRoot 'tools\generate-unified-presets.ps1'
+    $longOutputRoot = Join-Path $longFixtureRoot 'outputs'
+    $longReportPath = Join-Path $longFixtureRoot 'report.json'
+    $longSettingsPath = Join-Path $longOutputRoot ($policy.tiers.Performance.outputDirectory +
+        '\SKSE\Plugins\CommunityShaders\SettingsUser.json')
+    Assert-True ($longSettingsPath.Length -gt 260) 'The long-path fixture did not exceed MAX_PATH.'
+    & $longGenerator -OutputRoot $longOutputRoot -ReportPath $longReportPath | Out-Null
+    Assert-True $? 'Long-path preset generation failed.'
+    & $longGenerator -OutputRoot $longOutputRoot -ReportPath $longReportPath -Check | Out-Null
+    Assert-True $? 'Long-path physical identity verification failed.'
+
     $tierProperties = @($policy.tiers.psobject.Properties)
     Assert-True ($tierProperties.Count -eq 3) 'The policy must define exactly three tiers.'
     Assert-True (($tierProperties.Name -join '|') -ceq 'Performance|Balanced|Quality') 'The tier order changed unexpectedly.'
@@ -189,6 +217,15 @@ try {
         OutputRoot = $outputRoot; ReportPath = $reportPath
     } -Pattern 'Preset compatibility must target' -Message 'An invalid preset compatibility range was accepted.'
     Assert-True ($baselineSnapshot -ceq (Get-PublicationSnapshot -OutputRoot $outputRoot -ReportPath $reportPath)) 'A rejected compatibility contract mutated the published generation.'
+    [System.IO.File]::WriteAllText($isolatedPolicyPath, $baselinePolicyText, $utf8)
+
+    $invalidPolicy = $baselinePolicyText | ConvertFrom-Json -Depth 100
+    $invalidPolicy.runtimeSettingsContract.revision = [int]$policy.runtimeSettingsContract.revision + 1
+    Write-JsonFile -Path $isolatedPolicyPath -Value $invalidPolicy
+    $null = Invoke-ExpectedFailure -GeneratorPath $isolatedGenerator -Arguments @{
+        OutputRoot = $outputRoot; ReportPath = $reportPath
+    } -Pattern 'contract revision differs from the preset loader' -Message 'A preset revision unsupported by the loader was accepted.'
+    Assert-True ($baselineSnapshot -ceq (Get-PublicationSnapshot -OutputRoot $outputRoot -ReportPath $reportPath)) 'A rejected loader revision mutated the published generation.'
     [System.IO.File]::WriteAllText($isolatedPolicyPath, $baselinePolicyText, $utf8)
 
     $invalidPolicy = $baselinePolicyText | ConvertFrom-Json -Depth 100
@@ -337,7 +374,7 @@ try {
     $crashSignalPath = Join-Path $scratch 'crash-owner.ready.txt'
     $crashStdoutPath = Join-Path $scratch 'crash-owner.stdout.txt'
     $crashStderrPath = Join-Path $scratch 'crash-owner.stderr.txt'
-    $crashOwner = Start-Process -FilePath 'pwsh' -ArgumentList @(
+    $crashOwner = Start-Process -FilePath 'pwsh' -WindowStyle Hidden -ArgumentList @(
         '-NoProfile', '-File', $isolatedGenerator,
         '-OutputRoot', $outputRoot,
         '-ReportPath', $reportPath,
@@ -368,7 +405,7 @@ try {
     $fixtureAlias = Join-Path $scratch 'repo-alias'
     New-Item -ItemType Junction -Path $fixtureAlias -Target $fixtureRoot | Out-Null
     $aliasGenerator = Join-Path $fixtureAlias 'tools\generate-unified-presets.ps1'
-    $lockOwner = Start-Process -FilePath 'pwsh' -ArgumentList @(
+    $lockOwner = Start-Process -FilePath 'pwsh' -WindowStyle Hidden -ArgumentList @(
         '-NoProfile', '-File', $isolatedGenerator,
         '-OutputRoot', $outputRoot,
         '-ReportPath', $reportPath,

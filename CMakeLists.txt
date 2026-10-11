@@ -2123,6 +2123,11 @@ if(BUILD_CONTROLLER_TESTS)
         src/PresetCompatibility.cpp
     )
     target_compile_features(preset_compatibility_test PRIVATE cxx_std_23)
+    if(MSVC)
+        target_compile_options(preset_compatibility_test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(preset_compatibility_test PRIVATE -UNDEBUG)
+    endif()
     target_include_directories(
         preset_compatibility_test
         PRIVATE "${PROJECT_SOURCE_DIR}/src"
@@ -2131,7 +2136,10 @@ if(BUILD_CONTROLLER_TESTS)
         preset_compatibility_test
         PRIVATE nlohmann_json::nlohmann_json
     )
-    add_test(NAME PresetCompatibility COMMAND preset_compatibility_test)
+    add_test(
+        NAME PresetCompatibility
+        COMMAND preset_compatibility_test "${PROJECT_SOURCE_DIR}"
+    )
     set_tests_properties(
         PresetCompatibility
         PROPERTIES LABELS "ControllerTests"
