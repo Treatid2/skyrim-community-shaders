@@ -17,6 +17,10 @@ namespace CSX::ScreenshotPolicy
 		Sequence
 	};
 	inline constexpr std::uint32_t MaximumPendingOperations = 64;
+	inline constexpr std::uint32_t MaximumPreparationJobs = 64;
+	inline constexpr std::uint32_t MaximumManifestJobs = 256;
+	inline constexpr std::uint32_t MaximumPartialManifestJobs = MaximumManifestJobs - MaximumPendingOperations;
+	inline constexpr std::uint32_t MaximumRetiredManifestChains = 256;
 	inline constexpr std::uint32_t MaximumOutputsPerFrame = 4;
 	inline constexpr std::uint32_t MaximumSequenceDurationMs = 3'600'000;
 	inline constexpr std::uint32_t MaximumSequenceSpanFrames = 216'000;

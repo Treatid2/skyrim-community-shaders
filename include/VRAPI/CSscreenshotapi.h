@@ -6,8 +6,8 @@ namespace CSX::ScreenshotAPI
 {
 	inline constexpr char ServiceName[] = "csx.screenshot";
 	inline constexpr std::uint32_t ServiceMajor = 1;
-	inline constexpr std::uint32_t ServiceMinor = 0;
-	inline constexpr std::uint32_t SchemaRevision = 1;
+	inline constexpr std::uint32_t ServiceMinor = 1;
+	inline constexpr std::uint32_t SchemaRevision = 2;
 	inline constexpr std::uint32_t MaximumRequestBytes = 256u * 1024u;
 
 	/** Transport-level result. Command acceptance and operation state are in the JSON response. */

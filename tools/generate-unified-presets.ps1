@@ -83,7 +83,13 @@ public static class UnifiedPresetPathIdentity
 
     public static string ResolveExisting(string path)
     {
-        using (var handle = CreateFileW(path, FileReadAttributes, ShareAll, IntPtr.Zero,
+        // Physical identity checks must work beyond the legacy path-length limit.
+        var nativePath = path;
+        if (!nativePath.StartsWith(@"\\?\", StringComparison.Ordinal))
+            nativePath = nativePath.StartsWith(@"\\", StringComparison.Ordinal)
+                ? @"\\?\UNC\" + nativePath.Substring(2)
+                : @"\\?\" + nativePath;
+        using (var handle = CreateFileW(nativePath, FileReadAttributes, ShareAll, IntPtr.Zero,
             OpenExisting, BackupSemantics, IntPtr.Zero))
         {
             if (handle.IsInvalid)
@@ -485,7 +491,8 @@ function Get-RuntimeSettingsContractHash {
         if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
             throw "Runtime settings contract source is absent: $sourcePath"
         }
-        "${sourcePath}`0$((Get-FileHash -Algorithm SHA256 -LiteralPath $resolved).Hash)"
+        $sourceText = [System.IO.File]::ReadAllText($resolved, [System.Text.Encoding]::UTF8).Replace("`r`n", "`n")
+        "${sourcePath}`0$(Get-TextSha256 $sourceText)"
     }
     $inventoryRecord = "inventory`0$(Get-TextSha256 (ConvertTo-CanonicalJson $contract.inventory))"
     Get-TextSha256 (((@($records | Sort-Object) + $inventoryRecord) -join "`n") + "`n")

@@ -86,11 +86,15 @@ endforeach()
 foreach(_required_contract_text IN ITEMS
     runtime_session persistent_user settings_default file_reference
     maximumOutputsPerFrame retentionSeconds manifest_failed
-	DescribeCommittedArtifact BuildProvenance::GetProducer artifact_hash_failed
+	DescribeProducerArtifact BuildProvenance::GetProducer artifact_hash_failed
+	a_committed a_committed.bytes a_committed.sha256
 	terminalOutcome completedUtc fallbacksPresent cancelled manifestChildren
 	outstandingArtifacts outstandingCaptureJobs captureJobCapacity
 	commandAccepted finalizationCommitted sequence.abort_requested
 	ManifestResultLoop manifestResultDrainer results.splice applicationFailures
+	PreparationWorkerLoop preparationPending destination_preparation_failed
+	destinationPreparationJobs manifestPublicationJobs partialManifestPublicationJobs
+	destinationPreparationOutstanding manifestPublicationOutstanding
 	packagingEventPublished is_nothrow_move_assignable_v
 	manifest_result_publication_retried condition.notify_all
 	nextApplicationAttempt resultApplicationActive PublicationRetryDelay
@@ -204,6 +208,33 @@ string(FIND "${_plugin_lifecycle}" "case SKSE::MessagingInterface::kPostLoad:" _
 string(FIND "${_plugin_lifecycle}" "ScreenshotDevBenchBridge::Install();" _early_install_position)
 if(_postload_position EQUAL -1 OR _early_install_position LESS _postload_position)
     message(FATAL_ERROR "Screenshot DevBench discovery must be attempted during PostLoad")
+endif()
+
+foreach(_custody_contract
+    "DirectoryLease::CreateExclusive(resolved, work.requestId, approvedRoot)"
+    "PathUtf8(work.directoryLease->Destination())"
+    "sequence.directoryLease = result.directoryLease"
+    "job.directoryLease->VerifyDirectChild(job.destination)"
+    ".directoryLease = a_sequence.directoryLease"
+)
+    string(FIND "${_implementation}" "${_custody_contract}" _custody_position)
+    if(_custody_position EQUAL -1)
+        message(FATAL_ERROR "Screenshot custody contract missing: ${_custody_contract}")
+    endif()
+endforeach()
+
+
+foreach(_forbidden_custody_text IN ITEMS DescribeCommittedArtifact FileSha256 "file_size(a_path")
+    string(FIND "${_implementation}" "${_forbidden_custody_text}" _custody_position)
+    if(NOT _custody_position EQUAL -1)
+        message(FATAL_ERROR "Screenshot receipt reopens producer custody by pathname: ${_forbidden_custody_text}")
+    endif()
+endforeach()
+file(READ "${PROJECT_ROOT}/src/Features/ScreenshotFeature.cpp" _feature_implementation)
+string(REGEX MATCHALL "&\\*committed" _producer_forwardings "${_feature_implementation}")
+list(LENGTH _producer_forwardings _producer_forwarding_count)
+if(NOT _producer_forwarding_count EQUAL 2)
+    message(FATAL_ERROR "Both screenshot encoder paths must forward producer metadata")
 endif()
 
 message(STATUS "Screenshot API contract, schemas, goldens, migration, actions, and journal events are coherent")

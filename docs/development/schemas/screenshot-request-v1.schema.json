@@ -74,6 +74,7 @@
         "outputs": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "$ref": "#/$defs/output" } },
         "destination": {
           "type": "object",
+          "description": "Relative sequence destinations are prepared from a retained approved root, reject reparse components and report the actual opened parent. Absolute destinations remain unrestricted.",
           "properties": {
             "policy": { "enum": ["settings_default", "game_relative", "absolute"] },
             "directory": { "type": ["string", "null"] },

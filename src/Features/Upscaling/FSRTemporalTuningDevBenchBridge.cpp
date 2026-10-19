@@ -58,7 +58,7 @@ namespace
 			return { { "error", "persist must be boolean" } };
 		const auto patch = args.at("settings");
 		const auto persist = args.value("persist", false);
-		return CSX::Api::RunDevBenchMainThreadTask(SKSE::GetTaskInterface(), [patch, persist]() -> json {
+		auto dispatch = CSX::Api::RunDevBenchMainThreadTask(SKSE::GetTaskInterface(), [patch, persist]() -> json {
 			auto& upscaling = globals::features::upscaling;
 			auto settings = upscaling.settings.fsrTemporalTuning;
 			if (const auto* error = FSRTemporalTuningPolicy::ApplySettingsPatch(patch, settings))
@@ -74,6 +74,7 @@ namespace
 				result["error"] = "settings queued in memory but saving the user configuration failed";
 			return result;
 		});
+		return std::move(dispatch.response);
 	}
 
 	void ToolHandler(void*, const char* argsJson, void* sink, DevBenchAPI::WriteFn write) noexcept
