@@ -2,7 +2,8 @@ name: "Controller baseline for PR 115"
 
 on:
     push:
-        branches: [codex/ci-baseline-957ff4-pr115-20261116]
+        branches:
+            - codex/ci-baseline-957ff4-pr115-20261116
 
 permissions:
     contents: read
