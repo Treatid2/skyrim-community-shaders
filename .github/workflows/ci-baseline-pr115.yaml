@@ -1,0 +1,21 @@
+name: "Controller baseline for PR 115"
+
+on:
+    push:
+        branches: [codex/ci-baseline-957ff4-pr115-20261116]
+
+permissions:
+    contents: read
+
+jobs:
+    baseline:
+        name: "Exact main-VR 957ff4f1"
+        uses: ParticleTroned/skyrim-community-shaders/.github/workflows/_shared-build.yaml@957ff4f17e34a4efc4f56553b79355eb32014dbb
+        with:
+            repository: ParticleTroned/skyrim-community-shaders
+            ref: 957ff4f17e34a4efc4f56553b79355eb32014dbb
+            run-cpp: true
+            run-shader-validation: false
+            run-shader-tests: false
+            hlsl-should-build: "false"
+            shader-tests-should-build: "false"
